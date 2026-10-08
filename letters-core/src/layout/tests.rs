@@ -2,7 +2,7 @@
 // line, so an A4 page with 1in margins holds 75 chars × 46 lines.
 
 use super::*;
-use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell};
+use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
 
 const LINE: f64 = 15.0;
 const LINES_PER_PAGE: usize = 46;
@@ -373,6 +373,28 @@ fn an_aligned_header_and_footer_sit_where_the_document_puts_them() {
     assert!((hx + hn as f64 * 6.0 - right).abs() < 1e-6, "ends at the right margin: {hx}");
     let (fx, fn_) = line(Source::Footer);
     assert!((fx + fn_ as f64 * 3.0 - page.width_pt / 2.0).abs() < 1e-6, "centred: {fx}");
+}
+
+/// A table's own cell padding: the row is as tall as its text and the
+/// padding above and below it, the text inset by the left padding, and
+/// the table out to the left by it so the text lines up with the margin.
+#[test]
+fn a_tables_cell_padding_sizes_its_rows_and_insets_its_text() {
+    let cells = |d: &Document| -> Vec<(f64, f64, f64)> {
+        lay(d).pages[0].items.iter().filter_map(|i| match i { Item::Cell { x_pt, y_pt, height_pt, .. } => Some((*x_pt, *y_pt, *height_pt)), _ => None }).collect()
+    };
+    let text_x = |d: &Document| lay(d).pages[0].lines().find_map(|l| match l { Item::Line { text, x_pt, top_pt, .. } if text == "cell" => Some((*x_pt, *top_pt)), _ => None }).unwrap();
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.paragraphs[0].runs = vec![Run::plain("cell")];
+    let plain = cells(&d)[0];
+    assert_eq!(text_x(&d).0, 72.0);
+    d.table_padding.insert(table, CellPadding { top_pt: 6.0, bottom_pt: 4.0, left_pt: 9.0, right_pt: 9.0 });
+    let padded = cells(&d)[0];
+    assert_eq!(padded.0, 72.0 - 9.0, "the table sits out by its left padding");
+    assert!((padded.2 - (plain.2 + 10.0)).abs() < 1e-9, "6pt above and 4pt below: {padded:?} vs {plain:?}");
+    let (x, top) = text_x(&d);
+    assert_eq!((x, top), (72.0, padded.1 + 6.0), "text inside the padding, at the margin");
 }
 
 #[test]
