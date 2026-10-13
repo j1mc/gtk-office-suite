@@ -41,7 +41,7 @@ impl Listener<Hint> for HistoryActionListener {
 // File I/O lives in tables_core::io; window code only adapts AppState.
 use tables_core::io::load_workbook;
 use crate::persistence::{
-    attach_xlsx_sidecars, autosave_bytes, autosave_state_dir, next_doc_id, save_engine_to_xlsx,
+    attach_xlsx_sidecars, autosave_bytes, autosave_state_dir, next_doc_id,
     unsupported_save_format_message,
 };
 
@@ -1547,25 +1547,10 @@ impl TablesWindow {
                     let existing_path = path_state.borrow().clone();
                     if let Some(path) = existing_path {
                         let path_str = path.to_string_lossy().into_owned();
-                        let (s2, ctl, slot, force_close, win2, target) =
-                            (s.clone(), ctl.clone(), slot.clone(), force_close.clone(), win.clone(), path_str.clone());
-                        crate::loss_ui::save_after_asking(&win, Some(&path_str), &path_str, &s.borrow(), move || {
-                        match save_engine_to_xlsx(&target, Some(&target), &s2.borrow()) {
-                            Ok(()) => {
-                                ctl.borrow_mut().mark_clean();
-                                slot.clear_or_report();
-                                force_close.set(true);
-                                win2.close();
-                            }
-                            Err(e) => {
-                                let err = adw::AlertDialog::builder()
-                                    .heading(suite_common::i18n("Could Not Save File"))
-                                    .body(&e)
-                                    .build();
-                                err.add_response("ok", &suite_common::i18n("_OK"));
-                                err.present(Some(&win2));
-                            }
-                        }
+                        let win2 = win.clone();
+                        crate::persistence::request_save(win, Some(&path_str), &path, &s, &ctl, &slot, move || {
+                            force_close.set(true);
+                            win2.close();
                         });
                         return;
                     }
@@ -1584,29 +1569,12 @@ impl TablesWindow {
                     dlg.save(Some(&win), None::<&gio::Cancellable>, move |result| {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, Some(&win2)) {
-                                let path_str = path.to_string_lossy().to_string();
-                                let (s2, ctl, slot, force_close, path_state, win3, target) = (
-                                    s.clone(), ctl.clone(), slot.clone(), force_close.clone(),
-                                    path_state.clone(), win2.clone(), path_str.clone(),
-                                );
-                                crate::loss_ui::save_after_asking(&win2, None, &path_str, &s.borrow(), move || {
-                                match save_engine_to_xlsx(&target, None, &s2.borrow()) {
-                                    Ok(()) => {
-                                        *path_state.borrow_mut() = Some(path);
-                                        ctl.borrow_mut().mark_clean();
-                                        slot.clear_or_report();
-                                        force_close.set(true);
-                                        win3.close();
-                                    }
-                                    Err(e) => {
-                                        let err = adw::AlertDialog::builder()
-                                            .heading(suite_common::i18n("Could Not Save File"))
-                                            .body(&e)
-                                            .build();
-                                        err.add_response("ok", &suite_common::i18n("_OK"));
-                                        err.present(Some(&win3));
-                                    }
-                                }
+                                let win3 = win2.clone();
+                                let save_path = path.clone();
+                                crate::persistence::request_save(win2, None, &save_path, &s, &ctl, &slot, move || {
+                                    *path_state.borrow_mut() = Some(path);
+                                    force_close.set(true);
+                                    win3.close();
                                 });
                             }
                         }
@@ -1759,32 +1727,13 @@ impl TablesWindow {
                     move |result: Result<gio::File, glib::Error>| {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, Some(&w2)) {
-                                let path_str = path.to_string_lossy().to_string();
                                 let source = path_state.borrow().as_ref().map(|p| p.to_string_lossy().into_owned());
-                                let (s, ctl, slot, path_state, w3) = (s.clone(), ctl.clone(), slot.clone(), path_state.clone(), w2.clone());
-                                let target = path_str.clone();
-                                let source_for_carry = source.clone();
-                                crate::loss_ui::save_after_asking(&w2, source.as_deref(), &path_str, &s.clone().borrow(), move || {
-                                let ss = s.borrow();
-                                match save_engine_to_xlsx(&target, source_for_carry.as_deref(), &ss) {
-                                    Ok(()) => {
-                                        let settings = gtk4::gio::Settings::new("org.tunaos.tables");
-                                        suite_common::push_recent_file(&settings, &path.to_string_lossy());
-                                        drop(ss);
-                                        *path_state.borrow_mut() = Some(path);
-                                        ctl.borrow_mut().mark_clean();
-                                        slot.clear_or_report();
-                                    }
-                                    Err(e) => {
-                                        let err = adw::AlertDialog::builder()
-                                            .heading(suite_common::i18n("Could Not Save File"))
-                                            .body(&e)
-                                            .build();
-                                        err.add_response("ok", &suite_common::i18n("_OK"));
-                                        err.set_default_response(Some("ok"));
-                                        err.present(Some(&w3));
-                                    }
-                                }
+                                let save_path = path.clone();
+                                let target_name = path.to_string_lossy().to_string();
+                                crate::persistence::request_save(w2, source.as_deref(), &save_path, &s, &ctl, &slot, move || {
+                                    let settings = gtk4::gio::Settings::new("org.tunaos.tables");
+                                    suite_common::push_recent_file(&settings, &target_name);
+                                    *path_state.borrow_mut() = Some(path);
                                 });
                             }
                         }
@@ -1811,10 +1760,7 @@ impl TablesWindow {
                 // same name under a writable extension.
                 let path_str = path.to_string_lossy().to_string();
                 if !tables_core::io::is_writable_format(&path_str) {
-                    let prompt = adw::AlertDialog::builder()
-                        .heading(suite_common::i18n("Cannot Save in This Format"))
-                        .body(unsupported_save_format_message(&path_str))
-                        .build();
+                    let prompt = adw::AlertDialog::new(Some(&suite_common::i18n("Cannot Save in This Format")), Some(&unsupported_save_format_message(&path_str)));
                     prompt.add_response("cancel", &suite_common::i18n("_Cancel"));
                     prompt.add_response("save-as", &suite_common::i18n("_Save As…"));
                     prompt.set_response_appearance(
@@ -1822,35 +1768,20 @@ impl TablesWindow {
                     prompt.set_default_response(Some("save-as"));
                     prompt.set_close_response("cancel");
                     let app_for_prompt = app_for_save.clone();
-                    prompt.connect_response(None, move |_, response| {
+                    let w_for_prompt = w.clone();
+                    prompt.choose(Some(&w_for_prompt), None::<&gio::Cancellable>, move |response| {
                         if response == "save-as" {
                             app_for_prompt.activate_action("save-file-as", None);
                         }
                     });
-                    prompt.present(Some(&w));
                     return;
                 }
                 // Ask first when the save would drop content the file
                 // holds (#1272); cancelling writes nothing.
-                let (s2, ctl, slot, w2, target) = (s.clone(), ctl.clone(), slot.clone(), w.clone(), path_str.clone());
-                crate::loss_ui::save_after_asking(&w, Some(&path_str), &path_str, &s.borrow(), move || {
-                match save_engine_to_xlsx(&target, Some(&target), &s2.borrow()) {
-                    Ok(()) => {
-                        let settings = gtk4::gio::Settings::new("org.tunaos.tables");
-                        suite_common::push_recent_file(&settings, &target);
-                        ctl.borrow_mut().mark_clean();
-                        slot.clear_or_report();
-                    }
-                    Err(e) => {
-                        let err = adw::AlertDialog::builder()
-                            .heading(suite_common::i18n("Could Not Save File"))
-                            .body(&e)
-                            .build();
-                        err.add_response("ok", &suite_common::i18n("_OK"));
-                        err.set_default_response(Some("ok"));
-                        err.present(Some(&w2));
-                    }
-                }
+                let target = path_str.clone();
+                crate::persistence::request_save(w.clone(), Some(&path_str), std::path::Path::new(&path_str), &s, &ctl, &slot, move || {
+                    let settings = gtk4::gio::Settings::new("org.tunaos.tables");
+                    suite_common::push_recent_file(&settings, &target);
                 });
             });
             app.add_action(&act);

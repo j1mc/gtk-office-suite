@@ -3053,6 +3053,18 @@ class TablesFormatSafeSaveMixin(TablesCellEntryMixin):
         name_entry.text = out_path
         self.wait_until(lambda: self._showing("push button", "Save"), bool,
                         description="the dialog's Save button").do_action(0)
+        if self.fixture.endswith(".xls"):
+            # TBL-001: the binary original cannot be enumerated, so Save As
+            # asks first. The confirmation names the target loss and that
+            # the original stays untouched; Save Anyway writes the copy.
+            self.wait_for_node(name="Save Without This Content?")
+            self.wait_until(
+                lambda: self.app.findChild(
+                    lambda n: n.roleName == "label" and n.name and "keeps them untouched" in n.name,
+                    retry=False, requireResult=False),
+                bool, description="Save As to say the original stays untouched")
+            self.wait_until(lambda: self._showing("push button", "Save Anyway"), bool,
+                            description="the Save Anyway button").do_action(0)
 
         def saved():
             try:
@@ -3230,6 +3242,14 @@ class TablesLossQuestionSmoke(TablesCellEntryMixin, BaseGUITestCase):
 
         rawinput.keyCombo("<Control>s")
         self.wait_for_node(name="Save Without This Content?")
+        # TBL-001: the question names the affected part and what happens
+        # to it, not just the kind of content.
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.roleName == "label" and n.name
+                and "xl/vbaProject.bin" in n.name and "macros aren't kept" in n.name,
+                retry=False, requireResult=False),
+            bool, description="the question to name the affected part and consequence")
         self._button("Cancel").do_action(0)
         self.wait_until(lambda: self._showing("push button", "Save Anyway"), lambda n: n is None,
                         description="the question to close")

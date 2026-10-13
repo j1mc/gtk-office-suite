@@ -150,6 +150,14 @@ class FileCorpusJourney(BaseGUITestCase):
         entry.text = str(destination)
         button = tree.root.findChild(lambda node: node.name == "Save" and node.roleName == "push button")
         button.do_action(0)
+        if self.app_name == "tables" and self.fixture["format"] == "xls":
+            # A binary .xls source cannot be inspected, so Save As honestly
+            # asks before leaving its uninspectable content behind (TBL-001);
+            # confirming writes the edit without the .xls-only content.
+            self.wait_for_node(name="Save Without This Content?")
+            self.wait_for_condition(lambda: tree.root.findChild(
+                lambda n: n.name == "Save Anyway" and n.roleName == "push button"),
+                description="Save Anyway on the loss question").do_action(0)
         self.wait_for_file(str(destination))
         # A processed snapshot action is a main-loop barrier after synchronous save;
         # file existence alone can precede completion of the writer.
