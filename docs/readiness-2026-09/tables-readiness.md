@@ -73,7 +73,9 @@ WorkbookController remains the sole mutation gateway. Stable sheet identities bi
       Branch `work/roadmap-checkpoint-readiness` adds controller-level cross-tab pivots: `col_fields` now form
       deterministic pivot columns; `pivot_and_protection_tests` verifies cell placement, XLSX result-value round-trip,
       and a compatibility warning that the pivot definition is not retained. Two `SEQUENCE` engine regressions verify
-      visible spill values and `#SPILL!` when occupied cells block output. Targeted local tests pass; CI is pending.
+      visible spill values and `#SPILL!` when occupied cells block output. Local targeted tests and CI run 38377144141 pass:
+      workspace check/clippy/nextest/docs, interop corpus, Python validators, and all three Flatpak app builds. Its RustSec
+      advisory gate fails on RUSTSEC-2024-0449 through Typst YAML loading; see #1549. No render-lab PR comparison has run yet.
       This remains open: pivot controls are not exposed in the GUI, chart/protection format coverage is incomplete, and
       the upstream-dependent dynamic-array function limits are not yet enumerated.
 
