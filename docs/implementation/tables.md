@@ -32,12 +32,13 @@ Read these before implementing a package:
 coverage, chart-render evidence and atomic protection rejection. The historical
 protection operation-boundary evidence is `af1ef767` and
 [GUI run 38426268309](https://github.com/tuna-os/gtk-office-suite/actions/runs/38426268309).
-The later protection persistence candidate is **PR #1552, `add64900`, on
-`work/tables-protection-persistence`; CI pending when this specification was
-written**. Its importer/exporter, loss warnings, budget additions and GUI test
-were inspected while that branch was present. They are not assumed merged into
-this documentation branch and are not certified. TBL-004 explicitly consumes
-that candidate rather than asking another implementer to recreate it.
+  Protection persistence **PR #1552 merged as `5485dd97`** (evidence revision
+  `3b97d980`, [GUI run 38439078711](https://github.com/tuna-os/gtk-office-suite/actions/runs/38439078711)
+  smoke pass plus core `test`, oracle, tables corpus, interop and all three Flatpak builds green; only the
+  pre-existing RustSec advisory #1549 fails, unchanged by that PR). Its importer/exporter, loss warnings, budget
+  additions, GUI journeys, undo/redo accessible-description refresh, readiness evidence and
+  `tables.protection.persistence` ledger entry are on main. TBL-004 consumes that merged work rather than asking
+  another implementer to recreate it.
 
 No builds, tests, formatters, reference applications or manual Orca sessions were
 run to author this specification. Existing test names below are inspected test
@@ -281,16 +282,16 @@ No general Excel-table authoring or arbitrary conditional-format formula engine.
 
 ## TBL-004 — Land and verify modeled protection persistence
 
-**Goal/status/evidence.** Consume **pending PR #1552 `add64900`**, not recreate it.
-Inspected candidate `io/xlsx_styles.rs::XfStyle` carries `CellProtection`;
-`parse_protection` uses locked=true/hidden=false defaults, `load_xlsx_workbook`
-includes style-only blank extents, and `save.rs::cell_format` writes locks/hidden
-flags. Candidate `loss.rs::protection_drops` warns about legacy/salted credentials
-and unmodeled permissions. Candidate tests include
-`imported_protection_survives_later_sheet_edits_and_undo_in_real_xlsx`,
-`every_modeled_sheet_permission_combination_has_ooxml_disallow_semantics`,
-`inactive_cell_protection_survives_until_a_sheet_is_protected`, and
-`TablesProtectionPersistenceSmoke`. These names describe pending evidence.
+  **Goal/status/evidence.** **PR #1552 merged as `5485dd97`; do not recreate it.** Merged
+  `io/xlsx_styles.rs::XfStyle` carries `CellProtection`; `parse_protection` uses locked=true/hidden=false defaults,
+  `load_xlsx_workbook` includes style-only blank extents, and `save.rs::cell_format` writes locks/hidden flags.
+  Merged `loss.rs::protection_drops` warns about legacy/salted credentials and unmodeled permissions. Verified tests
+  include `imported_protection_survives_later_sheet_edits_and_undo_in_real_xlsx`,
+  `every_modeled_sheet_permission_combination_has_ooxml_disallow_semantics`,
+  `inactive_cell_protection_survives_until_a_sheet_is_protected`, and `TablesProtectionPersistenceSmoke`
+  (GUI run 38439078711; ledger `tables.protection.persistence` at evidence revision `3b97d980`).
+  TBL-004's remaining work is TBL-001-contract conformance and any follow-up the merged evidence left open —
+  credential-bearing round trips, hidden-formula UI and workbook structure protection stay pending.
 
 **Targets/contract/dependencies.** Candidate files `io/{xlsx_styles,props,load,
 save,loss}.rs`, `pivot_and_protection_tests.rs`, `xlsx_loss_budget.rs`,
