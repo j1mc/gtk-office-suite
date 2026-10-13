@@ -6743,11 +6743,15 @@ class DecksSourceContextSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
     def test_save_as_elsewhere_after_replacement_writes_model_only(self):
         import zipfile
         self._edit()
+        replacement = minimal_pptx_bytes("entirely different")
         with open(self._doc, "wb") as f:
-            f.write(minimal_pptx_bytes("entirely different"))
+            f.write(replacement)
         copy = os.path.join(self._dir, "elsewhere.pptx")
         self._save_as(copy)
-        self.wait_for_node(name="Save Without This Content?")
+        # A replaced source makes every write an unverified copy: the copy
+        # question names the changed-on-disk stake, not the generic loss
+        # list.
+        self.wait_for_node(name="Save an Unverified Copy?")
         self.wait_until(
             lambda: self.app.findChild(
                 lambda n: n.showing and n.name is not None and "changed on disk" in n.name,
@@ -6755,14 +6759,19 @@ class DecksSourceContextSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
             lambda n: n is not None, description="the changed-on-disk explanation")
         self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
         self.wait_until(
-            lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing,
+            lambda: self.app.findChild(lambda n: n.name == "Save Copy" and n.showing,
                                         retry=False, requireResult=False),
-            lambda n: n is None, description="the question to close")
+            lambda n: n is None, description="the copy question to close")
         self.assertFalse(os.path.exists(copy), "Cancel wrote the copy anyway")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the blocked save touched the replacement")
         self._save_as(copy)
-        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
         self.wait_until(lambda: os.path.exists(copy) and os.path.getsize(copy) > 0, bool,
                         description="the approved model-only copy")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the copy touched the replacement")
         with zipfile.ZipFile(copy) as z:
             names = z.namelist()
             self.assertFalse([n for n in names if n.startswith("customXml/")], names)
