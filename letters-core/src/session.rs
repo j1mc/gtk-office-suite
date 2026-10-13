@@ -338,23 +338,21 @@ mod tests {
     }
 
     /// A docx holding what Letters never reads (a macro project: loss) and
-/// what it carries byte-identical (a custom XML part: carried).
-    fn docx_with_unmodelled_parts(path: &Path) {
+    /// what it carries byte-identical (a custom XML part: carried).
+    /// `marker` goes into the macro bytes so a replacement package is
+    /// measurably a different revision.
+    fn docx_with_unmodelled_parts(path: &Path, marker: &str) {
         use std::io::Write;
         let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
         let options = zip::write::SimpleFileOptions::default();
-        for (name, body) in [
-            ("[Content_Types].xml", "types"),
-            (
-                "word/document.xml",
-                "<w:document xmlns:w=\"w\"><w:body><w:p/></w:body></w:document>",
-            ),
-            ("customXml/item1.xml", "<props/>"),
-            ("word/vbaProject.bin", "macro-bytes"),
-        ] {
-            zip.start_file(name, options).unwrap();
-            zip.write_all(body.as_bytes()).unwrap();
-        }
+        zip.start_file("[Content_Types].xml", options).unwrap();
+        zip.write_all(b"types").unwrap();
+        zip.start_file("word/document.xml", options).unwrap();
+        zip.write_all(b"<w:document xmlns:w=\"w\"><w:body><w:p/></w:body></w:document>").unwrap();
+        zip.start_file("customXml/item1.xml", options).unwrap();
+        zip.write_all(b"<props/>").unwrap();
+        zip.start_file("word/vbaProject.bin", options).unwrap();
+        zip.write_all(marker.as_bytes()).unwrap();
         zip.finish().unwrap();
     }
 
@@ -376,7 +374,7 @@ mod tests {
     fn import_context_binds_carried_parts_and_loss_to_the_imported_revision() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.docx");
-        docx_with_unmodelled_parts(&source);
+        docx_with_unmodelled_parts(&source, "macro-bytes");
         let session = session_with_import(&source);
         assert_eq!(session.source_state(), SourceState::Intact);
         let carried: Vec<String> = session.carried_for_save().names().map(|n| n.to_string()).collect();
@@ -391,7 +389,7 @@ mod tests {
     fn source_replaced_between_open_and_save_refuses_silent_carry() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.docx");
-        docx_with_unmodelled_parts(&source);
+        docx_with_unmodelled_parts(&source, "macro-bytes");
         let session = session_with_import(&source);
         // Replaced by bytes that are not even a package, then by a valid
         // package with none of the imported revision's parts: either way the
@@ -401,9 +399,11 @@ mod tests {
         assert_eq!(session.source_state(), SourceState::Replaced);
         assert!(session.carried_for_save().is_empty(), "replaced bytes must never be carried");
         assert_eq!(loss_ids(&session), ["macros"]);
-        docx_with_unmodelled_parts(&dir.path().join("other.docx"));
+        docx_with_unmodelled_parts(&dir.path().join("other.docx"), "different-macro-bytes");
         std::fs::rename(dir.path().join("other.docx"), &source).unwrap();
-        // Same length is not the same revision; only identical bytes pass.
+        // Only identical bytes pass; a valid package with different bytes
+        // is still a different revision.
+        assert_eq!(session.source_state(), SourceState::Replaced);
         assert!(session.carried_for_save().is_empty(), "a different package must never be carried");
         assert_eq!(loss_ids(&session), ["macros"]);
     }
@@ -412,7 +412,7 @@ mod tests {
     fn missing_source_is_reported_unrecoverable_and_carries_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.docx");
-        docx_with_unmodelled_parts(&source);
+        docx_with_unmodelled_parts(&source, "macro-bytes");
         let session = session_with_import(&source);
         std::fs::remove_file(&source).unwrap();
         assert_eq!(session.source_state(), SourceState::Missing);
@@ -437,7 +437,7 @@ mod tests {
     fn remote_commit_failure_keeps_identity_and_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let original = dir.path().join("report.docx");
-        docx_with_unmodelled_parts(&original);
+        docx_with_unmodelled_parts(&original, "macro-bytes");
         let slot = Rc::new(AutosaveSlot::new(dir.path(), "document"));
         let meta = suite_common_core::autosave::SnapshotMeta {
             original_path: Some(original.clone()),
@@ -471,7 +471,7 @@ mod tests {
         use crate::model::{Paragraph, ParaStyle, Run, RunStyle};
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("report.docx");
-        docx_with_unmodelled_parts(&source);
+        docx_with_unmodelled_parts(&source, "macro-bytes");
         let session = session_with_import(&source);
         let mut doc = crate::model::Document::from_plain_text("");
         doc.paragraphs = vec![Paragraph {
