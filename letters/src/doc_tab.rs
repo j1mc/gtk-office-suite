@@ -37,7 +37,9 @@ pub(crate) fn autosave_state_dir() -> std::path::PathBuf {
 // letters_core::DocumentSession (#103). The tab's actual document
 // *content* is still the GtkTextBuffer itself; there's no GTK-free
 // representation of that today (a larger design question than this
-// slice), so TabData only owns identity, not content.
+// slice), so TabData only owns identity, not content. The session also
+// holds the import provenance (carried parts + loss findings pinned to the
+// opened revision, LET-001); content stays with the live model.
 
 #[derive(Clone)]
 pub(crate) struct TabData(pub(crate) Rc<RefCell<TabDataInner>>);

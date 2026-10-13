@@ -1228,6 +1228,14 @@ pub fn load_file_to_buffer(path: &str, buf: &gtk::TextBuffer) -> Result<(), Stri
     Ok(())
 }
 
+/// The import provenance for `path`: carried parts + loss findings pinned to
+/// the bytes on disk right now (LET-001). Window open paths store this on
+/// the new tab's session beside `file`, so saves and loss dialogs reuse the
+/// imported revision instead of re-reading the live source path.
+pub fn import_context_for(path: &str) -> letters_core::session::ImportProvenance {
+    letters_core::session::DocumentSession::capture_import_context(std::path::Path::new(path))
+}
+
 /// Save the buffer through letters-core in the format the path implies.
 /// Capture the buffer as a document and write it in the format `path`
 /// names, reporting what that format could not carry.

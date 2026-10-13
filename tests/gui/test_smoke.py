@@ -8656,6 +8656,46 @@ class LettersLossWarningCancelSmoke(BaseGUITestCase):
         with open(self._doc, "rb") as f:
             self.assertEqual(f.read(), self.ORIGINAL, "Discard wrote the file")
 
+    def test_cancel_on_a_save_as_loss_warning_writes_nothing(self):
+        """Save As across formats recomputes the loss report for the target
+        (LET-001): bold warns for `.txt`, and Cancel writes nothing — no
+        copy, no touched original — while the tab stays dirty.
+        """
+        from dogtail import rawinput, tree
+
+        self.wait_for_node(roleName="text")
+        rawinput.keyCombo("<Control>End")
+        rawinput.typeText("more")
+        rawinput.keyCombo("<Control>a")
+        self.app.child(name="Bold (Ctrl+B)", roleName="push button").do_action(0)
+        time.sleep(0.5)  # pacing: no state to wait on before the next input
+
+        target = os.path.join(self._dir, "copy.txt")
+        self.gapplication_action("org.tunaos.letters", "save-file-as")
+        entry = self.wait_for_condition(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text"),
+            description="the Save As name entry",
+        )
+        entry.text = target
+        time.sleep(0.3)  # pacing: no state to wait on before the next input
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+        self.wait_for_node(name="Save as Plain Text?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        time.sleep(1.0)  # pacing: no state to wait on before the next input
+
+        self.assertFalse(os.path.exists(target), "Cancel wrote the copy anyway")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), self.ORIGINAL, "Cancel touched the original")
+        self.assertIsNone(self.process.poll(), "letters exited on Cancel")
+
+        # Still unsaved: closing asks about the edit instead of closing.
+        self.app.child(name="Close", roleName="push button").do_action(0)
+        self.wait_for_node(name="Discard", roleName="push button").do_action(0)
+        self.assertIsNotNone(self.wait_for_process_exit(), "Discard must close the window")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), self.ORIGINAL, "Discard wrote the file")
+
 
 class HarnessRepeatedLaunchSmoke(BaseGUITestCase):
     """Launching and closing the same app repeatedly must leave exactly one
@@ -9288,6 +9328,54 @@ class LettersUnreadContentSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
         self._assert_parts_survived("macroedit")
         with zipfile.ZipFile(self._doc) as z:
             self.assertNotIn("word/vbaProject.bin", z.namelist(), "Save Anyway kept the macro it said it would drop")
+
+
+class LettersSourceReplacedSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
+    """Replacing the source file while it is open must never silently carry
+    the opened revision's parts into the replacement (LET-001).
+
+    Ctrl+S warns that the file changed on disk instead of saving quietly:
+    Cancel leaves the replacement bytes alone, and Save Anyway writes the
+    edit from the model without resurrecting the old carried parts.
+    """
+
+    app_name = "letters"
+    corpus = staticmethod(lambda: minimal_docx_bytes("plain words"))
+    file_name = "plain.docx"
+
+    def test_replaced_source_warns_and_never_carries_the_old_bytes(self):
+        import zipfile
+        from dogtail import rawinput
+        self.wait_until(lambda: self.app.child(roleName="text").text, bool, description="plain.docx to open")
+        replacement = minimal_docx_bytes("entirely different")
+        with open(self._doc, "wb") as f:
+            f.write(replacement)
+        rawinput.keyCombo("<Control>End")
+        rawinput.typeText(" replacededit")
+        self.wait_until(lambda: self.app.child(roleName="text").text, lambda t: "replacededit" in t,
+                        description="the typed text in the editor")
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="File Changed on Disk")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing, retry=False, requireResult=False),
+                        lambda n: n is None, description="the question to close")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "Cancel wrote the file anyway")
+
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+
+        def written():
+            try:
+                with zipfile.ZipFile(self._doc) as z:
+                    return any("replacededit".encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
+            except (OSError, zipfile.BadZipFile, KeyError):
+                return False
+        self.wait_until(written, bool, description="the save to write the edit")
+        with zipfile.ZipFile(self._doc) as z:
+            self.assertNotIn("customXml/item1.xml", z.namelist(),
+                             "the save carried parts from the replaced revision")
+        self.assertIsNone(self.process.poll(), "letters crashed saving over a replaced source")
 
 
 class OpenPathsMixin:
