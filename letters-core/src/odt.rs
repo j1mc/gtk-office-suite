@@ -1166,10 +1166,19 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
 
 /// Write an ODT while preserving package members captured by
 /// [`read_with_report`].
+///
+/// The merge is a single atomic replace (LET-002): the writer writes a
+/// staging file beside `path`, the parts are merged into those staged bytes,
+/// and only the merged bytes ever replace `path` — there is no moment on
+/// disk with the edit but without the carried parts.
+///
+/// The live save path carries only the admitted safe subset
+/// (`DocumentSession::carried_for_save` — custom XML, thumbnail, ODF
+/// settings, per `suite_common_core::carry`); anything else the model cannot
+/// keep routes to the LET-001 loss dialog instead of being passed through.
 pub fn write_with_opaque(doc: &Document, path: impl AsRef<std::path::Path>, opaque: &suite_common_core::interop::OpaquePackage) -> Result<(), String> {
     let path = path.as_ref();
-    write(doc, path)?;
-    opaque.append_to(path)
+    crate::save::opaque_single_write(path, |p| write(doc, p), opaque)
 }
 
 // ── Reading ──────────────────────────────────────────────────────────
