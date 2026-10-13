@@ -41,9 +41,8 @@ pub struct SheetXlsxProps {
     /// Merged ranges as `(row, col, rowspan, colspan)` — the shape
     /// `SheetModel::merges` uses, so the caller assigns it directly.
     pub merges: Vec<(usize, usize, usize, usize)>,
-    /// What cells name through their style (`<c s="n">`): number format and
-    /// CellStyle, 0-based `(row, col, style)`. Cells on the default style
-    /// are absent.
+    /// Resolved cell styles, including protection, 0-based `(row, col, style)`.
+    /// Cells whose resolved style equals the model defaults are absent.
     pub cell_styles: Vec<(usize, usize, super::XfStyle)>,
     /// Cell notes, 0-based `(row, col, text)`: xlsx's `comments` part,
     /// ODF's `office:annotation`.
@@ -51,10 +50,9 @@ pub struct SheetXlsxProps {
     /// Data validation, 0-based inclusive `(top, left, bottom, right)`
     /// ranges and what they allow.
     pub validations: Vec<((usize, usize, usize, usize), ValidationSource)>,
-    /// `<sheetProtection sheet="1">`: the sheet is protected. Tables writes
-    /// it and used to drop it on open, so a protected workbook came back
-    /// unprotected and was saved that way (#1204).
-    pub protected: bool,
+    /// Modeled `<sheetProtection>` state. Credentials that the writer cannot
+    /// preserve are reported by source-loss detection, not stored as a hash.
+    pub protection: crate::sheet::SheetProtection,
 }
 
 /// A validation as the file states it. A list can name its items or a
@@ -529,7 +527,16 @@ pub fn read_sheet_props_from_xlsx(
 
         if let Some(tag) = xml.split("<sheetProtection").nth(1) {
             let tag = tag.split('>').next().unwrap_or("").trim_end_matches('/');
-            props.protected = matches!(xml_attr(tag, "sheet"), Some("1") | Some("true"));
+            // OOXML's operation flags mean "disallow", not "allow".
+            props.protection = crate::sheet::SheetProtection {
+                protected: xml_bool_attr(tag, "sheet"),
+                password_hash: None,
+                allow_select_locked: !xml_bool_attr(tag, "selectLockedCells"),
+                allow_select_unlocked: !xml_bool_attr(tag, "selectUnlockedCells"),
+                allow_format_cells: matches!(xml_attr(tag, "formatCells"), Some("0" | "false")),
+                allow_insert_rows: matches!(xml_attr(tag, "insertRows"), Some("0" | "false")),
+                allow_delete_rows: matches!(xml_attr(tag, "deleteRows"), Some("0" | "false")),
+            };
         }
 
         if let Some(block) = xml.split("<mergeCells").nth(1) {

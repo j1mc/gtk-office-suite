@@ -169,3 +169,178 @@ fn test_sheet_protection_enforcement() {
         assert_eq!(state.sheet().data[0][0], "ModifiedNow");
     }
 }
+
+fn xlsx_part(bytes: &[u8], name: &str) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    zip.by_name(name).unwrap().read_to_string(&mut xml).unwrap();
+    xml
+}
+
+/// Inspect the actual cell XF independently of Tables' style importer.
+fn assert_xml_cell_protection(sheet: &str, styles: &str, cell: &str, locked: bool, hidden: bool) {
+    let cell_tag = sheet.split("<c ").skip(1)
+        .map(|s| s.split('>').next().unwrap())
+        .find(|s| s.contains(&format!("r=\"{cell}\""))).expect("cell must be written");
+    let style = cell_tag.split("s=\"").nth(1).map(|s| {
+        s.split('"').next().unwrap().parse::<usize>().unwrap()
+    }).unwrap_or(0);
+    let xfs = styles.split("<cellXfs").nth(1).unwrap().split("</cellXfs>").next().unwrap();
+    let xf = xfs.split("<xf ").nth(style + 1).unwrap();
+    assert_eq!(!xf.contains("locked=\"0\""), locked, "{cell}: {xf}");
+    assert_eq!(xf.contains("hidden=\"1\""), hidden, "{cell}: {xf}");
+    if !locked || hidden {
+        assert!(xf.contains("applyProtection=\"1\""), "{cell}: {xf}");
+    }
+}
+
+#[test]
+fn imported_protection_survives_later_sheet_edits_and_undo_in_real_xlsx() {
+    use rust_xlsxwriter::{Format, Formula, ProtectionOptions, Workbook};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tables_core::io::{load_workbook, save_sheets_to_xlsx_bytes};
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("protected.xlsx");
+    let mut fixture = Workbook::new();
+    fixture.add_worksheet().set_name("First").unwrap().write_string(0, 0, "first").unwrap();
+    let later = fixture.add_worksheet();
+    later.set_name("Later").unwrap();
+    later.merge_range(0, 0, 0, 1, "", &Format::new()).unwrap();
+    later.write_formula_with_format(0, 0, Formula::new("1+1").set_result("2"),
+        &Format::new().set_hidden().set_bold().set_num_format("0.00")).unwrap();
+    later.write_string_with_format(1, 0, "before", &Format::new().set_unlocked().set_italic()).unwrap();
+    later.write_number_with_format(2, 0, 12.0, &Format::new().set_unlocked().set_hidden()).unwrap();
+    later.write_blank(8, 3, &Format::new().set_unlocked()).unwrap();
+    later.protect_with_options(&ProtectionOptions {
+        select_locked_cells: false,
+        format_cells: true,
+        insert_rows: true,
+        ..Default::default()
+    });
+    fixture.save(&source).unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let (engine, sheets) = load_workbook(source.to_str().unwrap()).unwrap();
+    let expected_protection = sheets[1].protection.clone();
+    let expected_formula_style = sheets[1].styles[0][0].clone();
+    let expected_formula_format = sheets[1].formats[0][0].clone();
+    let mut controller = WorkbookController::new(1, 1).unwrap();
+    {
+        let mut state = controller.state.borrow_mut();
+        state.engine = engine;
+        state.sheets = sheets.into_iter().map(|s| Rc::new(RefCell::new(s))).collect();
+        state.switch_sheet(1).unwrap();
+    }
+    controller.edit_cell(1, 0, "after");
+    controller.edit_cell(0, 0, "must be refused");
+    for (round, expected_text) in ["after", "before"].into_iter().enumerate() {
+        if round == 1 {
+            assert!(controller.undo(), "undo the permitted edit, not the rejected one");
+        }
+        let bytes = {
+            let state = controller.state.borrow();
+            let sheets: Vec<_> = state.sheets.iter().map(|s| s.borrow().clone()).collect();
+            save_sheets_to_xlsx_bytes(&sheets, Some(&state.engine)).unwrap()
+        };
+        let sheet_xml = xlsx_part(&bytes, "xl/worksheets/sheet2.xml");
+        let styles = xlsx_part(&bytes, "xl/styles.xml");
+        assert!(sheet_xml.contains("<f>1+1</f><v>2</v>"), "{sheet_xml}");
+        assert!(sheet_xml.contains("selectLockedCells=\"1\""), "{sheet_xml}");
+        assert!(sheet_xml.contains("formatCells=\"0\""), "{sheet_xml}");
+        assert!(sheet_xml.contains("insertRows=\"0\""), "{sheet_xml}");
+        assert!(!sheet_xml.contains("selectUnlockedCells="), "{sheet_xml}");
+        assert!(!sheet_xml.contains("deleteRows="), "{sheet_xml}");
+        for (cell, locked, hidden) in [
+            ("A1", true, true), ("B1", true, false), ("A2", false, false), ("A3", false, true), ("D9", false, false),
+        ] {
+            assert_xml_cell_protection(&sheet_xml, &styles, cell, locked, hidden);
+        }
+        let saved = dir.path().join(format!("saved-{round}.xlsx"));
+        std::fs::write(&saved, bytes).unwrap();
+        let (back_engine, back) = load_workbook(saved.to_str().unwrap()).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].data[0][0], "first");
+        assert_eq!(back[1].data[1][0], expected_text);
+        assert_eq!(back_engine.cell_at(1, 0, 0), "2");
+        assert!(back_engine.formula_at(1, 0, 0).is_some());
+        assert_eq!(back[1].protection, expected_protection);
+        assert_eq!(back[1].styles[0][0], expected_formula_style);
+        assert_eq!(back[1].formats[0][0], expected_formula_format);
+        assert!(back[1].styles[1][0].italic);
+        assert!(back[1].cell_protections[0][0].hidden_formula);
+        assert!(!back[1].cell_protections[0][1].hidden_formula);
+        assert_eq!(back[1].merges, [(0, 0, 1, 2)]);
+        assert!(!back[1].cell_protections[1][0].locked);
+        assert!(!back[1].cell_protections[2][0].locked);
+        assert!(back[1].cell_protections[2][0].hidden_formula);
+        assert!(!back[1].cell_protections[8][3].locked);
+        assert!(back[1].data[8][3].is_empty());
+    }
+    assert_eq!(std::fs::read(source).unwrap(), original);
+}
+
+#[test]
+fn every_modeled_sheet_permission_combination_has_ooxml_disallow_semantics() {
+    use tables_core::io::{load_workbook, save_sheets_to_xlsx_bytes};
+    use tables_core::sheet::{SheetModel, SheetProtection};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("permissions.xlsx");
+    for mask in 0..32 {
+        let mut sheet = SheetModel::new("Permissions", 1, 1, 0);
+        sheet.data[0][0] = "value".into();
+        sheet.protection = SheetProtection {
+            protected: true,
+            allow_select_locked: mask & 1 != 0,
+            allow_select_unlocked: mask & 2 != 0,
+            allow_format_cells: mask & 4 != 0,
+            allow_insert_rows: mask & 8 != 0,
+            allow_delete_rows: mask & 16 != 0,
+            ..Default::default()
+        };
+        let bytes = save_sheets_to_xlsx_bytes(&[sheet.clone()], None).unwrap();
+        let xml = xlsx_part(&bytes, "xl/worksheets/sheet1.xml");
+        let tag = xml.split("<sheetProtection ").nth(1).unwrap().split("/>").next().unwrap();
+        for (attribute, allow, default_disallow) in [
+            ("selectLockedCells", sheet.protection.allow_select_locked, false),
+            ("selectUnlockedCells", sheet.protection.allow_select_unlocked, false),
+            ("formatCells", sheet.protection.allow_format_cells, true),
+            ("insertRows", sheet.protection.allow_insert_rows, true),
+            ("deleteRows", sheet.protection.allow_delete_rows, true),
+        ] {
+            let prefix = format!("{attribute}=\"");
+            let disallow = tag.split(&prefix).nth(1)
+                .map_or(default_disallow, |s| s.starts_with("1\""));
+            assert_eq!(disallow, !allow, "mask {mask}: {attribute}: {tag}");
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let (_, back) = load_workbook(path.to_str().unwrap()).unwrap();
+        assert_eq!(back[0].protection, sheet.protection, "mask {mask}");
+    }
+}
+
+#[test]
+fn inactive_cell_protection_survives_until_a_sheet_is_protected() {
+    use tables_core::io::{load_workbook, save_sheets_to_xlsx_bytes};
+    use tables_core::sheet::SheetModel;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("inactive.xlsx");
+    let mut sheet = SheetModel::new("Inactive", 4, 2, 0);
+    sheet.data[0][0] = "value".into();
+    sheet.cell_protections[0][0].locked = false;
+    sheet.merges.push((0, 0, 1, 2));
+    sheet.cell_protections[3][1].locked = false;
+    sheet.cell_protections[3][1].hidden_formula = true;
+    let bytes = save_sheets_to_xlsx_bytes(&[sheet], None).unwrap();
+    let xml = xlsx_part(&bytes, "xl/worksheets/sheet1.xml");
+    assert!(!xml.contains("<sheetProtection"));
+    assert_xml_cell_protection(&xml, &xlsx_part(&bytes, "xl/styles.xml"), "B4", false, true);
+    std::fs::write(&path, bytes).unwrap();
+    let (_, back) = load_workbook(path.to_str().unwrap()).unwrap();
+    assert!(!back[0].protection.protected);
+    assert!(!back[0].cell_protections[0][0].locked);
+    assert!(back[0].cell_protections[0][1].locked);
+    assert!(!back[0].cell_protections[3][1].locked);
+    assert!(back[0].cell_protections[3][1].hidden_formula);
+}

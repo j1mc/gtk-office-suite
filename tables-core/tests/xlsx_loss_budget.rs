@@ -73,6 +73,13 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     });
     // Protection, validation, notes, hidden and filtered rows, print area.
     s.protection.protected = true;
+    s.protection.allow_select_locked = false;
+    s.protection.allow_format_cells = true;
+    s.protection.allow_insert_rows = true;
+    s.protection.allow_delete_rows = true;
+    s.cell_protections[1][1].locked = false;
+    s.cell_protections[5][1].hidden_formula = true;
+    s.cell_protections[10][5].locked = false;
     s.validations[1][2] = Some(ValidationRule::WholeNumber { min: Some(0), max: Some(100) });
     s.notes[1][0] = Some("Largest region".into());
     s.hidden_rows_manual.insert(8);
@@ -88,6 +95,9 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     let mut chart = s.charts[0].clone();
     chart.title = "Later chart".into();
     t.charts.push(chart);
+    t.protection.protected = true;
+    t.protection.allow_select_unlocked = false;
+    t.cell_protections[1][0].locked = false;
     (engine, vec![s, t])
 }
 
@@ -106,6 +116,11 @@ const BUDGET: &[(&str, Budget, Check)] = &[
     ("conditional formatting", Kept, |_, s| s[0].cond_rules.iter().any(|r| r.range == (1, 1, 3, 1) && r.op == CondOp::Greater && r.fill.eq_ignore_ascii_case("C6EFCE"))),
     ("charts", Kept, |_, s| s[0].charts.iter().any(|c| c.kind == ChartKind::Bar && c.title == "Sales by region")),
     ("sheet protection", Kept, |_, s| s[0].protection.protected),
+    ("sheet permissions", Kept, |_, s| !s[0].protection.allow_select_locked && s[0].protection.allow_select_unlocked && s[0].protection.allow_format_cells && s[0].protection.allow_insert_rows && s[0].protection.allow_delete_rows),
+    ("unlocked cells", Kept, |_, s| !s[0].cell_protections[1][1].locked),
+    ("hidden formulas", Kept, |_, s| s[0].cell_protections[5][1].hidden_formula && s[0].cell_protections[5][1].locked),
+    ("protection-only blank cells", Kept, |_, s| !s[0].cell_protections[10][5].locked && s[0].data[10][5].is_empty()),
+    ("later sheet protection", Kept, |_, s| s[1].protection.protected && !s[1].protection.allow_select_unlocked && !s[1].cell_protections[1][0].locked),
     ("data validation", Kept, |_, s| matches!(s[0].validations[1][2], Some(ValidationRule::WholeNumber { min: Some(0), max: Some(100) }))),
     ("cell notes", Kept, |_, s| s[0].notes[1][0].as_deref() == Some("Largest region")),
     ("hidden rows", Kept, |_, s| s[0].hidden_rows_manual.contains(&8)),

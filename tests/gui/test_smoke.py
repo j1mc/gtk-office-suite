@@ -3253,6 +3253,118 @@ class TablesLossQuestionSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed saving")
 
 
+class TablesProtectionPersistenceSmoke(TablesCellEntryMixin, BaseGUITestCase):
+    """An imported blank unlocked cell remains editable after protected XLSX save."""
+
+    app_name = "tables"
+
+    def setUp(self):
+        import io
+        import zipfile
+        self._dir = self.temp_dir(prefix="tables-protection-persistence-")
+        self._path = os.path.join(self._dir, "protected.xlsx")
+        source = minimal_xlsx_bytes(7, '<sheetProtection sheet="1" objects="1" scenarios="1"/>')
+        with zipfile.ZipFile(io.BytesIO(source)) as book:
+            parts = {name: book.read(name).decode() for name in book.namelist()}
+        parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+            "</Types>", '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
+        parts["xl/_rels/workbook.xml.rels"] = parts["xl/_rels/workbook.xml.rels"].replace(
+            "</Relationships>", '<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+        parts["xl/styles.xml"] = (
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+            '<borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs>'
+            '<cellXfs count="2"><xf xfId="0"/><xf xfId="0" applyProtection="1">'
+            '<protection locked="0"/></xf></cellXfs></styleSheet>')
+        parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+            "</row>", '<c r="B1" s="1"/></row>')
+        with zipfile.ZipFile(self._path, "w", zipfile.ZIP_DEFLATED) as book:
+            for name, content in parts.items():
+                book.writestr(name, content)
+        self.launch_args = [self._path]
+        self.isolate_autosave_state()
+        self.isolate_snapshot()
+        super().setUp()
+
+    def test_unlocked_blank_cell_remains_editable_after_save_and_reopen(self):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from dogtail import rawinput
+        self.wait_until(self._grid, lambda text: "cell A1: 7" in text,
+                        description="the protected source workbook")
+        self._put("B1", "42")
+        rawinput.keyCombo("<Control>s")
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._path) as book:
+                    sheet = ET.fromstring(book.read("xl/worksheets/sheet1.xml"))
+                    cell = sheet.find(".//s:c[@r='B1']", ns)
+                    if cell is None or cell.findtext("s:v", namespaces=ns) != "42":
+                        return False
+                    styles = ET.fromstring(book.read("xl/styles.xml"))
+                    xf = styles.find("s:cellXfs", ns)[int(cell.get("s", "0"))]
+                    protection = xf.find("s:protection", ns)
+                    return (sheet.find("s:sheetProtection", ns) is not None
+                            and protection is not None
+                            and protection.get("locked") == "0")
+            except (OSError, zipfile.BadZipFile, ET.ParseError):
+                return False
+        self.wait_until(saved, bool, description="the protected workbook with unlocked B1 to save")
+        self.relaunch_app(launch_args=[self._path])
+        self._wait_for_a_new_document()
+        rawinput.keyCombo("<Control>g")
+        self.wait_until(lambda: self._focused("Cell reference"), bool,
+                        description="the reopened workbook's name box")
+        rawinput.typeText("B1")
+        rawinput.keyCombo("Return")
+        self.wait_until(self._grid, lambda text: "cell B1: 42" in text,
+                        description="the unlocked edit to reopen")
+        self._put("B1", "84")
+        self.gapplication_action("org.tunaos.tables", "undo")
+        self.wait_until(self._grid, lambda text: "cell B1: 42" in text,
+                        description="undo on the reopened unlocked cell")
+
+    def test_password_loss_requires_consent_and_cancel_preserves_source(self):
+        import zipfile
+        from dogtail import rawinput
+        with zipfile.ZipFile(self._path) as book:
+            parts = {name: book.read(name) for name in book.namelist()}
+        parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+            b'<sheetProtection ', b'<sheetProtection password="ABCD" ')
+        with zipfile.ZipFile(self._path, "w", zipfile.ZIP_DEFLATED) as book:
+            for name, content in parts.items():
+                book.writestr(name, content)
+        with open(self._path, "rb") as source:
+            original = source.read()
+        self.relaunch_app(launch_args=[self._path])
+        self._wait_for_a_new_document()
+        self._put("B1", "42")
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing,
+                                       retry=False, requireResult=False),
+            lambda n: n is None, description="the password-loss warning to close")
+        with open(self._path, "rb") as source:
+            self.assertEqual(source.read(), original, "Cancel replaced the protected source")
+        assert_close_guard_asks(self)
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._path) as book:
+                    xml = book.read("xl/worksheets/sheet1.xml")
+                    return b'password=' not in xml and b'<v>42</v>' in xml and b'<sheetProtection ' in xml
+            except (OSError, zipfile.BadZipFile):
+                return False
+        self.wait_until(saved, bool, description="the explicitly approved save without the password hash")
+
+
 class TablesCsvSaveSmoke(TablesFormatSafeSaveMixin, BaseGUITestCase):
     fixture = "budget.csv"
 

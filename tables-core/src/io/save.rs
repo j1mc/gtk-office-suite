@@ -99,9 +99,13 @@ pub fn save_sheets_to_xlsx_bytes(
                         // consumers that skip recalc-on-load (LibreOffice
                         // included) show the right result immediately.
                         let cached = eng.cell_at(si, r, c);
-                        sheet
-                            .write_formula(r as u32, c as u16, Formula::new(&f).set_result(&cached))
-                            .map_err(|e| format!("Write error: {}", e))?;
+                        let formula = Formula::new(&f).set_result(&cached);
+                        let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]);
+                        match &format {
+                            Some(format) => sheet.write_formula_with_format(r as u32, c as u16, formula, format),
+                            None => sheet.write_formula(r as u32, c as u16, formula),
+                        }
+                        .map_err(|e| format!("Write error: {}", e))?;
                         continue;
                     }
                 }
@@ -111,15 +115,17 @@ pub fn save_sheets_to_xlsx_bytes(
                     // blank is part of what the sheet looks like. Most empty
                     // cells are plain, and are skipped before building a
                     // format (performance_budgets' dense save).
-                    if sh.styles[r][c].is_default() && sh.borders[r][c].is_none() {
+                    if sh.styles[r][c].is_default() && sh.borders[r][c].is_none()
+                        && sh.cell_protections[r][c].locked && !sh.cell_protections[r][c].hidden_formula
+                    {
                         continue;
                     }
-                    if let Some(f) = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c]) {
+                    if let Some(f) = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]) {
                         sheet.write_blank(r as u32, c as u16, &f).map_err(|e| format!("Write error: {}", e))?;
                     }
                     continue;
                 }
-                let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c]);
+                let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]);
                 // Rust's f64::from_str accepts "inf"/"infinity"/"nan"
                 // (any case, optionally signed) as valid floats — but a
                 // user typing that text almost certainly means literal
@@ -147,7 +153,7 @@ pub fn save_sheets_to_xlsx_bytes(
         for (mr, mc, rows, cols) in &sh.merges {
             let (lr, lc) = (mr + (*rows).max(1) - 1, mc + (*cols).max(1) - 1);
             let val = sh.data[*mr][*mc].clone();
-            let format = cell_format(&sh.formats[*mr][*mc], &with_sheet_font(&sh.styles[*mr][*mc], sh, &wb_font), &sh.borders[*mr][*mc]).unwrap_or_default();
+            let format = cell_format(&sh.formats[*mr][*mc], &with_sheet_font(&sh.styles[*mr][*mc], sh, &wb_font), &sh.borders[*mr][*mc], &sh.cell_protections[*mr][*mc]).unwrap_or_default();
             sheet
                 .merge_range(
                     *mr as u32,
@@ -158,6 +164,30 @@ pub fn save_sheets_to_xlsx_bytes(
                     &format,
                 )
                 .map_err(|e| format!("Merge error: {}", e))?;
+            if let Some(eng) = engine {
+                if let Some(formula) = eng.formula_at(si, *mr, *mc) {
+                    sheet.write_formula_with_format(
+                        *mr as u32, *mc as u16,
+                        Formula::new(&formula).set_result(eng.cell_at(si, *mr, *mc)),
+                        &format,
+                    ).map_err(|e| format!("Write error: {}", e))?;
+                }
+            }
+            // merge_range applies the anchor's format to every covered blank.
+            // Keep that appearance, but not its potentially different locks.
+            let anchor = &sh.cell_protections[*mr][*mc];
+            for r in *mr..=lr {
+                for c in *mc..=lc {
+                    let protection = &sh.cell_protections[r][c];
+                    if protection == anchor {
+                        continue;
+                    }
+                    let cell_format = if protection.locked { format.clone().set_locked() } else { format.clone().set_unlocked() };
+                    let cell_format = if protection.hidden_formula { cell_format.set_hidden() } else { cell_format.unset_hidden() };
+                    sheet.write_blank(r as u32, c as u16, &cell_format)
+                        .map_err(|e| format!("Write error: {}", e))?;
+                }
+            }
         }
         if sh.frozen_rows > 0 || sh.frozen_cols > 0 {
             sheet
@@ -364,7 +394,15 @@ pub fn save_sheets_to_xlsx_bytes(
         }
 
         if sh.protection.protected {
-            sheet.protect();
+            let protection = &sh.protection;
+            sheet.protect_with_options(&rust_xlsxwriter::ProtectionOptions {
+                select_locked_cells: protection.allow_select_locked,
+                select_unlocked_cells: protection.allow_select_unlocked,
+                format_cells: protection.allow_format_cells,
+                insert_rows: protection.allow_insert_rows,
+                delete_rows: protection.allow_delete_rows,
+                ..Default::default()
+            });
         }
     }
     // Named ranges (#113): all workbook-scoped in this app today (no
@@ -446,16 +484,23 @@ fn cell_format(
     nf: &suite_common_core::format::NumberFormat,
     style: &crate::style::CellStyle,
     border: &crate::sheet::CellBorder,
+    protection: &crate::sheet::CellProtection,
 ) -> Option<rust_xlsxwriter::Format> {
     use crate::sheet::BorderStyle;
     use crate::style::{HAlign, VAlign};
     use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatUnderline};
     let code = xlsx_num_format(nf);
-    if code.is_none() && style.is_default() && border.is_none() {
+    if code.is_none() && style.is_default() && border.is_none() && protection.locked && !protection.hidden_formula {
         return None;
     }
     let rgb = |c: crate::style::Rgb| Color::RGB(((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32);
     let mut f = Format::new();
+    if !protection.locked {
+        f = f.set_unlocked();
+    }
+    if protection.hidden_formula {
+        f = f.set_hidden();
+    }
     if !border.is_none() {
         let edge = |s: &BorderStyle| match s {
             BorderStyle::None => FormatBorder::None,

@@ -32,6 +32,8 @@ const LINKS: (&str, &str) = ("external-links", "Links to other workbooks");
 const SPARKLINES: (&str, &str) = ("sparklines", "Sparklines");
 const CONNECTIONS: (&str, &str) = ("data-connections", "Data connections and queries");
 const OLE: (&str, &str) = ("embedded-objects", "Embedded objects");
+const PROTECTION_PASSWORD: (&str, &str) = ("sheet-protection-password", "Sheet protection passwords");
+const PROTECTION_OPTIONS: (&str, &str) = ("sheet-protection-options", "Sheet protection permissions");
 
 fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location: &str, detail: &str) {
     report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
@@ -58,6 +60,15 @@ pub fn content_a_save_drops(source: Option<&str>, sheets: &[SheetModel]) -> Comp
         }
         if sheet.validations.iter().flatten().flatten().any(|r| !writable_rule(r)) {
             record(&mut report, VALIDATION, &sheet.name, "a pattern, an empty or over-long list, or an unbounded range");
+        }
+        if sheet.protection.password_hash.is_some() {
+            record(&mut report, PROTECTION_PASSWORD, &sheet.name, "the stored password hash cannot be written; sheet protection is saved without a password");
+        }
+        let protection = &sheet.protection;
+        if !protection.protected && (!protection.allow_select_locked || !protection.allow_select_unlocked
+            || protection.allow_format_cells || protection.allow_insert_rows || protection.allow_delete_rows)
+        {
+            record(&mut report, PROTECTION_OPTIONS, &sheet.name, "nondefault permissions on an unprotected sheet cannot be written; they reset to defaults while cell locks and hidden formulas remain");
         }
     }
     if let Some(path) = source {
@@ -126,10 +137,53 @@ fn source_drops(path: &str, report: &mut CompatibilityReport) {
     if any("xl/embeddings/oleObject") {
         record(report, OLE, "xl/embeddings", "embedded objects aren't kept");
     }
-    let sheets: Vec<String> = names.iter().filter(|n| n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml")).cloned().collect();
+    let sheets: Vec<String> = names.iter().filter(|n| n.starts_with("xl/worksheets/") && n.ends_with(".xml")).cloned().collect();
     for sheet in sheets {
-        if zip.optional_part_to_string(&sheet, &mut budget).contains("sparklineGroup") {
+        let xml = zip.optional_part_to_string(&sheet, &mut budget);
+        protection_drops(&xml, &sheet, report);
+        if xml.contains("sparklineGroup") {
             record(report, SPARKLINES, &sheet, "sparklines aren't kept");
+        }
+    }
+}
+
+/// The writer accepts plaintext passwords only, not imported legacy hashes or
+/// modern salted credentials. Permissions outside SheetProtection also cannot
+/// be reproduced from the model. Keep these losses in the existing save gate.
+fn protection_drops(xml: &str, location: &str, report: &mut CompatibilityReport) {
+    use std::sync::LazyLock;
+    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?sheetProtection\b[^>]*>").unwrap()
+    });
+    static ATTRIBUTE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"\s([A-Za-z][A-Za-z0-9]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
+    });
+    for tag in TAG.find_iter(xml) {
+        let attrs: std::collections::BTreeMap<&str, &str> = ATTRIBUTE.captures_iter(tag.as_str())
+            .map(|a| (a.get(1).unwrap().as_str(), a.get(2).or_else(|| a.get(3)).unwrap().as_str()))
+            .collect();
+        if attrs.contains_key("password") {
+            record(report, PROTECTION_PASSWORD, location, "the imported legacy sheet password hash cannot be written; sheet protection is saved without a password");
+        }
+        if ["algorithmName", "hashValue", "saltValue", "spinCount"].iter().any(|key| attrs.contains_key(key)) {
+            record(report, PROTECTION_PASSWORD, location, "the imported modern salted sheet password credentials cannot be written; sheet protection is saved without a password");
+        }
+        if !matches!(attrs.get("sheet"), Some(&"1") | Some(&"true")) {
+            continue;
+        }
+        let unsupported: Vec<&str> = [
+            ("objects", false), ("scenarios", false),
+            ("formatColumns", true), ("formatRows", true), ("insertColumns", true),
+            ("deleteColumns", true), ("insertHyperlinks", true), ("sort", true),
+            ("autoFilter", true), ("pivotTables", true),
+        ].into_iter().filter_map(|(name, default)| {
+            let disallowed = attrs.get(name).map_or(default, |value| matches!(*value, "1" | "true"));
+            (!disallowed).then_some(name)
+        }).collect();
+        if !unsupported.is_empty() {
+            record(report, PROTECTION_OPTIONS, location, &format!(
+                "these unmodeled permissions become disallowed on save: {}", unsupported.join(", ")
+            ));
         }
     }
 }
@@ -271,5 +325,55 @@ mod tests {
         let path = dir.path().join("data.csv");
         std::fs::write(&path, "a,b\n1,2\n").unwrap();
         assert!(content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]).features.is_empty());
+    }
+
+    #[test]
+    fn sheet_password_losses_require_confirmation_without_touching_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, attributes, detail) in [
+            ("legacy", "password=\"ABCD\"", "legacy"),
+            ("modern", "algorithmName='SHA-512' hashValue='digest' saltValue='salt' spinCount='100000'", "modern salted"),
+        ] {
+            let path = dir.path().join(format!("{name}.xlsx"));
+            let xml = format!("<worksheet><sheetProtection sheet=\"1\" objects=\"1\" scenarios=\"1\" {attributes}/></worksheet>");
+            package(&path, &[("xl/worksheets/later.xml", &xml)]);
+            let before = std::fs::read(&path).unwrap();
+            let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+            assert_eq!(ids(&report), ["sheet-protection-password"]);
+            assert!(report.requires_confirmation());
+            assert!(report.features[0].detail.contains(detail));
+            assert_eq!(std::fs::read(&path).unwrap(), before, "preflight must not modify the source");
+        }
+        let mut s = sheet();
+        s.protection.protected = true;
+        s.protection.password_hash = Some("ABCD".into());
+        assert_eq!(ids(&content_a_save_drops(None, &[s])), ["sheet-protection-password"]);
+    }
+
+    #[test]
+    fn unmodeled_sheet_permissions_warn_only_when_their_meaning_changes() {
+        let mut report = CompatibilityReport::new("xlsx");
+        protection_drops(
+            r#"<worksheet><sheetProtection sheet="1" objects="1" scenarios="1" formatCells="0" insertRows="0" deleteRows="0" selectLockedCells="1" selectUnlockedCells="1"/></worksheet>"#,
+            "Sheet1", &mut report,
+        );
+        assert!(report.features.is_empty(), "modeled permissions are retained");
+        protection_drops(
+            r#"<worksheet><sheetProtection sheet="true" objects="true" scenarios="true" formatColumns="false" sort="0" autoFilter="0"/></worksheet>"#,
+            "Later", &mut report,
+        );
+        assert_eq!(ids(&report), ["sheet-protection-options"]);
+        assert!(report.requires_confirmation());
+        assert!(report.features[0].detail.contains("formatColumns, sort, autoFilter"));
+    }
+
+    #[test]
+    fn inactive_nondefault_permissions_warn_without_enabling_protection() {
+        let mut s = sheet();
+        s.protection.allow_insert_rows = true;
+        let report = content_a_save_drops(None, &[s]);
+        assert_eq!(ids(&report), ["sheet-protection-options"]);
+        assert!(report.requires_confirmation());
+        assert!(report.features[0].detail.contains("unprotected sheet"));
     }
 }
