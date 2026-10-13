@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use libadwaita as adw;
+use adw::prelude::*;
 use tables_core::sheet::SheetModel;
 
 use crate::window::AppState;
