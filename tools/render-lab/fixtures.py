@@ -562,27 +562,20 @@ def tables():
     save(wb, "values", "A 5x4 block of integers, right-aligned in their cells")
 
     wb, ws = book()
-    for row in [
-        ("Region", "Category", "Sales"),
-        ("North", "Electronics", 100),
-        ("North", "Apparel", 50),
-        ("South", "Electronics", 200),
-    ]:
-        ws.append(row)
     pivot_rows = [
         ("Region", "Apparel - Sum of Sales", "Electronics - Sum of Sales"),
         ("North", 50, 100),
         ("South", 0, 200),
     ]
     for row_index, row in enumerate(pivot_rows, start=1):
-        for col_index, value in enumerate(row, start=5):
+        for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index, value)
-    ws.column_dimensions["F"].width = 24
-    ws.column_dimensions["G"].width = 27
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 27
     save(
         wb,
         "pivot-crosstab",
-        "A column-field pivot: North and South sales split by Apparel and Electronics",
+        "A column-field pivot output: North and South sales by Apparel and Electronics",
     )
 
     wb, ws = book()
