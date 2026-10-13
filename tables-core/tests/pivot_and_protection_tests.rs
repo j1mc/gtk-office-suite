@@ -110,6 +110,25 @@ fn test_pivot_column_fields_create_cross_tab_intersections() {
             vec!["South".into(), "0".into(), "200".into()],
         ]
     );
+    let sheet = {
+        let state = controller.state.borrow();
+        let sheet = state.sheet().clone();
+        sheet
+    };
+    let loss_report =
+        tables_core::io::loss::content_a_save_drops(None, std::slice::from_ref(&sheet));
+    assert!(loss_report.features.iter().any(|feature| feature.id == "pivot-tables"));
+
+    let bytes = tables_core::io::save_sheets_to_xlsx_bytes(&[sheet], None).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cross-tab.xlsx");
+    std::fs::write(&path, bytes).unwrap();
+    let (_engine, loaded_sheets) =
+        tables_core::io::load_xlsx_workbook(path.to_str().unwrap()).unwrap();
+    assert_eq!(loaded_sheets[0].data[7][1], "50");
+    assert_eq!(loaded_sheets[0].data[8][2], "200");
+    assert!(loaded_sheets[0].pivot_tables.is_empty());
+
 }
 
 #[test]

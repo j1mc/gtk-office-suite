@@ -477,8 +477,13 @@ mod tests {
         assert_eq!(grid[0][0], "1");
         assert_eq!(grid[1][0], "2");
         assert_eq!(grid[2][0], "3");
-        assert!(engine.has_formula(0, 0));
-        assert!(!engine.has_formula(1, 0));
+        let mut sheet = crate::sheet::SheetModel::new("Sheet1", 4, 2, 0);
+        sheet.sync_from_engine(&engine);
+        assert_eq!(sheet.data[0][0], "1");
+        assert_eq!(sheet.data[1][0], "2");
+        assert_eq!(sheet.data[2][0], "3");
+        assert!(sheet.formulas[0][0]);
+        assert!(!sheet.formulas[1][0]);
     }
 
     #[test]
