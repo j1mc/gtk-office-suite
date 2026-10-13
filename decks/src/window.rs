@@ -1148,6 +1148,7 @@ impl DecksWindow {
                 let (cs, sl, ss, ms) = (cs.clone(), sl.clone(), ss.clone(), ms.clone());
                 let (cs_scroll, path_ref, refresh, cs_ref, so) =
                     (cs_scroll.clone(), path_ref.clone(), refresh.clone(), cs_ref.clone(), so.clone());
+                let (w2, dirty) = (w.clone(), dirty.clone());
                 let ctl = ctl.clone();
                 crate::template_chooser::present(&w, move |index| {
                     let ctl = ctl.clone();
