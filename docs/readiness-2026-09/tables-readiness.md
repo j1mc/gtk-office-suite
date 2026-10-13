@@ -74,10 +74,12 @@ WorkbookController remains the sole mutation gateway. Stable sheet identities bi
       deterministic pivot columns; `pivot_and_protection_tests` verifies cell placement, XLSX result-value round-trip,
       and a compatibility warning that the pivot definition is not retained. Two `SEQUENCE` engine regressions verify
       visible spill values and `#SPILL!` when occupied cells block output. Local targeted tests and CI run 38377144141 pass:
-      workspace check/clippy/nextest/docs, interop corpus, Python validators, and all three Flatpak app builds; the RustSec advisory
-      gate failed through Typst YAML loading, tracked in #1549. Initial render-lab CI run 38380643740 showed the wide fixture as amber
-      and split its pivot columns across two LibreOffice pages; no baseline was changed. The fixture now renders only the three-column
-      pivot result; its rerun is pending so the visual comparison can be reviewed before any baseline update.
+      workspace check/clippy/nextest/docs, interop corpus, Python validators, and all three Flatpak app builds. The RustSec advisory
+      gate failed through Typst YAML loading; see #1549. The initial wide fixture was amber and split across two LibreOffice pages;
+      after narrowing to the pivot output, render run 38384168878 produced one page and green A/B results. I reviewed the app,
+      LibreOffice and diff images: labels and values match, with SSIM 0.844, 93.3% word recall and 2.76pt displacement. The baseline
+      now records this fixture green for A/B; the full report has 58 green, 4 amber and 0 red in both tiers (one Letters and three
+      Tables fixtures remain amber).
       This remains open: pivot controls are not exposed in the GUI, chart/protection format coverage is incomplete, and
       the upstream-dependent dynamic-array function limits are not yet enumerated.
 

@@ -286,6 +286,10 @@
     "B": "amber",
     "C": "amber"
   },
+  "tables/pivot-crosstab": {
+    "A": "green",
+    "B": "green"
+  },
   "tables/values": {
     "A": "green",
     "B": "green",
