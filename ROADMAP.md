@@ -35,6 +35,12 @@ here are the ones `tests/test_roadmap_figures.py` checks against the
 repository, and that test fails on any other `n/m` figure added to this
 file, README.md, `docs/ROADMAP.md` or `docs/TESTING.md`.
 
+Implementation-ready specifications for the remaining work are in
+[docs/implementation/](docs/implementation/README.md): per-app work packages,
+model/API contracts, dependencies, failure behavior, test plans and shared release
+gates. Assign those bounded packages to agents; their acceptance criteria, not
+the presence of code or a closed issue, determine completion.
+
 **Last updated**: 2026-10-13 | **Maintainer**: tuna-os (hanthor) / architect agent
 
 ---
