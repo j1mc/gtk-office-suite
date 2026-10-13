@@ -34,6 +34,17 @@ pub struct DecksController {
     /// The master view (`edit_master`): the deck's slides and history while
     /// the master is in their place.
     master_edit: RefCell<Option<MasterEdit>>,
+    /// The imported revision's provenance (DCK-002): carried parts, loss
+    /// findings and opaque inventory pinned to the opened bytes, plus the
+    /// dependencies edits recorded since. Session-owned, never widget
+    /// state, and never reconstructed from the filename alone. `None`
+    /// for new documents and recovered snapshots with no original bytes.
+    source_context: RefCell<Option<crate::provenance::DeckSourceContext>>,
+    /// Monotonic session clock, bumped by every applied, undone or redone
+    /// step. The save dialog binds its consent to this alongside the
+    /// source fingerprint: an edit between the question and the
+    /// confirmation un-confirms it (DCK-002).
+    revision: Cell<u64>,
 }
 
 /// What the master view put aside, to put back on Done.
@@ -78,7 +89,124 @@ impl DecksController {
             file_path: Rc::new(RefCell::new(None)),
             history: RefCell::new(History::default()),
             master_edit: RefCell::new(None),
+            source_context: RefCell::new(None),
+            revision: Cell::new(0),
         }
+    }
+
+    /// The session's edit clock: every applied, undone or redone step
+    /// bumps it. The save dialog binds consent to this value alongside
+    /// the source fingerprint.
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    /// Install the deck just read together with its source context, only
+    /// after a successful import — model, report and provenance land as
+    /// one session, never piecemeal.
+    pub fn install_opened_deck(
+        &self,
+        deck: crate::engine::Deck,
+        context: crate::provenance::DeckSourceContext,
+    ) {
+        *self.slides.borrow_mut() = deck.slides;
+        *self.masters.borrow_mut() = deck.masters;
+        *self.source_context.borrow_mut() = Some(context);
+    }
+
+    /// Drop the session's provenance: recovery adopts a snapshot's bytes,
+    /// not its source, so the next save falls back to inspecting the live
+    /// original instead of pinning a deleted scratch file.
+    pub fn clear_source_context(&self) {
+        *self.source_context.borrow_mut() = None;
+    }
+
+    /// The live source measured against the imported revision.
+    pub fn source_state(&self) -> crate::provenance::SourceState {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .map(|c| c.source_state())
+            .unwrap_or(crate::provenance::SourceState::NoContext)
+    }
+
+    /// The carried parts a save may write: the imported revision's, and
+    /// only while its source still resolves to that revision.
+    pub fn carried_for_save(&self) -> suite_common_core::carry::Carried {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .map(|c| c.carried_for_save())
+            .unwrap_or_default()
+    }
+
+    /// Re-pin provenance to the bytes just written, after the writer and
+    /// the destination commit both succeed. Mutations retire with the old
+    /// revision: the file on disk is the model's own now.
+    pub fn repin_after_save(&self, path: &str) {
+        *self.source_context.borrow_mut() = Some(crate::provenance::DeckSourceContext::capture(
+            std::path::Path::new(path),
+        ));
+    }
+
+    /// What the imported revision holds that no save can rebuild, for the
+    /// save dialog's precise-consent wording. Reads the stored scan, never
+    /// the live path.
+    pub fn stored_source_loss(&self) -> Option<suite_common_core::interop::CompatibilityReport> {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .map(|c| c.stored_source_loss().clone())
+    }
+
+    /// Names of the parts the imported revision carried, for naming what
+    /// a missing or replaced source puts at stake.
+    pub fn imported_carried_names(&self) -> Vec<String> {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .map(|c| c.imported_carried_names())
+            .unwrap_or_default()
+    }
+
+    /// Whether the imported revision held anything a save cannot rebuild
+    /// from the model.
+    pub fn has_unrecoverable_content(&self) -> bool {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.has_unrecoverable_content())
+    }
+
+    /// File name of the provenance source, for dialog copy.
+    pub fn provenance_source_name(&self) -> Option<String> {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.provenance_source_name())
+    }
+
+    /// Whether `target` is the file the context was captured from.
+    pub fn provenance_source_matches(&self, target: &str) -> bool {
+        self.source_context.borrow().as_ref().is_some_and(|c| {
+            c.provenance_source_matches(std::path::Path::new(target))
+        })
+    }
+
+    /// Carried part names a save to `target` will not keep (the whole set
+    /// on a cross-format Save As, none otherwise), for the dialog.
+    pub fn carried_names_dropped_for(&self, target: &str) -> Vec<String> {
+        self.source_context
+            .borrow()
+            .as_ref()
+            .map(|c| c.carried_names_dropped_for(std::path::Path::new(target)))
+            .unwrap_or_default()
+    }
+
+    /// The stored provenance facts for test introspection (`snapshot.rs`),
+    /// or `None` when the session holds no context.
+    pub fn provenance_facts(&self) -> Option<crate::provenance::ProvenanceFacts> {
+        self.source_context.borrow().as_ref().map(|c| c.facts())
     }
 
     // ── The master view ───────────────────────────────────────────────
@@ -241,6 +369,10 @@ impl DecksController {
         }
         // One user action, one step.
         self.history.borrow_mut().record(inverses);
+        if let Some(context) = self.source_context.borrow_mut().as_mut() {
+            context.note_ops(&ops);
+        }
+        self.revision.set(self.revision.get().wrapping_add(1));
         self.dirty.set(true);
         true
     }
@@ -617,8 +749,15 @@ impl DecksController {
 
     pub fn undo(&self) -> bool {
         let mut history = self.history.borrow_mut();
-        let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| history.undo(doc)).is_some();
+        let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
+            history.undo(doc)
+        })
+        .is_some();
         if done {
+            if let Some(context) = self.source_context.borrow_mut().as_mut() {
+                context.note_history_step();
+            }
+            self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
         }
         done
@@ -626,8 +765,15 @@ impl DecksController {
 
     pub fn redo(&self) -> bool {
         let mut history = self.history.borrow_mut();
-        let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| history.redo(doc)).is_some();
+        let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
+            history.redo(doc)
+        })
+        .is_some();
         if done {
+            if let Some(context) = self.source_context.borrow_mut().as_mut() {
+                context.note_history_step();
+            }
+            self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
         }
         done

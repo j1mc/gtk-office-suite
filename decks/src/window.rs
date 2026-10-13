@@ -14,7 +14,7 @@ use crate::toolbar::{find_toolbar_child, build_decks_toolbar};
 use crate::transition::{TransitionState, TransitionType, draw_transition};
 
 use decks_core::engine::{Slide, SlideObject, MasterSlide, Deck};
-use decks_core::{read_deck, write_deck, write_deck_bytes, DecksController};
+use decks_core::{read_deck_with_context, write_deck_bytes, write_deck_with_context, DecksController};
 
 /// Late-bound thumbnail-refresh callback (the slide list is built after
 /// the closure that will eventually call it is created).
@@ -509,8 +509,10 @@ impl DecksWindow {
                         let deck = m.deck();
                         let w = win.clone();
                         let target = path.clone();
-                        crate::loss_ui::save_after_asking(&win, Some(&target), &target, move || match save_deck(&path, Some(&path), &deck) {
+                        let m_save = m.clone();
+                        crate::loss_ui::save_after_asking_with_context(&win, m_save.clone(), Some(&target), &target, move || match save_deck(&path, &deck, &m_save.carried_for_save()) {
                             Ok(()) => {
+                                m_save.repin_after_save(&path);
                                 dirty.set(false);
                                 slot.clear_or_report();
                                 force_close.set(true);
@@ -550,11 +552,13 @@ impl DecksWindow {
                                 let deck = m.deck();
                                 let target = path_str.clone();
                                 let w = win2.clone();
+                                let m_save = m.clone();
                                 // A deck never saved has no source to lose
                                 // content from; the question still decides,
                                 // as Save As's does.
-                                crate::loss_ui::save_after_asking(&win2, None, &target, move || match save_deck(&path_str, None, &deck) {
+                                crate::loss_ui::save_after_asking_with_context(&win2, m_save.clone(), None, &target, move || match save_deck(&path_str, &deck, &m_save.carried_for_save()) {
                                     Ok(()) => {
+                                        m_save.repin_after_save(&path_str);
                                         *path_state.borrow_mut() = Some(path_str);
                                         dirty.set(false);
                                         slot.clear_or_report();
@@ -1138,18 +1142,22 @@ impl DecksWindow {
             let (cs_scroll, path_ref, refresh) = (editor_split.clone(), file_path.clone(), refresh_hud.clone());
             let (cs_ref, so, w) = (current_slide.clone(), selected_object.clone(), suite_win.window.clone());
             let dirty = dirty.clone();
+            let ctl = controller.clone();
             let act = gtk::gio::SimpleAction::new("new-from-template", None);
             act.connect_activate(move |_, _| {
                 let (cs, sl, ss, ms) = (cs.clone(), sl.clone(), ss.clone(), ms.clone());
                 let (cs_scroll, path_ref, refresh, cs_ref, so) =
                     (cs_scroll.clone(), path_ref.clone(), refresh.clone(), cs_ref.clone(), so.clone());
                 let (w2, dirty) = (w.clone(), dirty.clone());
+                let ctl = ctl.clone();
                 crate::template_chooser::present(&w, move |index| {
+                    let ctl = ctl.clone();
                     let Some((slides, masters)) = decks_core::templates::deck(index) else { return };
                     let (cs, sl, ss, ms) = (cs.clone(), sl.clone(), ss.clone(), ms.clone());
                     let (cs_scroll, path_ref, refresh, cs_ref, so, dirty) =
                         (cs_scroll.clone(), path_ref.clone(), refresh.clone(), cs_ref.clone(), so.clone(), dirty.clone());
                     suite_common::confirm_discarding(&w2, dirty.get(), "presentation", move || {
+                    let ctl = ctl.clone();
                     if cs.child_by_name("editor").is_none() {
                         cs.add_titled(&cs_scroll, Some("editor"), "Editor");
                     }
@@ -1157,6 +1165,8 @@ impl DecksWindow {
                     *ss.borrow_mut() = slides;
                     *ms.borrow_mut() = masters;
                     *path_ref.borrow_mut() = None;
+                    // A template is a new document: no source, no provenance.
+                    ctl.clear_source_context();
                     dirty.set(false);
                     cs_ref.set(0);
                     so.set(None);
@@ -1181,6 +1191,7 @@ impl DecksWindow {
             let path_ref = file_path.clone();
             let masters = masters.clone();
             let dirty = dirty.clone();
+            let ctl = controller.clone();
 
             let act = gtk::gio::SimpleAction::new("open-file", None);
             act.connect_activate(move |_, _| {
@@ -1189,6 +1200,7 @@ impl DecksWindow {
                     w.clone(), cs_scroll.clone(), path_ref.clone(), masters.clone(), dirty.clone(),
                 );
                 let parent = w.clone();
+                let ctl = ctl.clone();
                 suite_common::confirm_discarding(&parent, dirty.get(), "presentation", move || {
                 let dlg = gtk::FileDialog::new();
                 dlg.set_filters(Some(&suite_common::file_dialogs::open_filters("Presentations (.pptx, .odp)", decks_core::FORMATS)));
@@ -1205,15 +1217,18 @@ impl DecksWindow {
                 let masters = masters.clone();
                 let dirty = dirty.clone();
 
+                let ctl = ctl.clone();
                 crate::file_pick::open(&dlg, &w,
                     move |result: Result<gio::File, glib::Error>| {
                         if let Ok(file) = result {
                             if let Some(path) = local_path(&file, false, &w2) {
                                 let path_str = path.to_string_lossy().to_string();
-                                match read_deck(&path_str) {
-                                    Ok(deck) => {
-                                        *ss.borrow_mut() = deck.slides;
-                                        *masters.borrow_mut() = deck.masters;
+                                match read_deck_with_context(&path_str) {
+                                    Ok((deck, context)) => {
+                                        // Model, report and provenance land as
+                                        // one session, only after a
+                                        // successful import (DCK-002).
+                                        ctl.install_opened_deck(deck, context);
                                         cs_ref.set(0);
                                         so.set(None);
                                         // Recent, as an open from the command
@@ -1272,8 +1287,10 @@ impl DecksWindow {
                     let deck = m_save.deck();
                     let (w_clone, dirty_save, slot_save) = (w_clone.clone(), dirty_save.clone(), slot_save.clone());
                     let target = path_str.clone();
-                    crate::loss_ui::save_after_asking(&w_clone.clone(), Some(&target), &target, move || match save_deck(&path_str, Some(&path_str), &deck) {
+                    let m_write = m_save.clone();
+                    crate::loss_ui::save_after_asking_with_context(&w_clone.clone(), m_write.clone(), Some(&target), &target, move || match save_deck(&path_str, &deck, &m_write.carried_for_save()) {
                         Ok(()) => {
+                            m_write.repin_after_save(&path_str);
                             let settings = gio::Settings::new("org.tunaos.decks");
                             suite_common::push_recent_file(&settings, &path_str);
                             dirty_save.set(false);
@@ -1327,9 +1344,15 @@ impl DecksWindow {
                                 let source = path_ref.borrow().clone();
                                 let (w2, path_ref, dirty_as, slot_as) = (w2.clone(), path_ref.clone(), dirty_as.clone(), slot_as.clone());
                                 let target = path_str.clone();
-                                let source_for_carry = source.clone();
-                                crate::loss_ui::save_after_asking(&w2.clone(), source.as_deref(), &target, move || match save_deck(&path_str, source_for_carry.as_deref(), &deck) {
+                                let m_write = m_inner.clone();
+                                crate::loss_ui::save_after_asking_with_context(&w2.clone(), m_write.clone(), source.as_deref(), &target, move || match save_deck(&path_str, &deck, &m_write.carried_for_save()) {
                                     Ok(()) => {
+                                        // Same-format Save As retains the
+                                        // session: re-pin to the new file.
+                                        // Cross-format, the fresh capture
+                                        // reports the new file's own
+                                        // incompatible-opaque set.
+                                        m_write.repin_after_save(&path_str);
                                         let settings = gio::Settings::new("org.tunaos.decks");
                                         suite_common::push_recent_file(&settings, &path_str);
                                         *path_ref.borrow_mut() = Some(path_str);
@@ -1459,6 +1482,11 @@ impl DecksWindow {
             // none) and must count as dirty so the close guard offers to
             // save it.
             *self.file_path.borrow_mut() = meta.original_path.as_ref().map(|p| p.to_string_lossy().to_string());
+            // The scratch file open_path just read is already deleted: its
+            // provenance would pin a ghost. Recovery adopts the snapshot's
+            // bytes with no context, so the next save inspects the live
+            // original instead (DCK-002; versioned payload is DCK-003).
+            self.controller.clear_source_context();
             self.controller.dirty.set(true);
             let name = meta.original_path.as_ref()
                 .and_then(|p| p.file_name())
@@ -1488,12 +1516,13 @@ impl DecksWindow {
     }
 
     pub fn open_path(&self, path: &str) -> Result<(), String> {
-        let deck = read_deck(path)?;
-        // The deck on screen becomes the file just read. (Recovery marks it
-        // dirty again afterwards: recovered work is unsaved.)
+        let (deck, context) = read_deck_with_context(path)?;
+        // The deck on screen becomes the file just read — model, report
+        // and provenance together, only after a successful import.
+        // (Recovery marks it dirty again afterwards: recovered work is
+        // unsaved.)
+        self.controller.install_opened_deck(deck, context);
         self.controller.dirty.set(false);
-        *self.controller.slides.borrow_mut() = deck.slides;
-        *self.controller.masters.borrow_mut() = deck.masters;
         self.current_slide.set(0);
         self.selected_object.set(None);
         *self.file_path.borrow_mut() = Some(path.to_string());
@@ -1518,15 +1547,13 @@ impl DecksWindow {
 // force rebuild
 
 /// Write `deck` to `path`, then upload it if `path` is the staged copy of
-/// a remote location (RFC-0003). Every save goes through here. `source`
-/// is the file the deck came from: its safe unmodelled parts (a thumbnail,
-/// custom XML) are carried into the saved file, read before the write
-/// replaces it (#1274, `suite_common::carry`).
-fn save_deck(path: &str, source: Option<&str>, deck: &Deck) -> Result<(), String> {
-    let carried = source.map(|s| suite_common::carry::capture(std::path::Path::new(s))).unwrap_or_default();
-    carried.write_with(std::path::Path::new(path), |p| {
-        write_deck(p.to_str().ok_or_else(|| "save path is not UTF-8".to_string())?, deck)
-    })?;
+/// a remote location (RFC-0003). Every save goes through here. `carried`
+/// is the controller's `carried_for_save`: the imported revision's safe
+/// parts, pinned at open — never a re-read of the live source path, which
+/// may have been deleted or replaced since (DCK-002). The write itself is
+/// one staged-package transaction (`write_deck_with_context`).
+fn save_deck(path: &str, deck: &Deck, carried: &suite_common::carry::Carried) -> Result<(), String> {
+    write_deck_with_context(path, deck, carried)?;
     suite_common::locations::commit_save(std::path::Path::new(path))
 }
 
