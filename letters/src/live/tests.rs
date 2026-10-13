@@ -672,3 +672,135 @@ fn review_anchors_hold_across_unicode_edits_and_one_history_undoes_them() {
         }
     });
 }
+
+/// Find enumeration and spelling iteration read the model, and their
+/// highlights are presentation-only (LET-003 steps 1-2): highlight and
+/// spell cycles leave the model bytes unchanged, with zero foreign edits.
+#[test]
+fn find_and_spell_never_touch_the_model() {
+    gtk_test(|| {
+        let doc = Document::from_plain_text("teh fox and the fox\nA second fox line");
+        let (buf, live) = tab(&doc);
+        let before = live.borrow().document().clone();
+        // Enumeration is over sequence offsets, case-insensitive.
+        let matches = crate::dialogs::find_matches(&before, "FOX");
+        assert_eq!(matches.len(), 3, "three foxes: {matches:?}");
+        let seq = letters_core::edit::sequence_text(&before);
+        let chars: Vec<char> = seq.chars().collect();
+        for (s, e) in &matches {
+            assert_eq!(chars[*s..*e].iter().collect::<String>().to_lowercase(), "fox");
+        }
+        // Highlight cycles: presentation tags on, then off again.
+        for name in ["search-match", "search-current"] {
+            if buf.tag_table().lookup(name).is_none() {
+                buf.tag_table().add(&gtk::TextTag::builder().name(name).build());
+            }
+        }
+        let tag = buf.tag_table().lookup("search-match").unwrap();
+        let cur = buf.tag_table().lookup("search-current").unwrap();
+        for _ in 0..2 {
+            {
+                let mut m = live.borrow_mut();
+                for (s, e) in &matches {
+                    let (bs, be) = (m.buffer_offset(*s).unwrap(), m.buffer_offset(*e).unwrap());
+                    buf.apply_tag(&tag, &buf.iter_at_offset(bs as i32), &buf.iter_at_offset(be as i32));
+                }
+                let (first, _) = (m.buffer_offset(matches[0].0).unwrap(), m.buffer_offset(matches[0].1).unwrap());
+                buf.apply_tag(&cur, &buf.iter_at_offset(first as i32), &buf.iter_at_offset(first as i32 + 3));
+            }
+            assert_eq!(live.borrow().document(), &before, "highlighting changed the model");
+            buf.remove_tag(&tag, &buf.start_iter(), &buf.end_iter());
+            buf.remove_tag(&cur, &buf.start_iter(), &buf.end_iter());
+            assert_eq!(live.borrow().document(), &before, "unhighlighting changed the model");
+        }
+        // Spelling iteration runs over the same sequence text (whether or
+        // not a dictionary is installed to flag "teh" with).
+        crate::spell::SpellChecker::new(&buf).check_all();
+        assert_eq!(live.borrow().document(), &before, "spell highlighting changed the model");
+        check(&buf, &live, "find and spell highlight cycles");
+    });
+}
+
+/// No buffer-without-model fallback writes content (LET-003 step 2): every
+/// entry point that needs a model refuses on a model-less buffer and
+/// leaves its text alone.
+#[test]
+fn no_buffer_without_model_fallback_writes_content() {
+    gtk_test(|| {
+        let buf = gtk::TextBuffer::new(None);
+        buf.set_text("untouched");
+        assert!(crate::live::of(&buf).is_none());
+        assert!(!crate::dialogs::replace_ranges(&buf, &[(0, 5)], "CHANGED"));
+        assert!(!crate::insert::paste_text(&buf, "CHANGED"));
+        assert!(!crate::insert::delete_selection(&buf));
+        crate::dialogs::apply_header_footer(&buf, "H", "F");
+        crate::bridge::apply_structured_edit(&buf, |e| {
+            e.toggle_page_break_at_cursor();
+        });
+        crate::spell::SpellChecker::new(&buf).check_all();
+        assert!(crate::dialogs::find_matches(&crate::bridge::document_of(&buf), "untouched").is_empty());
+        assert_eq!(text(&buf), "untouched", "a model-less buffer was written");
+    });
+}
+
+/// Mixed tables and objects share one history (LET-003 step 4): typing, a
+/// table-structure command, formatting and review edits undo together back
+/// to the loaded document, and the structure command reaches the model as
+/// `SetParagraphs`-family block ops, never text-marker hacks.
+#[test]
+fn seeded_table_and_object_edits_share_one_history() {
+    gtk_test(|| {
+        use letters_core::{Comment, ParaStyle, Run, RunStyle};
+        use letters_core::chips::{Chip, ChipKind};
+        let mut original = Document::from_plain_text("top\nEDIT ZONE\nbottom");
+        original.insert_table_at(1, 2, 2);
+        original.footnotes = vec!["The footnote.".into()];
+        original.table_spans.insert(1, vec![letters_core::model::CellSpan { row: 0, col: 0, rows: 1, cols: 2 }]);
+        original.table_fills.insert(1, vec![letters_core::model::CellFill { row: 1, col: 1, color: "ff0000".into() }]);
+        original.comments = vec![Comment { id: 7, author: "Ann".into(), date: "2026-10-01T09:00:00Z".into(), text: "Look".into(), resolved: false, parent: None }];
+        original.paragraphs[0].runs.push(Run { text: " noted".into(), style: RunStyle { comments: vec![7], ..Default::default() } });
+        original.paragraphs[0].runs.push(Run { text: "".into(), style: RunStyle { footnote: Some(0), ..Default::default() } });
+        original.paragraphs[0].runs.push(Run { text: "2026-10-03".into(), style: RunStyle { chip: Some(Chip { kind: ChipKind::Date, value: "2026-10-03".into() }), ..Default::default() } });
+        let seeds = [7u64, 12345, 0xdead_beef_cafe_f00d, 99];
+        for seed in seeds {
+            let (buf, live) = tab(&original);
+            // A table-structure command diffs to block ops only.
+            let before = live.borrow().document().clone();
+            let mut editor = letters_core::structured::StructuredEditor::new(before.clone());
+            editor.set_cursor(letters_core::edit::paragraph_start(&before, 2));
+            assert!(editor.insert_row_at_cursor(true));
+            let ops = letters_core::edit::diff(&before, editor.document());
+            assert!(!ops.is_empty(), "seed {seed}: the row insert diffed to nothing");
+            assert!(
+                ops.iter().all(|op| matches!(op, letters_core::edit::Op::SetParagraphs { .. })),
+                "seed {seed}: a table-structure command must stay SetParagraphs-family, got {ops:?}"
+            );
+            // One session: structure command, typing, formatting, comment.
+            let mut state = seed;
+            let mut next = || { state = state.wrapping_mul(0x51_7cc1_b727_220a).wrapping_add(1); (state >> 11) as usize };
+            crate::bridge::apply_structured_edit(&buf, |e| {
+                e.set_cursor(letters_core::edit::paragraph_start(&before, 2));
+                e.insert_row_at_cursor(true);
+            });
+            let zone = text(&buf).find("EDIT ZONE").map(|i| text(&buf)[..i].chars().count() as i32).unwrap();
+            type_at(&buf, zone + (next() % 9) as i32, "typed");
+            live.borrow_mut()
+                .restyle(&buf, 0, 1, |s| ParaStyle { alignment: letters_core::Alignment::Center, ..s.clone() });
+            if let Some(l) = crate::live::of(&buf) {
+                l.borrow_mut().edit_with(&buf, |doc| {
+                    letters_core::comments::reply(doc, 7, "Bo", "2026-10-02T09:00:00Z", "Agreed")
+                        .map(|(ops, _)| ops)
+                        .unwrap_or_default()
+                });
+            }
+            check(&buf, &live, &format!("seed {seed} mixed table/object edits"));
+            let mut undos = 0;
+            while live.borrow().can_undo() && undos < 500 {
+                undo(&buf, false);
+                undos += 1;
+            }
+            assert_eq!(live.borrow().document(), &original, "seed {seed}: one history did not restore everything");
+            check(&buf, &live, &format!("seed {seed} after undoing everything"));
+        }
+    });
+}

@@ -72,7 +72,16 @@ fn ask(tv: &adw::TabView) {
         glib::g_message!("letters", "add-comment: nothing selected and no word at the caret");
         return;
     };
-    let quoted: String = buf.text(&buf.iter_at_offset(a as i32), &buf.iter_at_offset(b as i32), false).chars().take(80).collect();
+    // The quoted text is the model's (LET-003): buffer offsets map to
+    // sequence offsets; without a live model there is nothing to quote.
+    let quoted: String = crate::live::of(&buf)
+        .map(|live| {
+            let mut m = live.borrow_mut();
+            let (s, e) = (m.sequence_offset(a), m.sequence_offset(b));
+            let seq: Vec<char> = letters_core::edit::sequence_text(m.document()).chars().collect();
+            seq[s.min(seq.len())..e.min(seq.len())].iter().take(80).collect()
+        })
+        .unwrap_or_default();
     let prompt = suite_common::dialogs::prompt(
         &suite_common::i18n("Add Comment"),
         Some(&format!("“{}”", quoted.trim())),

@@ -34,12 +34,11 @@ pub(crate) fn autosave_state_dir() -> std::path::PathBuf {
 
 // ── Per-tab state via widget Qdata ─────────────────────────────────────
 // Session identity (file/closing/autosave) is canonical, GTK-free state —
-// letters_core::DocumentSession (#103). The tab's actual document
-// *content* is still the GtkTextBuffer itself; there's no GTK-free
-// representation of that today (a larger design question than this
-// slice), so TabData only owns identity, not content. The session also
-// holds the import provenance (carried parts + loss findings pinned to the
-// opened revision, LET-001); content stays with the live model.
+// letters_core::DocumentSession (#103). The tab's document *content* is the
+// live model (`live.rs::LiveModel`, LET-003); the GtkTextBuffer is its
+// projection, hosting the caret, the selection and the IME. TabData only
+// owns identity, not content. The session also holds the import provenance
+// (carried parts + loss findings pinned to the opened revision, LET-001).
 
 #[derive(Clone)]
 pub(crate) struct TabData(pub(crate) Rc<RefCell<TabDataInner>>);

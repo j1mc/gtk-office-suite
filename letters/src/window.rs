@@ -1057,10 +1057,10 @@ fn autosave_all_tabs(tv: &adw::TabView, notices: &suite_common::autosave_notice:
 // ── Page setup helpers ────────────────────────────────────────────────
 
 fn update_word_count(buf: &gtk::TextBuffer, wc: &gtk4::Label) {
-    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-    // letters-core decides what counts as a word: the buffer also holds
-    // list markers and the pipes of a rendered table, and a whitespace
-    // split counted those, so an empty 3x3 table read as "11 words".
+    // The count is the model's (LET-003): the buffer also holds list
+    // markers, table pipes and footnote "[n]", which are presentation and
+    // never words.
+    let text = letters_core::edit::sequence_text(&crate::bridge::document_of(buf));
     let n = letters_core::editor_word_count(&text);
     // "1 words" shipped in the status bar because this was a bare format!.
     wc.set_text(&format!("{} {}", n, suite_common::ni18n("word", "words", n as u64)));
