@@ -28,6 +28,7 @@ pub fn opener(
     parent: Rc<RefCell<Option<adw::ApplicationWindow>>>,
     state: Rc<RefCell<WorkbookState>>,
     controller: Rc<RefCell<WorkbookController>>,
+    grid: gtk4::DrawingArea,
 ) -> Box<dyn Fn()> {
     Box::new(move || {
         let st = state.borrow();
@@ -111,6 +112,7 @@ pub fn opener(
             let ctl = controller.clone();
             let ct = chart_type.clone();
             let dlg = dialog.clone();
+            let grid = grid.clone();
             insert_btn.connect_clicked(move |_| {
                 use tables_core::sheet::ChartSpec;
                 let (col, first, last) = {
@@ -143,9 +145,9 @@ pub fn opener(
                     width_px: 480.0,
                     height_px: 280.0,
                 };
-                ctl.borrow_mut().mutate_sheet("Insert Chart", move |sheet| {
+                crate::sheet_actions::apply(&ctl, &grid, |c| c.mutate_sheet("Insert Chart", move |sheet| {
                     sheet.charts.push(chart);
-                });
+                }));
                 dlg.close();
             });
         }

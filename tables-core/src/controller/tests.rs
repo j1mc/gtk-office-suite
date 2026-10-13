@@ -760,11 +760,14 @@
         let mut controller = WorkbookController::new(2, 2).unwrap();
         controller.edit_cell(0, 0, "x");
         assert!(!controller.refuses_edit(0, 0));
+        // Locks must be configured before enabling sheet protection.
+        controller.set_cell_locked(1, 1, false);
         controller.set_sheet_protection(true, None);
         assert!(controller.sheet_is_protected() && controller.refuses_edit(0, 0));
         controller.edit_cell(0, 0, "y");
         assert_eq!(controller.state.borrow().sheet().cell(0, 0), "x");
-        controller.set_cell_locked(1, 1, false);
+        controller.set_cell_locked(0, 0, false);
+        assert!(controller.refuses_edit(0, 0), "protection also prevents unlocking a cell");
         assert!(!controller.refuses_edit(1, 1), "an unlocked cell stays editable");
         assert!(!controller.refuses_edit(99, 99), "out of range is not a refusal");
         controller.set_sheet_protection(false, None);

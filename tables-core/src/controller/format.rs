@@ -41,6 +41,15 @@ impl WorkbookController {
     /// Apply `change` to the style of every selected cell, as one undo step
     /// named `description`.
     pub fn format_selection(&mut self, description: &'static str, change: impl Fn(&mut CellStyle)) {
+        let (sheet, top, left, bottom, right) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            let (top, left, bottom, right) = sheet.selection_block();
+            (sheet.sheet_id, top, left, bottom, right)
+        };
+        if !self.authorize_format_cells(sheet, (top..=bottom).flat_map(|r| (left..=right).map(move |c| (r, c)))) {
+            return;
+        }
         // One SetStyle op per cell that actually changes.
         let ops: Vec<Op> = {
             let state = self.state.borrow();
@@ -58,6 +67,15 @@ impl WorkbookController {
 
     /// Draw (or clear) borders on the selection in `style` and `color`.
     pub fn border_selection(&mut self, preset: BorderPreset, style: BorderStyle, color: (f64, f64, f64)) {
+        let (sheet, top, left, bottom, right) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            let (top, left, bottom, right) = sheet.selection_block();
+            (sheet.sheet_id, top, left, bottom, right)
+        };
+        if !self.authorize_format_cells(sheet, (top..=bottom).flat_map(|r| (left..=right).map(move |c| (r, c)))) {
+            return;
+        }
         let mut after = {
             let state = self.state.borrow();
             let sheet = state.sheet();

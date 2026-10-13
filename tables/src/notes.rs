@@ -123,7 +123,7 @@ fn edit(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, v: &gtk::Adjust
             let b = text.buffer();
             let typed = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
             let note = (!deleted.get()).then_some(typed);
-            if ctl.borrow_mut().set_note(row, col, note) {
+            if crate::sheet_actions::apply(&ctl, &grid, |c| { c.set_note(row, col, note); }) {
                 refresh();
                 grid.queue_draw();
             }

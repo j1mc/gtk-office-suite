@@ -19,6 +19,7 @@ mod editing;
 mod format;
 mod ops;
 mod pivot;
+mod protection;
 mod sheets;
 mod state;
 mod view;
@@ -27,6 +28,8 @@ mod view;
 mod collab_tests;
 #[cfg(test)]
 mod ops_tests;
+#[cfg(test)]
+mod protection_tests;
 #[cfg(test)]
 mod tests;
 

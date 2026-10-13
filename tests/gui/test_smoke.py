@@ -5005,6 +5005,112 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self._put("A1", "changed")
         self.assertIsNone(self.process.poll(), "tables crashed under protection")
 
+    def _grid_selection(self, ref, extend=()):
+        from dogtail import rawinput
+        self._select(ref)
+        rawinput.keyCombo("Escape")
+        self.wait_until(lambda: not self._focused("Formula input"), bool,
+                        description="the grid to take focus")
+        for direction in extend:
+            rawinput.keyCombo(f"<Shift>{direction}")
+
+    def _protection_notice(self):
+        message = "This sheet is protected. Unprotect it to make changes."
+        notice = lambda: self.app.findChild(
+            lambda n: n.name == message and n.showing,
+            retry=False, requireResult=False)
+        self.wait_until(notice, bool, description="the protected operation's native refusal")
+        # A later operation must produce its own notice, not pass on this one.
+        self.wait_until(notice, lambda n: not n, description="the refusal notice to expire")
+
+    def test_protected_range_paste_is_atomic_and_unprotect_restores_editing(self):
+        from dogtail import rawinput
+        for ref, value in (("A1", "30"), ("B1", "31"), ("A2", "10"), ("B2", "11"),
+                           ("D1", "kept"), ("E1", "still"), ("D2", "intact"), ("E2", "unchanged")):
+            self._put(ref, value)
+        original = self._cells()[0]
+        self._grid_selection("A1", ("Right", "Down"))
+        self.wait_until(lambda: self._cells()[1]["sheet"]["selection"],
+                        lambda s: s == [0, 0, 1, 1], description="the two-by-two source selection")
+        rawinput.keyCombo("<Control>c")
+        self._grid_selection("D1")
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="the paste destination to be protected")
+        rawinput.keyCombo("<Control>v")
+        self._protection_notice()
+        self.assertEqual(self._cells()[0], original, "a refused range paste partly changed the workbook")
+        for name in ("D1: kept", "E1: still", "D2: intact", "E2: unchanged"):
+            self.wait_until(
+                lambda: self.app.findChildren(lambda n: n.roleName == "table cell" and n.name == name),
+                bool, description=f"AT-SPI to retain {name}")
+
+        # Rejection creates no undo entry: the next undo is protection itself.
+        self._act("undo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="undo to reach the protection toggle, not a rejected paste")
+        self.assertEqual(self._cells()[0], original)
+        self._act("redo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="redo to restore protection")
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="Unprotect Sheet to allow the same paste")
+        self._grid_selection("D1")
+        rawinput.keyCombo("<Control>v")
+        expected = dict(original)
+        for row in range(2):
+            for col in range(2):
+                expected[(row, col + 3)] = original[(row, col)]
+        self._wait_cells(lambda c: c == expected, "the complete range paste after unprotect")
+        self._act("undo")
+        self._wait_cells(lambda c: c == original, "one undo to restore every pasted destination")
+        self._put("D1", "editable")
+        self.assertIsNone(self.process.poll(), "tables crashed during protected range paste")
+
+    def test_protected_clear_sort_and_structural_actions_leave_no_history(self):
+        from dogtail import rawinput
+        for ref, value in (("A1", "30"), ("A2", "10"), ("B1", "row-one"), ("B2", "row-two")):
+            self._put(ref, value)
+        original = self._cells()[0]
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="the compound operation targets to be protected")
+        self._grid_selection("A1", ("Right", "Down"))
+        self.wait_until(lambda: self._cells()[1]["sheet"]["selection"],
+                        lambda s: s == [0, 0, 1, 1], description="the range selected for clearing")
+        rawinput.keyCombo("Delete")
+        self._protection_notice()
+        self.assertEqual(self._cells()[0], original, "protected Delete cleared part of the selection")
+
+        self._grid_selection("A1")
+        rawinput.keyCombo("<Alt>Down")
+        button = self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.roleName == "push button" and n.name == "Sort Ascending" and n.showing,
+                retry=False, requireResult=False),
+            bool, description="the protected column's sort menu")
+        button.do_action(0)
+        self._protection_notice()
+        cells, snap = self._cells()
+        self.assertEqual(cells, original, "a refused sort moved cells")
+        self.assertIsNone(snap["sheet"]["sorted_col"], "a refused sort changed its header indicator")
+        for action in ("insert-rows", "delete-rows", "insert-cols", "delete-cols"):
+            self._act(action)
+            self._protection_notice()
+            self.assertEqual(self._cells()[0], original, f"{action} changed a protected sheet")
+
+        self._act("undo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="one undo to unprotect after every rejected compound operation")
+        self.assertEqual(self._cells()[0], original)
+        self._grid_selection("A1", ("Right", "Down"))
+        rawinput.keyCombo("Delete")
+        self._wait_cells(lambda c: not c, "unprotected Delete to clear the entire selection")
+        self._act("undo")
+        self._wait_cells(lambda c: c == original, "one undo to restore the complete cleared range")
+        self.assertIsNone(self.process.poll(), "tables crashed during protected compound operations")
+
 
 class TablesNamedRangeSmoke(BaseGUITestCase):
     """Named ranges (#113): Define Name captures the current selection;

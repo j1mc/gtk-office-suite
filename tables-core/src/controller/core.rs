@@ -26,6 +26,9 @@ pub struct WorkbookController {
     /// after a successful save. Undoing back to a prior save point does not
     /// re-clean the flag — a conservative simplification (issue #99).
     dirty: bool,
+    /// Monotonic feedback token; compare before/after a user operation so a
+    /// rejection cannot leak into a later no-op. Trusted replay never changes it.
+    pub(super) protection_rejections: u64,
     /// The workbook's on-disk path, or `None` for an unsaved new document.
     /// Canonical document identity (#103) — window.rs reads/writes this
     /// shared cell rather than tracking its own copy.
@@ -41,6 +44,7 @@ impl WorkbookController {
             names: (Vec::new(), Vec::new()),
             broadcaster: Rc::new(Broadcaster::new()),
             dirty: false,
+            protection_rejections: 0,
             file_path: Rc::new(RefCell::new(None)),
         })
     }
@@ -87,6 +91,12 @@ impl WorkbookController {
         }
         self.notify();
         did
+    }
+
+    /// Changes only when protection rejects a user operation. Callers compare
+    /// the token before and after their operation to show native feedback.
+    pub fn protection_rejection_count(&self) -> u64 {
+        self.protection_rejections
     }
 
     pub fn is_dirty(&self) -> bool {
