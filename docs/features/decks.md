@@ -19,6 +19,12 @@ the pill at the bottom steps through slides and starts the show
 (**F5**). The Insert buttons (Text, Shape, Table, Chart, Image) are in the
 header bar. In a narrow window they fold into a single Insert menu.
 
+Double-click a text box to edit its text. **Return** inserts a new line;
+**Ctrl+Return** or **Apply** commits the edit. **Escape** or **Cancel** discards
+the draft. Closing the editor by clicking outside commits it. Committed edits
+support undo and redo. This is a plain-text editor, not a rich-text selection
+toolbar.
+
 ## The Format sidebar
 
 *The Format sidebar for a slide: its layout, background and transition.*

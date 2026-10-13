@@ -23,6 +23,22 @@
   ],
   "features": [
     {
+      "id": "decks.text.inline-edit",
+      "app": "decks",
+      "issue": 1551,
+      "title": "Double-click text editing commits multiline text with undo and cancel",
+      "scope": "Accessible plain-text editor; Ctrl+Return commits, Escape discards; undo/redo restores text. Edited title survives PPTX save and reopen. Does not claim rich-text selection formatting.",
+      "status": "verified",
+      "revision": "fd7f33b73e640547943208c41381130fa563b597",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksInlineTextSmoke::test_multiline_commit_undo_and_cancel",
+          "tests/gui/test_edit_render.py::DecksEditRenderJourney::test_text_box_and_shape_save_and_reopen"
+        ]
+      }
+    },
+    {
       "id": "letters.tables.insert",
       "app": "letters",
       "title": "Insert Table places one table at the cursor",
