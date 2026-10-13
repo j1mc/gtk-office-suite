@@ -18,6 +18,80 @@ use crate::engine::{MasterSlide, Slide, SlideObject};
 use crate::ops::Op;
 use suite_common_core::ops::History;
 
+/// How the selected objects are being worked on (DCK-005). The mode is
+/// session state owned by the controller, not a document edit: changing
+/// it never dirties the deck or touches history.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// Objects are selected as whole boxes.
+    #[default]
+    Object,
+    /// A text range inside one text box is being edited.
+    Text,
+    /// A table cell of one table object is current.
+    TableCell,
+    /// Navigation is scoped inside one group.
+    GroupScope,
+}
+
+/// A validated caret or range inside one text object: byte offsets that
+/// are Unicode scalar boundaries of that object's current text, with
+/// `start <= end`. Session state, never persistence: undo that changes
+/// the text revalidates or drops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextRange {
+    pub object_id: u64,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// What the window shows as current: stable ids throughout (DCK-005).
+/// The slide, the objects on it in selection order, the primary object
+/// inspectors and keyboard commands act on, and how they are being
+/// worked on. Owned by the controller; the shell derives view indices
+/// from it at the point of use and never stores positions of its own.
+/// Selection-only movement is not a document edit: it never dirties the
+/// deck, clears redo, or bumps the revision.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SelectionState {
+    pub slide_id: Option<u64>,
+    pub object_ids: Vec<u64>,
+    pub primary_object_id: Option<u64>,
+    pub mode: SelectionMode,
+    pub text_range: Option<TextRange>,
+}
+
+impl SelectionState {
+    pub fn none() -> Self {
+        SelectionState { slide_id: None, object_ids: Vec::new(), primary_object_id: None, mode: SelectionMode::Object, text_range: None }
+    }
+
+    /// Slide `slide_id` current, object `object` (if any) selected on it.
+    pub fn single(slide_id: u64, object: Option<u64>) -> Self {
+        SelectionState {
+            slide_id: Some(slide_id),
+            object_ids: object.into_iter().collect(),
+            primary_object_id: object,
+            mode: SelectionMode::Object,
+            text_range: None,
+        }
+    }
+}
+
+/// What one controller transaction did (DCK-005): whether it changed the
+/// document, which stable ids it touched, the repaired selection and the
+/// revision the document now stands at. Reads use snapshots and borrows
+/// that cannot mutate behind history; GTK signals go out after every
+/// borrow is dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxnOutcome {
+    pub applied: bool,
+    pub changed_slides: Vec<u64>,
+    pub changed_objects: Vec<u64>,
+    pub revision: u64,
+    pub selection: SelectionState,
+}
+
 pub struct DecksController {
     pub slides: Rc<RefCell<Vec<Slide>>>,
     pub masters: Rc<RefCell<Vec<MasterSlide>>>,
@@ -39,22 +113,31 @@ pub struct DecksController {
     /// dependencies edits recorded since. Session-owned, never widget
     /// state, and never reconstructed from the filename alone. `None`
     /// for new documents and recovered snapshots with no original bytes.
+    /// Keyed by stable slide ids (DCK-005), never positions.
     source_context: RefCell<Option<crate::provenance::DeckSourceContext>>,
     /// Monotonic session clock, bumped by every applied, undone or redone
     /// step. The save dialog binds its consent to this alongside the
     /// source fingerprint: an edit between the question and the
     /// confirmation un-confirms it (DCK-002).
     revision: Cell<u64>,
+    /// The revision the last successful save wrote, if any. Marking saved
+    /// is conditional on the revision actually committed
+    /// (`acknowledge_save`): an edit (or undo/redo) after the output was
+    /// staged leaves the deck dirty. `None` means unsaved since open.
+    saved_revision: Cell<Option<u64>>,
+    /// Controller-owned selection (DCK-005): stable ids, never positions.
+    selection: RefCell<SelectionState>,
 }
 
 /// What the master view put aside, to put back on Done.
 struct MasterEdit {
-    /// The master being edited.
-    index: usize,
+    /// The master being edited, by stable id.
+    master_id: u64,
     slides: Vec<Slide>,
     history: History<Op>,
-    /// The slide the view was opened from, to return to.
-    from: usize,
+    selection: SelectionState,
+    /// The slide the view was opened from, by stable id, to return to.
+    from_slide_id: u64,
 }
 
 /// The master as the stand-in slide the master view edits: its
@@ -67,21 +150,59 @@ fn master_as_slide(m: &MasterSlide) -> Slide {
         notes: String::new(),
         // No master: its decorations are the objects being edited, and
         // must not be drawn a second time underneath.
-        master_idx: None,
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
-/// `m` with the stand-in slide's edits.
+/// `m` with the stand-in slide's edits. The master's id, name, font, size
+/// and layouts are not editable decorations: they survive untouched, so
+/// the Done transaction only ever replaces background and shapes.
 fn master_from_slide(m: &MasterSlide, s: &Slide) -> MasterSlide {
     MasterSlide { background: s.background.clone(), shapes: s.objects.clone(), ..m.clone() }
 }
 
+/// The slide ids and object ids a deck holds, for transaction reporting.
+fn id_sets(slides: &[Slide]) -> (std::collections::BTreeSet<u64>, std::collections::BTreeSet<u64>) {
+    (
+        slides.iter().map(|s| s.ids.slide).collect(),
+        slides.iter().flat_map(|s| s.ids.objects.iter().copied()).collect(),
+    )
+}
+
+/// The slide ids one op group names, where still present afterwards.
+fn ops_slide_ids(ops: &[Op]) -> Vec<u64> {
+    ops.iter().filter_map(|op| match op {
+        Op::InsertSlide { .. } => None,
+        Op::DeleteSlide { slide }
+        | Op::MoveSlide { slide, .. }
+        | Op::SetSlide { slide, .. }
+        | Op::InsertObject { slide, .. }
+        | Op::DeleteObject { slide, .. }
+        | Op::MoveObject { slide, .. }
+        | Op::SetObject { slide, .. } => Some(*slide),
+        Op::SetMaster { .. } => None,
+    }).collect()
+}
+
+/// New ids the transaction minted, plus the named ids it touched that are
+/// still present: what a view should refresh.
+fn changed_ids(before: &std::collections::BTreeSet<u64>, after: &std::collections::BTreeSet<u64>, named: Vec<u64>) -> Vec<u64> {
+    let mut out: Vec<u64> = after.difference(before).copied().chain(named.into_iter().filter(|id| after.contains(id))).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 impl DecksController {
     pub fn new(slides: Vec<Slide>, masters: Vec<MasterSlide>) -> Self {
+        let mut slides = slides;
+        let mut masters = masters;
+        crate::ops::ensure_all_ids(&mut slides, &mut masters);
+        let selection = slides.first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
         Self {
             slides: Rc::new(RefCell::new(slides)),
             masters: Rc::new(RefCell::new(masters)),
@@ -91,6 +212,8 @@ impl DecksController {
             master_edit: RefCell::new(None),
             source_context: RefCell::new(None),
             revision: Cell::new(0),
+            saved_revision: Cell::new(None),
+            selection: RefCell::new(selection),
         }
     }
 
@@ -101,9 +224,45 @@ impl DecksController {
         self.revision.get()
     }
 
+    /// The revision a save should bind its consent and output to: the
+    /// current revision at the moment output starts. Committing the save
+    /// must go through [`DecksController::acknowledge_save`], which
+    /// refuses to mark clean when an edit landed meanwhile.
+    pub fn checkpoint(&self) -> u64 {
+        self.revision.get()
+    }
+
+    /// The revision the last successful save wrote, if any.
+    pub fn saved_revision(&self) -> Option<u64> {
+        self.saved_revision.get()
+    }
+
+    /// Mark the current revision saved, after the writer and the
+    /// destination commit both succeed. Prefer `acknowledge_save` for
+    /// asynchronous output, where the committed revision may be stale.
+    pub fn mark_saved(&self) {
+        self.saved_revision.set(Some(self.revision.get()));
+        self.dirty.set(false);
+    }
+
+    /// Mark `checkpoint` saved when it is still the current revision.
+    /// Returns whether the deck is now clean: an applied, undone or
+    /// redone step after the output was staged leaves it dirty, and the
+    /// save must be re-staged rather than silently marked clean.
+    pub fn acknowledge_save(&self, checkpoint: u64) -> bool {
+        if self.revision.get() == checkpoint {
+            self.mark_saved();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Install the deck just read together with its source context, only
     /// after a successful import — model, report and provenance land as
-    /// one session, never piecemeal.
+    /// one session, never piecemeal. Ids the reader left at 0 are
+    /// assigned once here; the selection returns to the first slide and
+    /// the save clock restarts unsaved.
     pub fn install_opened_deck(
         &self,
         deck: crate::engine::Deck,
@@ -111,7 +270,13 @@ impl DecksController {
     ) {
         *self.slides.borrow_mut() = deck.slides;
         *self.masters.borrow_mut() = deck.masters;
+        crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
         *self.source_context.borrow_mut() = Some(context);
+        *self.history.borrow_mut() = History::default();
+        self.revision.set(0);
+        self.saved_revision.set(None);
+        let first = self.slides.borrow().first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
+        *self.selection.borrow_mut() = first;
     }
 
     /// Drop the session's provenance: recovery adopts a snapshot's bytes,
@@ -211,50 +376,87 @@ impl DecksController {
 
     // ── The master view ───────────────────────────────────────────────
     //
-    // Keynote's Edit Master: the master of slide `slide_idx` takes the
-    // slides' place, as one slide whose objects are its decorations, and
-    // every editing command works on it as on a slide, with its own undo.
-    // Done (`finish_master`) puts the deck back and records the whole edit
-    // as one `SetMaster` step. Saving meanwhile saves the deck with the
-    // master as edited so far (`deck`).
+    // Keynote's Edit Master: the master of one slide takes the slides'
+    // place, as one slide whose objects are its decorations, and every
+    // editing command works on it as on a slide, with its own undo. Done
+    // (`finish_master`) puts the deck back and records the whole edit as
+    // one `SetMaster` step; `cancel_master` puts everything back with no
+    // step. The temporary editing scope is explicit: the view holds the
+    // deck's slides, history and selection aside, and either Done or
+    // Cancel restores the slides, history and selection — cancel restores
+    // the original document and history exactly. Saving meanwhile saves
+    // the deck with the master as edited so far (`deck`).
 
-    /// Open the master view on slide `slide_idx`'s master. Returns the
-    /// master's index, or `None` when the view is already open or there is
-    /// no such master.
-    pub fn edit_master(&self, slide_idx: usize) -> Option<usize> {
+    /// The master one slide uses: its `master_id`, or the deck's first
+    /// master when it names none. `None` with no masters at all.
+    fn master_id_for_slide(&self, slide_id: u64) -> Option<u64> {
+        let slides = self.slides.borrow();
+        let slide = slides.iter().find(|s| s.ids.slide == slide_id)?;
+        if let Some(id) = slide.master_id {
+            return self.masters.borrow().iter().any(|m| m.id == id).then_some(id);
+        }
+        self.masters.borrow().first().map(|m| m.id)
+    }
+
+    /// Open the master view on the master slide `slide_id` uses. Returns
+    /// the master's stable id, or `None` when the view is already open or
+    /// there is no such master.
+    pub fn edit_master(&self, slide_id: u64) -> Option<u64> {
         if self.master_edit.borrow().is_some() {
             return None;
         }
-        let index = self.slides.borrow().get(slide_idx)?.master_idx.unwrap_or(0);
-        let stand_in = master_as_slide(self.masters.borrow().get(index)?);
+        let master_id = self.master_id_for_slide(slide_id)?;
+        let masters = self.masters.borrow();
+        let master = masters.iter().find(|m| m.id == master_id)?.clone();
+        drop(masters);
+        let mut stand_in = master_as_slide(&master);
+        crate::ops::ensure_all_ids(std::slice::from_mut(&mut stand_in), &mut []);
+        let stand_in_id = stand_in.ids.slide;
         let slides = std::mem::replace(&mut *self.slides.borrow_mut(), vec![stand_in]);
         let history = std::mem::take(&mut *self.history.borrow_mut());
-        *self.master_edit.borrow_mut() = Some(MasterEdit { index, slides, history, from: slide_idx });
-        Some(index)
+        let selection = std::mem::take(&mut *self.selection.borrow_mut());
+        *self.selection.borrow_mut() = SelectionState::single(stand_in_id, None);
+        *self.master_edit.borrow_mut() = Some(MasterEdit { master_id, slides, history, selection, from_slide_id: slide_id });
+        Some(master_id)
     }
 
-    /// The master being edited, while the master view is open.
-    pub fn editing_master(&self) -> Option<usize> {
-        self.master_edit.borrow().as_ref().map(|e| e.index)
+    /// The master being edited, by stable id, while the master view is open.
+    pub fn editing_master(&self) -> Option<u64> {
+        self.master_edit.borrow().as_ref().map(|e| e.master_id)
     }
 
     /// Close the master view: the slides come back, and the master's edits
-    /// go into the deck's history as one step. Returns the slide the view
-    /// was opened from.
-    pub fn finish_master(&self) -> Option<usize> {
+    /// go into the deck's history as one step. Returns the id of the slide
+    /// the view was opened from.
+    pub fn finish_master(&self) -> Option<u64> {
         let edit = self.master_edit.borrow_mut().take()?;
         let stand_in = std::mem::replace(&mut *self.slides.borrow_mut(), edit.slides);
         *self.history.borrow_mut() = edit.history;
+        *self.selection.borrow_mut() = SelectionState::single(edit.from_slide_id, None);
+        self.repair_selection();
         if let Some(s) = stand_in.first() {
-            let old = self.masters.borrow().get(edit.index).cloned();
+            let old = self.masters.borrow().iter().find(|m| m.id == edit.master_id).cloned();
             if let Some(old) = old {
                 let new = master_from_slide(&old, s);
                 if format!("{new:?}") != format!("{old:?}") {
-                    self.apply_ops(vec![Op::SetMaster { index: edit.index, master: Box::new(new) }]);
+                    self.apply_ops(vec![Op::SetMaster { id: edit.master_id, master: Box::new(new) }]);
                 }
             }
         }
-        Some(edit.from)
+        Some(edit.from_slide_id)
+    }
+
+    /// Close the master view without keeping anything: the original
+    /// slides, history and selection come back exactly, and no history
+    /// step is recorded. Returns the id of the slide the view was opened
+    /// from.
+    pub fn cancel_master(&self) -> Option<u64> {
+        let edit = self.master_edit.borrow_mut().take()?;
+        *self.slides.borrow_mut() = edit.slides;
+        *self.history.borrow_mut() = edit.history;
+        *self.selection.borrow_mut() = edit.selection;
+        self.repair_selection();
+        Some(edit.from_slide_id)
     }
 
     /// The deck as it would be saved: while the master view is open, the
@@ -264,8 +466,10 @@ impl DecksController {
         let mut masters = self.masters.borrow().clone();
         let slides = match edit.as_ref() {
             Some(e) => {
-                if let (Some(m), Some(s)) = (masters.get(e.index).cloned(), self.slides.borrow().first()) {
-                    masters[e.index] = master_from_slide(&m, s);
+                if let (Some(m), Some(s)) = (masters.iter().find(|m| m.id == e.master_id).cloned(), self.slides.borrow().first().cloned()) {
+                    if let Some(slot) = masters.iter_mut().find(|m| m.id == e.master_id) {
+                        *slot = master_from_slide(&m, &s);
+                    }
                 }
                 e.slides.clone()
             }
@@ -278,94 +482,272 @@ impl DecksController {
         self.slides.borrow().len()
     }
 
-    /// Insert a new slide at `index` (typically the current slide count)
-    /// and return the index it landed at.
-    pub fn add_slide(&self, index: usize, slide: Slide) -> usize {
-        // The master view has one slide, the master: no others.
-        if self.master_edit.borrow().is_some() {
-            return 0;
-        }
-        let index = index.min(self.slides.borrow().len());
-        let mut slide = slide;
-        slide.ids = Default::default();
-        self.apply_ops(vec![Op::InsertSlide { at: index, slide: Box::new(slide) }]);
-        index
+    // ── Controller-owned selection ──────────────────────────────────
+    //
+    // The window never stores slide or object positions of its own: it
+    // reads this state and derives view indices (sidebar rows, canvas hit
+    // order) at the point of use. Moving the selection is session state,
+    // not a document edit.
+
+    /// The current selection, by stable ids.
+    pub fn selection(&self) -> SelectionState {
+        self.selection.borrow().clone()
     }
 
-    /// Delete the slide at `index`. Returns the index that should now be
-    /// selected, or `None` if `index` was the only slide (deletion is a
-    /// no-op — Decks always keeps at least one slide).
-    pub fn delete_slide(&self, index: usize) -> Option<usize> {
-        if self.master_edit.borrow().is_some() {
-            return None;
-        }
-        let (id, new_selected) = {
-            let slides = self.ids_ready();
-            if slides.len() <= 1 || index >= slides.len() {
-                return None;
-            }
-            (slides[index].ids.slide, index.min(slides.len().saturating_sub(2)))
-        };
-        self.apply_ops(vec![Op::DeleteSlide { slide: id }]);
-        Some(new_selected)
+    /// Replace the selection with `sel`, repaired against the slides now
+    /// present. Never dirties the deck, clears redo, or bumps the
+    /// revision: selection-only movement is not a document edit.
+    pub fn set_selection(&self, sel: SelectionState) {
+        *self.selection.borrow_mut() = self.repaired(sel);
     }
 
-    /// Put a copy of the slide at `index` (its objects, notes, transition,
-    /// builds, master and layout) right after it, as one undo step, and
-    /// return the copy's index. `None` in the master view or past the end.
-    pub fn duplicate_slide(&self, index: usize) -> Option<usize> {
-        if self.master_edit.borrow().is_some() {
-            return None;
-        }
-        let copy = self.slides.borrow().get(index)?.clone();
-        Some(self.add_slide(index + 1, copy))
-    }
-
-    /// Move the slide at `index` one place up (earlier). Returns its new
-    /// index, or `None` if it was already first.
-    pub fn move_slide_up(&self, index: usize) -> Option<usize> {
-        if index == 0 {
-            return None;
-        }
-        let id = self.ids_ready().get(index)?.ids.slide;
-        self.apply_ops(vec![Op::MoveSlide { slide: id, to: index - 1 }]);
-        Some(index - 1)
-    }
-
-    /// Move the slide at `index` one place down (later). Returns its new
-    /// index, or `None` if it was already last.
-    pub fn move_slide_down(&self, index: usize) -> Option<usize> {
-        let id = {
-            let slides = self.ids_ready();
-            if index + 1 >= slides.len() {
-                return None;
-            }
-            slides[index].ids.slide
-        };
-        self.apply_ops(vec![Op::MoveSlide { slide: id, to: index + 1 }]);
-        Some(index + 1)
-    }
-
-    /// The slides, every slide and object given its id first.
-    fn ids_ready(&self) -> std::cell::Ref<'_, Vec<Slide>> {
-        crate::ops::ensure_ids(&mut self.slides.borrow_mut());
-        self.slides.borrow()
-    }
-
-    /// Apply `ops` as one undo step, all or nothing.
-    /// Returns false (and records nothing) when there is nothing to do or
-    /// the group doesn't apply. The step's undo is the group's inverse ops.
-    pub fn apply_ops(&self, ops: Vec<Op>) -> bool {
-        if ops.is_empty() {
+    /// Make slide `slide_id` current with nothing selected on it. Returns
+    /// whether the slide exists.
+    pub fn select_slide(&self, slide_id: u64) -> bool {
+        if self.slides.borrow().iter().all(|s| s.ids.slide != slide_id) {
             return false;
         }
+        *self.selection.borrow_mut() = SelectionState::single(slide_id, None);
+        true
+    }
+
+    /// Select `object_ids` (in order) on slide `slide_id`, with `primary`
+    /// the object inspectors act on, worked on as `mode`. Unknown ids are
+    /// dropped; `primary` falls back to the first id kept. Returns
+    /// whether the slide exists.
+    pub fn select_objects(&self, slide_id: u64, object_ids: &[u64], primary: Option<u64>, mode: SelectionMode) -> bool {
+        if self.slides.borrow().iter().all(|s| s.ids.slide != slide_id) {
+            return false;
+        }
+        let slides = self.slides.borrow();
+        let slide = slides.iter().find(|s| s.ids.slide == slide_id).expect("checked above");
+        let kept: Vec<u64> = object_ids.iter().copied().filter(|id| slide.ids.objects.contains(id)).collect();
+        let primary = primary.filter(|p| kept.contains(p)).or_else(|| kept.first().copied());
+        let mode = if kept.is_empty() { SelectionMode::Object } else { mode };
+        *self.selection.borrow_mut() = SelectionState { slide_id: Some(slide_id), object_ids: kept, primary_object_id: primary, mode, text_range: None };
+        true
+    }
+
+    /// Point the text caret or range at `start..end` of object
+    /// `object_id`'s text on the selected slide, for text mode. The
+    /// bounds must be Unicode scalar boundaries of that object's current
+    /// text with `start <= end`; anything else (a non-text object, a
+    /// mid-character split, an unknown id) is rejected and leaves the
+    /// selection exactly as it was.
+    pub fn set_text_range(&self, object_id: u64, start: usize, end: usize) -> bool {
+        let sel = self.selection.borrow().clone();
+        let Some(slide_id) = sel.slide_id else { return false };
+        let slides = self.slides.borrow();
+        let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
+        let Some(at) = slide.object_index(object_id) else { return false };
+        let text = match &slide.objects[at] {
+            SlideObject::TextBox { text, .. } => text.clone(),
+            _ => return false,
+        };
+        drop(slides);
+        if start > end || end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            return false;
+        }
+        *self.selection.borrow_mut() = SelectionState {
+            slide_id: Some(slide_id),
+            object_ids: vec![object_id],
+            primary_object_id: Some(object_id),
+            mode: SelectionMode::Text,
+            text_range: Some(TextRange { object_id, start, end }),
+        };
+        true
+    }
+
+    /// Repair `sel` against the slides now present: a deleted slide falls
+    /// back to the first slide, deleted objects (and a primary among
+    /// them) are pruned, an empty object list resets the mode, and a text
+    /// range whose object or bounds are gone is dropped. Pure: callers
+    /// store the result.
+    fn repaired(&self, sel: SelectionState) -> SelectionState {
+        let slides = self.slides.borrow();
+        let slide_id = sel.slide_id.filter(|id| slides.iter().any(|s| s.ids.slide == *id)).or_else(|| slides.first().map(|s| s.ids.slide));
+        let Some(slide_id) = slide_id else { return SelectionState::none() };
+        let slide = slides.iter().find(|s| s.ids.slide == slide_id).expect("checked above");
+        let object_ids: Vec<u64> = sel.object_ids.into_iter().filter(|id| slide.ids.objects.contains(id)).collect();
+        let primary_object_id = sel.primary_object_id.filter(|p| object_ids.contains(p)).or_else(|| object_ids.first().copied());
+        let mut mode = if object_ids.is_empty() { SelectionMode::Object } else { sel.mode };
+        let text_range = match (mode, sel.text_range) {
+            (SelectionMode::Text, Some(r)) if object_ids.contains(&r.object_id) => {
+                let valid = slide.object_index(r.object_id).and_then(|at| match &slide.objects[at] {
+                    SlideObject::TextBox { text, .. } => Some(r.start <= r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end)),
+                    _ => Some(false),
+                }).unwrap_or(false);
+                if valid { Some(r) } else { mode = SelectionMode::Object; None }
+            }
+            _ => None,
+        };
+        SelectionState { slide_id: Some(slide_id), object_ids, primary_object_id, mode, text_range }
+    }
+
+    /// Repair the owned selection against the slides now present (after
+    /// an apply, undo, redo or master-view round trip) and return it.
+    /// Undo restores identities and selection: an undone insert prunes
+    /// what it took away instead of pointing past the end.
+    pub fn repair_selection(&self) -> SelectionState {
+        let repaired = self.repaired(self.selection.borrow().clone());
+        *self.selection.borrow_mut() = repaired.clone();
+        repaired
+    }
+
+    // ── View indices, derived only ────────────────────────────────
+    //
+    // GTK widgets (sidebar rows, canvas hit order, combo rows) are
+    // positional. Every index below is derived from a stable id at the
+    // point of use; nothing persists or communicates one.
+
+    /// The position of slide `slide_id`, if it is still in the deck.
+    pub fn slide_index(&self, slide_id: u64) -> Option<usize> {
+        self.slides.borrow().iter().position(|s| s.ids.slide == slide_id)
+    }
+
+    /// The z-position of object `object_id` on slide `slide_id`.
+    pub fn object_index(&self, slide_id: u64, object_id: u64) -> Option<usize> {
+        self.slides.borrow().iter().find(|s| s.ids.slide == slide_id)?.object_index(object_id)
+    }
+
+    /// The id of the slide at view position `index`.
+    pub fn slide_id_at(&self, index: usize) -> Option<u64> {
+        self.slides.borrow().get(index).map(|s| s.ids.slide)
+    }
+
+    /// The id of the object at z-position `object` on the slide at view
+    /// position `slide`.
+    pub fn object_id_at(&self, slide: usize, object: usize) -> Option<u64> {
+        self.slides.borrow().get(slide)?.ids.objects.get(object).copied()
+    }
+
+    /// The view position of the selected slide, if it is still present.
+    pub fn selected_slide_index(&self) -> Option<usize> {
+        let sel = self.selection.borrow();
+        let id = sel.slide_id?;
+        drop(sel);
+        self.slide_index(id)
+    }
+
+    /// The z-positions of the selected objects, in selection order.
+    pub fn selected_object_indices(&self) -> Vec<usize> {
+        let sel = self.selection.borrow().clone();
+        let Some(slide_id) = sel.slide_id else { return Vec::new() };
+        let slides = self.slides.borrow();
+        let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return Vec::new() };
+        sel.object_ids.into_iter().filter_map(|id| slide.object_index(id)).collect()
+    }
+
+    /// The z-position of the primary object, if still selected.
+    pub fn primary_object_index(&self) -> Option<usize> {
+        let sel = self.selection.borrow().clone();
+        let (slide_id, object_id) = (sel.slide_id?, sel.primary_object_id?);
+        drop(sel);
+        self.object_index(slide_id, object_id)
+    }
+
+    /// Insert a new slide at view position `at` (typically the slide
+    /// count) and return the new slide's stable id. The inserted slide's
+    /// incoming ids are discarded and minted fresh, so a duplicate or
+    /// paste is a slide of its own. `None` in the master view.
+    pub fn add_slide(&self, at: usize, slide: Slide) -> Option<u64> {
+        // The master view has one slide, the master: no others.
+        if self.master_edit.borrow().is_some() {
+            return None;
+        }
+        let at = at.min(self.slides.borrow().len());
+        let mut slide = slide;
+        slide.ids = Default::default();
+        // Fresh ids are minted from the session space at apply time; read
+        // the new slide's id back by position afterwards.
+        if !self.apply_ops(vec![Op::InsertSlide { at, slide: Box::new(slide) }]) {
+            return None;
+        }
+        self.slide_id_at(at)
+    }
+
+    /// Delete slide `slide_id`. Returns false in the master view, for an
+    /// unknown slide, or for the only slide (deletion is a no-op — Decks
+    /// always keeps at least one slide). The owned selection is repaired
+    /// to what is still there.
+    pub fn delete_slide(&self, slide_id: u64) -> bool {
+        if self.master_edit.borrow().is_some() {
+            return false;
+        }
+        {
+            let slides = self.slides.borrow();
+            if slides.len() <= 1 || slides.iter().all(|s| s.ids.slide != slide_id) {
+                return false;
+            }
+        }
+        self.apply_ops(vec![Op::DeleteSlide { slide: slide_id }])
+    }
+
+    /// Put a copy of slide `slide_id` (its objects, notes, transition,
+    /// builds, master and layout) right after it, as one undo step, and
+    /// return the copy's stable id. `None` in the master view or for an
+    /// unknown slide. Duplicate allocates fresh ids once: undo and redo
+    /// keep the copy's identity.
+    pub fn duplicate_slide(&self, slide_id: u64) -> Option<u64> {
+        if self.master_edit.borrow().is_some() {
+            return None;
+        }
+        let (at, copy) = {
+            let slides = self.slides.borrow();
+            let at = slides.iter().position(|s| s.ids.slide == slide_id)?;
+            (at, slides[at].clone())
+        };
+        self.add_slide(at + 1, copy)
+    }
+
+    /// Move slide `slide_id` one place up (earlier). False when it is
+    /// already first or unknown. The selection follows the id, not the
+    /// position.
+    pub fn move_slide_up(&self, slide_id: u64) -> bool {
+        let at = match self.slide_index(slide_id) {
+            Some(at) if at > 0 => at,
+            _ => return false,
+        };
+        self.apply_ops(vec![Op::MoveSlide { slide: slide_id, to: at - 1 }])
+    }
+
+    /// Move slide `slide_id` one place down (later). False when it is
+    /// already last or unknown.
+    pub fn move_slide_down(&self, slide_id: u64) -> bool {
+        let at = match self.slide_index(slide_id) {
+            Some(at) => at,
+            None => return false,
+        };
+        if at + 1 >= self.slides.borrow().len() {
+            return false;
+        }
+        self.apply_ops(vec![Op::MoveSlide { slide: slide_id, to: at + 1 }])
+    }
+
+    /// Every slide, object, master, layout and placeholder given its id
+    /// first. Reads that need ids call this before borrowing.
+    fn ids_ready(&self) {
+        crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
+    }
+
+    /// Apply `ops` as one undo step, all or nothing, and report what the
+    /// transaction did: whether it changed the document, which stable ids
+    /// it touched, the repaired selection and the new revision. Invalid,
+    /// no-op and cancelled changes record nothing: they do not dirty the
+    /// document, clear redo, or bump the revision.
+    pub fn apply_ops_txn(&self, ops: Vec<Op>) -> TxnOutcome {
+        let failed = TxnOutcome { applied: false, changed_slides: Vec::new(), changed_objects: Vec::new(), revision: self.revision.get(), selection: self.selection.borrow().clone() };
+        if ops.is_empty() {
+            return failed;
+        }
+        let before = id_sets(&self.slides.borrow());
         let inverses = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
             suite_common_core::ops::apply_all(doc, &ops)
         });
-        let Ok(inverses) = inverses else { return false };
+        let Ok(inverses) = inverses else { return failed };
         if inverses.is_empty() {
             // Every op addressed something deleted: nothing happened.
-            return false;
+            return failed;
         }
         // One user action, one step.
         self.history.borrow_mut().record(inverses);
@@ -374,32 +756,55 @@ impl DecksController {
         }
         self.revision.set(self.revision.get().wrapping_add(1));
         self.dirty.set(true);
-        true
+        let after = id_sets(&self.slides.borrow());
+        let selection = self.repair_selection();
+        TxnOutcome {
+            applied: true,
+            changed_slides: changed_ids(&before.0, &after.0, ops_slide_ids(&ops)),
+            changed_objects: changed_ids(&before.1, &after.1, Vec::new()),
+            revision: self.revision.get(),
+            selection,
+        }
     }
 
-    /// Edit the objects of slide `slide_idx` in place (same count) as one
-    /// undo step: one `SetObject` per object `edit` changes.
-    pub fn edit_objects(&self, slide_idx: usize, edit: impl FnOnce(&mut Vec<SlideObject>)) -> bool {
+    /// Apply `ops` as one undo step, all or nothing.
+    /// Returns false (and records nothing) when there is nothing to do or
+    /// the group doesn't apply. The step's undo is the group's inverse ops.
+    pub fn apply_ops(&self, ops: Vec<Op>) -> bool {
+        self.apply_ops_txn(ops).applied
+    }
+
+    /// Edit the objects of slide `slide_id` in place (same count) as one
+    /// undo step: one `SetObject` per object `edit` changes. The closure
+    /// still sees positional objects, but the caller names the slide by
+    /// stable id and the ops name every object by stable id.
+    pub fn edit_objects(&self, slide_id: u64, edit: impl FnOnce(&mut Vec<SlideObject>)) -> bool {
         let ops = {
-            let slides = self.ids_ready();
-            let Some(slide) = slides.get(slide_idx) else { return false };
+            self.ids_ready();
+            let slides = self.slides.borrow();
+            let Some(si) = slides.iter().position(|s| s.ids.slide == slide_id) else { return false };
+            let slide = &slides[si];
             let mut objects = slide.objects.clone();
             edit(&mut objects);
             if objects.len() != slide.objects.len() {
                 return false;
             }
-            crate::ops::set_objects(&slides, slide_idx, &objects)
+            crate::ops::set_objects(&slides, si, &objects)
         };
         self.apply_ops(ops)
     }
 
-    /// Crop the picture at `index` so it fills its box without distorting
+    /// Crop the picture `object_id` so it fills its box without distorting
     /// it, the overflow cut equally from both sides (PowerPoint's Crop to
     /// Fill), or, with `fill` false, show all of it again. One undo step;
     /// `false` when it is not a picture or nothing changes.
-    pub fn crop_picture(&self, slide_idx: usize, index: usize, fill: bool) -> bool {
-        self.edit_objects(slide_idx, |objects| {
-            if let Some(SlideObject::Image { path, w, h, crop, .. }) = objects.get_mut(index) {
+    pub fn crop_picture(&self, slide_id: u64, object_id: u64, fill: bool) -> bool {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return false,
+        };
+        self.edit_objects(slide_id, |objects| {
+            if let Some(SlideObject::Image { path, w, h, crop, .. }) = objects.get_mut(at) {
                 *crop = if fill {
                     match crate::image_px::natural_size_pt(path) {
                         Some((iw, ih)) => crate::engine::Crop::fill(iw, ih, *w, *h),
@@ -412,46 +817,60 @@ impl DecksController {
         })
     }
 
-    pub fn add_object(&self, slide_idx: usize, object: SlideObject) {
+    /// Append `object` to slide `slide_id` and return its fresh stable id.
+    /// Paste and duplicate allocate fresh ids once: redo keeps them.
+    /// `None` for an unknown slide.
+    pub fn add_object(&self, slide_id: u64, object: SlideObject) -> Option<u64> {
         let op = {
-            let slides = self.ids_ready();
-            let Some(slide) = slides.get(slide_idx) else { return };
+            self.ids_ready();
+            let slides = self.slides.borrow();
+            let slide = slides.iter().find(|s| s.ids.slide == slide_id)?;
             Op::InsertObject {
-                slide: slide.ids.slide,
+                slide: slide_id,
                 at: slide.objects.len(),
                 id: crate::ops::next_id(&slides),
                 object: Box::new(object),
             }
         };
-        self.apply_ops(vec![op]);
-    }
-
-    /// Delete object `index` of slide `slide_idx` (a tombstone: see ops.rs).
-    /// `_object` is what the caller believes is there; the op takes the
-    /// object from the slide itself.
-    pub fn delete_object(&self, slide_idx: usize, index: usize, _object: SlideObject) {
-        let op = {
-            let slides = self.ids_ready();
-            let Some(slide) = slides.get(slide_idx) else { return };
-            let Some(id) = slide.ids.objects.get(index) else { return };
-            Op::DeleteObject { slide: slide.ids.slide, id: *id }
+        let id = match &op {
+            Op::InsertObject { id, .. } => *id,
+            _ => unreachable!(),
         };
-        self.apply_ops(vec![op]);
+        if self.apply_ops(vec![op]) { Some(id) } else { None }
     }
 
-    pub fn move_object(&self, slide_idx: usize, index: usize, dx: f64, dy: f64) {
-        self.edit_objects(slide_idx, |o| {
-            if let Some(obj) = o.get_mut(index) {
+    /// Delete object `object_id` of slide `slide_id` (a tombstone: see
+    /// ops.rs). The op takes the object from the slide itself, so a
+    /// caller holding a stale copy cannot retarget it.
+    pub fn delete_object(&self, slide_id: u64, object_id: u64) -> bool {
+        if self.object_index(slide_id, object_id).is_none() {
+            return false;
+        }
+        self.apply_ops(vec![Op::DeleteObject { slide: slide_id, id: object_id }])
+    }
+
+    pub fn move_object(&self, slide_id: u64, object_id: u64, dx: f64, dy: f64) {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return,
+        };
+        self.edit_objects(slide_id, |o| {
+            if let Some(obj) = o.get_mut(at) {
                 crate::undo::offset_object(obj, dx, dy);
             }
         });
     }
 
-    /// Replace the changed span, keeping the surrounding run and paragraph
-    /// styles. The canonical object, not the caller's old text, owns undo.
-    pub fn change_text(&self, slide_idx: usize, index: usize, _old_text: String, new_text: String) {
-        self.edit_objects(slide_idx, |o| {
-            if let Some(SlideObject::TextBox { text, runs, body, .. }) = o.get_mut(index) {
+    /// Replace the object's text with `new_text`, keeping the surrounding
+    /// run and paragraph styles. The canonical object, not a caller's
+    /// stale snapshot, owns the diff and the undo.
+    pub fn change_text(&self, slide_id: u64, object_id: u64, new_text: String) {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return,
+        };
+        self.edit_objects(slide_id, |o| {
+            if let Some(SlideObject::TextBox { text, runs, body, .. }) = o.get_mut(at) {
                 if *text == new_text {
                     return;
                 }
@@ -481,35 +900,46 @@ impl DecksController {
         });
     }
 
-    pub fn resize_object(&self, slide_idx: usize, index: usize, _old_bounds: (f64, f64, f64, f64), new_bounds: (f64, f64, f64, f64)) {
-        self.edit_objects(slide_idx, |o| {
-            if let Some(obj) = o.get_mut(index) {
+    pub fn resize_object(&self, slide_id: u64, object_id: u64, new_bounds: (f64, f64, f64, f64)) {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return,
+        };
+        self.edit_objects(slide_id, |o| {
+            if let Some(obj) = o.get_mut(at) {
                 let (x, y, w, h) = new_bounds;
                 crate::undo::set_obj_bounds(obj, x, y, w, h);
             }
         });
     }
 
-    pub fn rotate_object(&self, slide_idx: usize, index: usize, _old_angle: f64, new_angle: f64) {
-        self.edit_objects(slide_idx, |o| {
-            if let Some(obj) = o.get_mut(index) {
+    pub fn rotate_object(&self, slide_id: u64, object_id: u64, new_angle: f64) {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return,
+        };
+        self.edit_objects(slide_id, |o| {
+            if let Some(obj) = o.get_mut(at) {
                 crate::undo::set_obj_rotation(obj, new_angle);
             }
         });
     }
 
-    pub fn align_objects(&self, slide_idx: usize, indices: &[usize], mode: crate::undo::AlignMode) {
+    /// Align the objects `object_ids` names on slide `slide_id` as one
+    /// undo step. Unknown ids are ignored; fewer than two known objects
+    /// is a no-op.
+    pub fn align_objects(&self, slide_id: u64, object_ids: &[u64], mode: crate::undo::AlignMode) {
         use crate::undo::{obj_bounds, AlignMode};
         let slides = self.slides.borrow();
-        if slide_idx >= slides.len() || indices.len() < 2 { return; }
-        let objects = &slides[slide_idx].objects;
-        let mut bounds_list = Vec::new();
-        let mut old_positions = Vec::new();
-        for &idx in indices {
-            if idx >= objects.len() { return; }
-            bounds_list.push(obj_bounds(&objects[idx]));
-            old_positions.push((objects[idx].x(), objects[idx].y()));
-        }
+        let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return };
+        let mut resolved: Vec<(u64, (f64, f64, f64, f64))> = object_ids.iter().filter_map(|id| {
+            slide.object_index(*id).map(|at| (*id, obj_bounds(&slide.objects[at])))
+        }).collect();
+        if resolved.len() < 2 { return; }
+        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        resolved.dedup_by(|a, b| a.0 == b.0);
+        if resolved.len() < 2 { return; }
+        let bounds_list: Vec<(f64, f64, f64, f64)> = resolved.iter().map(|(_, b)| *b).collect();
 
         let target = match mode {
             AlignMode::Left => bounds_list.iter().map(|b| b.0).fold(f64::INFINITY, f64::min),
@@ -520,6 +950,7 @@ impl DecksController {
             AlignMode::Middle => bounds_list.iter().map(|b| b.1 + b.3 / 2.0).sum::<f64>() / bounds_list.len() as f64,
         };
 
+        let ids: Vec<u64> = resolved.iter().map(|(id, _)| *id).collect();
         let new_positions: Vec<(f64, f64)> = bounds_list.iter().map(|&(x, y, w, h)| {
             match mode {
                 AlignMode::Left => (target, y),
@@ -531,30 +962,34 @@ impl DecksController {
             }
         }).collect();
         drop(slides);
-        let _ = old_positions;
-        self.place_objects(slide_idx, indices, &new_positions);
+        self.place_objects(slide_id, &ids, &new_positions);
     }
 
-    /// Move objects `indices` to `positions` (bounding-box origins) as one
-    /// undo step.
-    fn place_objects(&self, slide_idx: usize, indices: &[usize], positions: &[(f64, f64)]) {
-        self.edit_objects(slide_idx, |o| {
-            for (&i, &(x, y)) in indices.iter().zip(positions) {
-                if let Some(obj) = o.get_mut(i) {
-                    crate::undo::set_obj_origin(obj, x, y);
+    /// Move the objects `object_ids` names to `positions`
+    /// (bounding-box origins) as one undo step.
+    fn place_objects(&self, slide_id: u64, object_ids: &[u64], positions: &[(f64, f64)]) {
+        let ats: Vec<Option<usize>> = object_ids.iter().map(|id| self.object_index(slide_id, *id)).collect();
+        self.edit_objects(slide_id, |o| {
+            for (at, &(x, y)) in ats.iter().zip(positions) {
+                if let Some(at) = at {
+                    if let Some(obj) = o.get_mut(*at) {
+                        crate::undo::set_obj_origin(obj, x, y);
+                    }
                 }
             }
         });
     }
 
-    pub fn distribute_objects(&self, slide_idx: usize, indices: &[usize], mode: crate::undo::DistributeMode) {
+    pub fn distribute_objects(&self, slide_id: u64, object_ids: &[u64], mode: crate::undo::DistributeMode) {
         use crate::undo::{obj_bounds, DistributeMode};
         let slides = self.slides.borrow();
-        if slide_idx >= slides.len() || indices.len() < 3 { return; }
-        let objects = &slides[slide_idx].objects;
-        let mut items: Vec<(usize, (f64, f64, f64, f64))> = indices.iter().filter_map(|&i| {
-            objects.get(i).map(|o| (i, obj_bounds(o)))
+        let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return };
+        let mut items: Vec<(u64, (f64, f64, f64, f64))> = object_ids.iter().filter_map(|id| {
+            slide.object_index(*id).map(|at| (*id, obj_bounds(&slide.objects[at])))
         }).collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items.dedup_by(|a, b| a.0 == b.0);
+        if items.len() < 3 { return; }
 
         if mode == DistributeMode::Horizontal {
             items.sort_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap());
@@ -562,80 +997,91 @@ impl DecksController {
             let max_x = items.last().unwrap().1.0;
             let total_span = max_x - min_x;
             let step = total_span / (items.len() - 1) as f64;
-            let old_pos: Vec<(f64, f64)> = items.iter().map(|i| (i.1.0, i.1.1)).collect();
             let new_pos: Vec<(f64, f64)> = items.iter().enumerate().map(|(idx, item)| {
                 (min_x + idx as f64 * step, item.1.1)
             }).collect();
-            let sorted_indices: Vec<usize> = items.iter().map(|i| i.0).collect();
+            let sorted_ids: Vec<u64> = items.iter().map(|i| i.0).collect();
             drop(slides);
-            let _ = old_pos;
-            self.place_objects(slide_idx, &sorted_indices, &new_pos);
+            self.place_objects(slide_id, &sorted_ids, &new_pos);
         } else {
             items.sort_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap());
             let min_y = items.first().unwrap().1.1;
             let max_y = items.last().unwrap().1.1;
             let total_span = max_y - min_y;
             let step = total_span / (items.len() - 1) as f64;
-            let old_pos: Vec<(f64, f64)> = items.iter().map(|i| (i.1.0, i.1.1)).collect();
             let new_pos: Vec<(f64, f64)> = items.iter().enumerate().map(|(idx, item)| {
                 (item.1.0, min_y + idx as f64 * step)
             }).collect();
-            let sorted_indices: Vec<usize> = items.iter().map(|i| i.0).collect();
+            let sorted_ids: Vec<u64> = items.iter().map(|i| i.0).collect();
             drop(slides);
-            let _ = old_pos;
-            self.place_objects(slide_idx, &sorted_indices, &new_pos);
+            self.place_objects(slide_id, &sorted_ids, &new_pos);
         }
     }
 
-    pub fn z_order_object(&self, slide_idx: usize, index: usize, op: crate::undo::ZOrderOp) {
-        let op = {
-            let slides = self.ids_ready();
-            let Some(slide) = slides.get(slide_idx) else { return };
-            let Some(&id) = slide.ids.objects.get(index) else { return };
-            let to = crate::undo::z_order_index(index, slide.objects.len(), op);
-            if to == index {
-                return;
-            }
-            Op::MoveObject { slide: slide.ids.slide, id, to }
+    /// Move object `object_id` in the z-order as one undo step. Returns
+    /// whether it moved. The selection needs no follow: the id is
+    /// unchanged by the move.
+    pub fn z_order_object(&self, slide_id: u64, object_id: u64, op: crate::undo::ZOrderOp) -> bool {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return false,
         };
-        self.apply_ops(vec![op]);
+        let len = self.slides.borrow().iter().find(|s| s.ids.slide == slide_id).map(|s| s.objects.len()).unwrap_or(0);
+        let to = crate::undo::z_order_index(at, len, op);
+        if to == at {
+            return false;
+        }
+        self.apply_ops(vec![Op::MoveObject { slide: slide_id, id: object_id, to }])
     }
 
-    /// Apply one Format inspector edit to the objects `indices` on slide
-    /// `slide_idx`, as one undo step. Returns whether anything changed.
-    pub fn format_objects(&self, slide_idx: usize, indices: &[usize], edit: &crate::format::FormatEdit) -> bool {
-        self.edit_objects(slide_idx, |o| {
+    /// Apply one Format inspector edit to the objects `object_ids` names
+    /// on slide `slide_id`, as one undo step. Returns whether anything
+    /// changed.
+    pub fn format_objects(&self, slide_id: u64, object_ids: &[u64], edit: &crate::format::FormatEdit) -> bool {
+        let ats: Vec<usize> = {
+            let slides = self.slides.borrow();
+            let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
             let mut seen = Vec::new();
-            for &i in indices {
-                if seen.contains(&i) {
+            let mut ats = Vec::new();
+            for id in object_ids {
+                if seen.contains(id) {
                     continue;
                 }
-                seen.push(i);
-                if let Some(obj) = o.get_mut(i) {
+                seen.push(*id);
+                if let Some(at) = slide.object_index(*id) {
+                    ats.push(at);
+                }
+            }
+            ats
+        };
+        self.edit_objects(slide_id, |o| {
+            for at in ats {
+                if let Some(obj) = o.get_mut(at) {
                     crate::format::apply_edit(obj, edit);
                 }
             }
         })
     }
 
-    /// Set object `index`'s build in (`out` false) or out on slide
-    /// `slide_idx`, or remove it (`effect` None), as one undo step. A new
-    /// build goes last in the slide's build order. Returns whether
-    /// anything changed.
-    pub fn set_build(&self, slide_idx: usize, index: usize, out: bool, effect: Option<crate::builds::BuildEffect>) -> bool {
+    /// Set object `object_id`'s build in (`out` false) or out on slide
+    /// `slide_id`, or remove it (`effect` None), as one undo step. A new
+    /// build goes last in the slide's build order. The build names the
+    /// object by stable id, so reordering never retargets it. Returns
+    /// whether anything changed.
+    pub fn set_build(&self, slide_id: u64, object_id: u64, out: bool, effect: Option<crate::builds::BuildEffect>) -> bool {
         use crate::builds::Build;
         let (old, new) = {
             let slides = self.slides.borrow();
-            let Some(slide) = slides.get(slide_idx) else { return false };
-            if index >= slide.objects.len() {
+            let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
+            if !slide.ids.objects.contains(&object_id) {
                 return false;
             }
             let old = slide.builds.clone();
             let mut new = old.clone();
-            match (new.iter_mut().find(|b| b.object == index && b.out == out), effect) {
+            match (new.iter_mut().find(|b| b.object == object_id && b.out == out), effect) {
                 (Some(b), Some(e)) => b.effect = e,
-                (Some(_), None) => new.retain(|b| !(b.object == index && b.out == out)),
-                (None, Some(e)) => new.push(Build { object: index, effect: e, out }),
+                (Some(_), None) => new.retain(|b| !(b.object == object_id && b.out == out)),
+                (None, Some(e)) => new.push(Build { object: object_id, effect: e, out }),
                 (None, None) => {}
             }
             (old, new)
@@ -643,20 +1089,20 @@ impl DecksController {
         if old == new {
             return false;
         }
-        self.set_slide_props(slide_idx, |p| p.builds = new)
+        self.set_slide_props(slide_id, |p| p.builds = new)
     }
 
-    /// Set slide `slide_idx`'s speaker notes to `notes`, as the notes pane
+    /// Set slide `slide_id`'s speaker notes to `notes`, as the notes pane
     /// does on every change. Typing a word is one undo step, as in a text
     /// editor: a letter or digit added to a run of them joins that run's
     /// step, and anything else (a space, a deletion, a paste) starts one.
-    pub fn set_notes(&self, slide_idx: usize, notes: &str) -> bool {
-        let typing = match self.slides.borrow().get(slide_idx) {
+    pub fn set_notes(&self, slide_id: u64, notes: &str) -> bool {
+        let typing = match self.slides.borrow().iter().find(|s| s.ids.slide == slide_id) {
             Some(s) => one_word_char_added(&s.notes, notes),
             None => return false,
         };
         self.history.borrow_mut().set_merge(typing);
-        let changed = self.set_slide_props(slide_idx, |p| p.notes = notes.to_string());
+        let changed = self.set_slide_props(slide_id, |p| p.notes = notes.to_string());
         if !changed {
             // Nothing recorded, so the mark must not reach the next step.
             self.history.borrow_mut().set_merge(false);
@@ -664,87 +1110,166 @@ impl DecksController {
         changed
     }
 
-    /// Put slide `slide_idx` on layout `layout` of its master (Format ▸
+    /// Put slide `slide_id` on layout `layout_id` of its master (Format ▸
     /// Layout): its placeholder boxes move to the layout's places and it
     /// gains an empty box for each place it had nothing for
-    /// (`layouts::arrange`). A master with no layouts yet gets the standard
-    /// ones first, and `layout` indexes those. One undo step.
-    pub fn apply_layout(&self, slide_idx: usize, layout: usize) -> bool {
+    /// (`layouts::arrange`). One undo step. False for an unknown slide,
+    /// an unknown layout, or in the master view.
+    pub fn apply_layout(&self, slide_id: u64, layout_id: u64) -> bool {
         if self.master_edit.borrow().is_some() {
             return false;
         }
-        let (mi, needs_layouts) = {
-            let slides = self.ids_ready();
-            let Some(s) = slides.get(slide_idx) else { return false };
-            let mi = s.master_idx.unwrap_or(0);
+        self.ids_ready();
+        let target: crate::layouts::Layout = {
+            let slides = self.slides.borrow();
+            let Some(s) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
             let masters = self.masters.borrow();
-            let Some(m) = masters.get(mi) else { return false };
-            (mi, m.layouts.is_empty())
+            let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
+                Some(m) => m,
+                None => masters.first()?,
+            };
+            master.layouts.iter().find(|l| l.id == layout_id)?.clone()
         };
-        let mut ops = Vec::new();
-        if needs_layouts {
-            let mut m = self.masters.borrow()[mi].clone();
-            m.layouts = crate::layouts::standard();
-            ops.push(Op::SetMaster { index: mi, master: Box::new(m) });
+        self.apply_arranged_layout(slide_id, &target)
+    }
+
+    /// Put slide `slide_id` on the standard layout at view position `at`
+    /// (the picker's row for a master that has no layouts yet): the
+    /// master gains the standard six with fresh stable ids and the slide
+    /// takes the chosen one, all as one undo step. This is the only
+    /// positional layout entry point, for masters with nothing to name
+    /// yet; every other layout reference is a stable id.
+    pub fn apply_standard_layout(&self, slide_id: u64, at: usize) -> bool {
+        if self.master_edit.borrow().is_some() {
+            return false;
         }
-        let layouts = if needs_layouts { crate::layouts::standard() } else { self.masters.borrow()[mi].layouts.clone() };
-        let Some(target) = layouts.get(layout) else { return false };
-        let slides = self.slides.borrow();
-        let s = &slides[slide_idx];
-        let arranged = crate::layouts::arrange(s, target);
-        // The boxes the slide has, in place; then the new ones.
-        let kept = s.objects.len();
-        let mut props = crate::ops::SlideProps::of(s);
-        props.layout = Some(layout);
-        props.master_idx = Some(mi);
-        if props != crate::ops::SlideProps::of(s) {
-            ops.push(Op::SetSlide { slide: s.ids.slide, props: Box::new(props) });
+        self.ids_ready();
+        let (master_id, standard) = {
+            let slides = self.slides.borrow();
+            let Some(s) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
+            let masters = self.masters.borrow();
+            let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
+                Some(m) => m,
+                None => masters.first()?,
+            };
+            if !master.layouts.is_empty() {
+                return false;
+            }
+            (master.id, crate::layouts::standard())
+        };
+        // Fresh stable ids for the six, minted from the session space now
+        // so the target below names the id the op will store.
+        let mut layouts = standard;
+        {
+            let slides = self.slides.borrow();
+            let masters = self.masters.borrow();
+            let mut next = slides.iter().flat_map(|s| {
+                std::iter::once(s.ids.slide).chain(s.ids.objects.iter().copied()).chain(s.ids.deleted.iter().copied())
+            }).chain(masters.iter().map(|m| m.id)).max().unwrap_or(0) + 1;
+            for l in layouts.iter_mut() {
+                l.id = next;
+                next += 1;
+                for p in l.placeholders.iter_mut() {
+                    p.id = next;
+                    next += 1;
+                }
+            }
         }
-        ops.extend(crate::ops::set_objects(&slides, slide_idx, &arranged[..kept]));
-        let first = crate::ops::next_id(&slides);
-        for (k, (o, id)) in arranged[kept..].iter().zip(first..).enumerate() {
-            ops.push(Op::InsertObject { slide: s.ids.slide, at: kept + k, id, object: Box::new(o.clone()) });
-        }
-        drop(slides);
+        let target = layouts.get(at)?.clone();
+        let mut master = self.masters.borrow().iter().find(|m| m.id == master_id).cloned()?;
+        master.layouts = layouts;
+        // The SetMaster op goes first; the arranged-slide ops follow in
+        // the same group, so undo takes the added layouts away too.
+        let mut ops = vec![Op::SetMaster { id: master_id, master: Box::new(master) }];
+        ops.extend(self.arranged_ops(slide_id, master_id, &target)?);
         self.apply_ops(ops)
     }
 
-    /// Change slide `slide_idx`'s properties as one undo step.
-    fn set_slide_props(&self, slide_idx: usize, change: impl FnOnce(&mut crate::ops::SlideProps)) -> bool {
+    /// The ops that put slide `slide_id` on `target`: new boxes appended
+    /// with fresh ids, in-place boxes as `SetObject`s, and the slide's
+    /// master/layout ids. `None` for an unknown slide. Pure: the caller
+    /// applies the returned group (possibly with preceding ops) as one
+    /// transaction.
+    fn arranged_ops(&self, slide_id: u64, master_id: u64, target: &crate::layouts::Layout) -> Option<Vec<Op>> {
+        let slides = self.slides.borrow();
+        let si = slides.iter().position(|s| s.ids.slide == slide_id)?;
+        let s = &slides[si];
+        let arranged = crate::layouts::arrange(s, target);
+        // The boxes the slide has, in place; then the new ones.
+        let kept = s.objects.len();
+        let mut ops = Vec::new();
+        let mut props = crate::ops::SlideProps::of(s);
+        props.layout_id = Some(target.id);
+        props.master_id = Some(master_id);
+        if props != crate::ops::SlideProps::of(s) {
+            ops.push(Op::SetSlide { slide: slide_id, props: Box::new(props) });
+        }
+        ops.extend(crate::ops::set_objects(&slides, si, &arranged[..kept]));
+        let first = crate::ops::next_id(&slides);
+        for (k, (o, id)) in arranged[kept..].iter().zip(first..).enumerate() {
+            ops.push(Op::InsertObject { slide: slide_id, at: kept + k, id, object: Box::new(o.clone()) });
+        }
+        Some(ops)
+    }
+
+    /// Apply the arranged-layout ops for `target` as one undo step.
+    fn apply_arranged_layout(&self, slide_id: u64, target: &crate::layouts::Layout) -> bool {
+        let ops = {
+            let slides = self.slides.borrow();
+            let s = slides.iter().find(|s| s.ids.slide == slide_id)?;
+            let masters = self.masters.borrow();
+            let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
+                Some(m) => m,
+                None => masters.first()?,
+            };
+            self.arranged_ops(slide_id, master.id, target)?
+        };
+        self.apply_ops(ops)
+    }
+
+    /// Change slide `slide_id`'s properties as one undo step.
+    fn set_slide_props(&self, slide_id: u64, change: impl FnOnce(&mut crate::ops::SlideProps)) -> bool {
         let op = {
-            let slides = self.ids_ready();
-            let Some(slide) = slides.get(slide_idx) else { return false };
+            self.ids_ready();
+            let slides = self.slides.borrow();
+            let Some(slide) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
             let old = crate::ops::SlideProps::of(slide);
             let mut new = old.clone();
             change(&mut new);
             if new == old {
                 return false;
             }
-            Op::SetSlide { slide: slide.ids.slide, props: Box::new(new) }
+            Op::SetSlide { slide: slide_id, props: Box::new(new) }
         };
         self.apply_ops(vec![op])
     }
 
-    /// Set how slide `slide_idx` arrives when presented, as one undo step.
+    /// Set how slide `slide_id` arrives when presented, as one undo step.
     /// Returns whether anything changed.
-    pub fn set_transition(&self, slide_idx: usize, transition: crate::engine::Transition) -> bool {
-        self.set_slide_props(slide_idx, |p| p.transition = transition)
+    pub fn set_transition(&self, slide_id: u64, transition: crate::engine::Transition) -> bool {
+        self.set_slide_props(slide_id, |p| p.transition = transition)
     }
 
-    /// What the inspector shows for object `index` on slide `slide_idx`.
-    /// Edit the chart at object `index` of slide `slide_idx`: one undo
+    /// What the inspector shows for object `object_id` on slide `slide_id`.
+    /// Edit the chart at object `object_id` of slide `slide_id`: one undo
     /// step, or none when the edit changes nothing.
-    pub fn edit_chart(&self, slide_idx: usize, index: usize, edit: &crate::engine::chart::ChartEdit) -> bool {
-        self.edit_objects(slide_idx, |o| {
-            if let Some(SlideObject::Chart { chart, .. }) = o.get_mut(index) {
+    pub fn edit_chart(&self, slide_id: u64, object_id: u64, edit: &crate::engine::chart::ChartEdit) -> bool {
+        let at = match self.object_index(slide_id, object_id) {
+            Some(at) => at,
+            None => return false,
+        };
+        self.edit_objects(slide_id, |o| {
+            if let Some(SlideObject::Chart { chart, .. }) = o.get_mut(at) {
                 chart.apply(edit);
             }
         })
     }
 
-    pub fn object_format(&self, slide_idx: usize, index: usize) -> Option<crate::format::ObjectFormat> {
+    pub fn object_format(&self, slide_id: u64, object_id: u64) -> Option<crate::format::ObjectFormat> {
         let slides = self.slides.borrow();
-        slides.get(slide_idx)?.objects.get(index).map(crate::format::ObjectFormat::of)
+        let slide = slides.iter().find(|s| s.ids.slide == slide_id)?;
+        let at = slide.object_index(object_id)?;
+        slide.objects.get(at).map(crate::format::ObjectFormat::of)
     }
 
     pub fn undo(&self) -> bool {
@@ -759,6 +1284,7 @@ impl DecksController {
             }
             self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
+            self.repair_selection();
         }
         done
     }
@@ -775,20 +1301,9 @@ impl DecksController {
             }
             self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
+            self.repair_selection();
         }
         done
-    }
-
-    /// The current slide and selected object after an undo or redo: the
-    /// slide kept if it is still there (the last one if not), and the
-    /// object kept only if its slide is and still has it. An undone insert
-    /// can take away either, and the window used to keep indices past the
-    /// end.
-    pub fn repair_selection(&self, current: usize, selected: Option<usize>) -> (usize, Option<usize>) {
-        let slides = self.slides.borrow();
-        let kept = current.min(slides.len().saturating_sub(1));
-        let selected = selected.filter(|i| kept == current && slides.get(current).is_some_and(|s| *i < s.objects.len()));
-        (kept, selected)
     }
 
     pub fn can_undo(&self) -> bool {

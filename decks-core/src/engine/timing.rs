@@ -81,9 +81,9 @@ fn behaviours(b: &Build, spid: u32, id: &mut u32) -> String {
     }
 }
 
-/// A slide's `p:timing`, or `None` without builds. `spid(i)` is the cNvPr
-/// id the writer gave object `i`.
-pub(crate) fn timing_xml(builds: &[Build], spid: impl Fn(usize) -> u32) -> Option<String> {
+/// A slide's `p:timing`, or `None` without builds. `spid(id)` is the cNvPr
+/// id the writer gave the object with stable id `id`.
+pub(crate) fn timing_xml(builds: &[Build], spid: impl Fn(u64) -> u32) -> Option<String> {
     if builds.is_empty() {
         return None;
     }
@@ -123,13 +123,9 @@ pub(crate) fn timing_xml(builds: &[Build], spid: impl Fn(usize) -> u32) -> Optio
 }
 
 /// The builds a slide's `p:timing` describes, in order. `object_of(spid)`
-/// is the model index of the object with that cNvPr id (None for one the
-/// reader didn't keep).
-pub(crate) fn read_builds(slide_xml: &str, object_of: impl Fn(u32) -> Option<usize>) -> Vec<Build> {
-    let mut reader = Reader::from_str(slide_xml);
-    let mut in_timing = false;
-    // The effect being read: (class, preset, subtype, target spid).
-    let mut effect: Option<(bool, u32, u32, Option<u32>)> = None;
+/// is the stable object id with that cNvPr id (None for one the reader
+/// didn't keep).
+pub(crate) fn read_builds(slide_xml: &str, object_of: impl Fn(u32) -> Option<u64>) -> Vec<Build> {
     let mut depth_in_effect = 0usize;
     let mut out = Vec::new();
     let attr = |e: &quick_xml::events::BytesStart, k: &str| -> Option<String> {
@@ -203,15 +199,17 @@ mod tests {
 
     #[test]
     fn builds_round_trip_through_the_time_tree() {
+        // Builds name stable object ids; the writer maps those to cNvPr
+        // ids and the reader maps them back.
         let builds = vec![
-            Build { object: 1, effect: BuildEffect::Dissolve, out: false },
-            Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-            Build { object: 2, effect: BuildEffect::Appear, out: false },
-            Build { object: 1, effect: BuildEffect::Move(Edge::Bottom), out: true },
+            Build { object: 11, effect: BuildEffect::Dissolve, out: false },
+            Build { object: 10, effect: BuildEffect::Move(Edge::Left), out: false },
+            Build { object: 12, effect: BuildEffect::Appear, out: false },
+            Build { object: 11, effect: BuildEffect::Move(Edge::Bottom), out: true },
         ];
-        let xml = timing_xml(&builds, |i| 2 + i as u32).unwrap();
+        let xml = timing_xml(&builds, |id| id as u32 - 8).unwrap();
         let slide = format!("<p:sld xmlns:p=\"p\"><p:cSld/>{xml}</p:sld>");
-        let back = read_builds(&slide, |spid| spid.checked_sub(2).map(|i| i as usize));
+        let back = read_builds(&slide, |spid| Some(spid as u64 + 8));
         assert_eq!(back, builds);
         assert_eq!(timing_xml(&[], |_| 0), None);
     }
@@ -226,7 +224,7 @@ mod tests {
             <p:par><p:cTn id="10" presetID="1" presetClass="exit"><p:childTnLst><p:set><p:cBhvr><p:cTn id="11"/>
               <p:tgtEl><p:spTgt spid="99"/></p:tgtEl></p:cBhvr></p:set></p:childTnLst></p:cTn></p:par>
             </p:childTnLst></p:cTn></p:par></p:tnLst></p:timing></p:sld>"#;
-        let back = read_builds(slide, |spid| (spid == 7).then_some(0));
-        assert_eq!(back, vec![Build { object: 0, effect: BuildEffect::Dissolve, out: false }], "emphasis is not a build");
+        let back = read_builds(slide, |spid| (spid == 7).then_some(70));
+        assert_eq!(back, vec![Build { object: 70, effect: BuildEffect::Dissolve, out: false }], "emphasis is not a build");
     }
 }

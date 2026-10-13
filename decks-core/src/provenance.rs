@@ -515,8 +515,9 @@ mod tests {
         ctx.note_ops(&[
             Op::DeleteSlide { slide: 3 },
             Op::SetMaster {
-                index: 0,
+                id: 11,
                 master: Box::new(crate::engine::MasterSlide {
+                    id: 11,
                     name: String::new(),
                     background: String::new(),
                     default_font: String::new(),
@@ -560,11 +561,11 @@ mod tests {
                 background: String::new(),
                 objects: vec![],
                 notes: String::new(),
-                master_idx: None,
+                master_id: None,
                 transition: Default::default(),
                 builds: vec![],
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             })
         };
         let object = || {
@@ -607,8 +608,9 @@ mod tests {
                 object: object(),
             },
             Op::SetMaster {
-                index: 0,
+                id: 11,
                 master: Box::new(crate::engine::MasterSlide {
+                    id: 11,
                     name: String::new(),
                     background: String::new(),
                     default_font: String::new(),

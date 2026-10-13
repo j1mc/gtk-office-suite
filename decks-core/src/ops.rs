@@ -26,11 +26,12 @@
 //    whole (last writer wins per object); slide properties are one
 //    register (`SetSlide`). Finer registers (per field, like Tables' cell
 //    fields) are a Phase 3 refinement where concurrency needs them.
-// 4. **Builds follow their objects.** Deleting an object drops its builds
-//    and renumbers the rest, moving one renumbers them; the inverses put
-//    them back.
+// 4. **Builds follow their objects by stable id.** Deleting an object
+//    drops the builds that name its id; moving or reordering one touches
+//    nothing, because identity is not position. The inverses put builds
+//    back.
 
-use crate::builds::{after_delete, after_reorder, Build};
+use crate::builds::Build;
 use crate::engine::{MasterSlide, Slide, SlideObject, Transition};
 
 /// A slide's and its objects' stable ids.
@@ -50,10 +51,13 @@ pub struct SlideProps {
     pub title: String,
     pub background: String,
     pub notes: String,
-    pub master_idx: Option<usize>,
+    /// The slide's master, by stable master id — never a position in the
+    /// deck's masters, which reordering or a master insert invalidates.
+    pub master_id: Option<u64>,
     pub transition: Transition,
     pub builds: Vec<Build>,
-    pub layout: Option<usize>,
+    /// The slide's layout, by stable layout id within its master.
+    pub layout_id: Option<u64>,
 }
 
 impl SlideProps {
@@ -62,10 +66,10 @@ impl SlideProps {
             title: s.title.clone(),
             background: s.background.clone(),
             notes: s.notes.clone(),
-            master_idx: s.master_idx,
+            master_id: s.master_id,
             transition: s.transition,
             builds: s.builds.clone(),
-            layout: s.layout,
+            layout_id: s.layout_id,
         }
     }
 
@@ -73,10 +77,10 @@ impl SlideProps {
         s.title = self.title;
         s.background = self.background;
         s.notes = self.notes;
-        s.master_idx = self.master_idx;
+        s.master_id = self.master_id;
         s.transition = self.transition;
         s.builds = self.builds;
-        s.layout = self.layout;
+        s.layout_id = self.layout_id;
     }
 }
 
@@ -95,10 +99,11 @@ pub enum Op {
     /// Move an object to z-position `to` (counted after it is taken out).
     MoveObject { slide: u64, id: u64, to: usize },
     SetObject { slide: u64, id: u64, object: Box<SlideObject> },
-    /// Replace master `index` (its background, font and decorations), as
-    /// the master view's Done commits an edit: one step, whatever was
-    /// changed on the master.
-    SetMaster { index: usize, master: Box<MasterSlide> },
+    /// Replace the master with stable id `id` (its background, font,
+    /// decorations and layouts), as the master view's Done commits an
+    /// edit: one step, whatever was changed on the master. Addressed by
+    /// id, so a master insert or reorder elsewhere cannot retarget it.
+    SetMaster { id: u64, master: Box<MasterSlide> },
 }
 
 /// What an op edits: the slides, and the masters they use. The controller
@@ -128,10 +133,12 @@ pub fn with_slides<R>(slides: &mut Vec<Slide>, f: impl FnOnce(&mut DeckDoc) -> R
 /// rest to the slides (`apply`).
 pub fn apply_doc(doc: &mut DeckDoc, op: &Op) -> Result<Vec<Op>, OpError> {
     match op {
-        Op::SetMaster { index, master } => {
-            let slot = doc.masters.get_mut(*index).ok_or(OpError::OutOfRange)?;
-            let old = std::mem::replace(slot, (**master).clone());
-            Ok(vec![Op::SetMaster { index: *index, master: Box::new(old) }])
+        Op::SetMaster { id, master } => {
+            let slot = doc.masters.iter_mut().find(|m| m.id == *id).ok_or(OpError::OutOfRange)?;
+            let mut new = (**master).clone();
+            new.id = *id;
+            let old = std::mem::replace(slot, new);
+            Ok(vec![Op::SetMaster { id: *id, master: Box::new(old) }])
         }
         _ => apply(&mut doc.slides, op),
     }
@@ -140,7 +147,7 @@ pub fn apply_doc(doc: &mut DeckDoc, op: &Op) -> Result<Vec<Op>, OpError> {
 /// Why an op could not be applied. The deck is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpError {
-    /// A position past the end.
+    /// A position past the end, or an unknown master id.
     OutOfRange,
     /// An insert of an id that is already there.
     Duplicate,
@@ -153,6 +160,19 @@ fn max_id(slides: &[Slide]) -> u64 {
     slides
         .iter()
         .flat_map(|s| std::iter::once(s.ids.slide).chain(s.ids.objects.iter().copied()).chain(s.ids.deleted.iter().copied()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The largest master, layout or placeholder id in use.
+fn max_master_id(masters: &[MasterSlide]) -> u64 {
+    masters
+        .iter()
+        .flat_map(|m| {
+            std::iter::once(m.id).chain(m.layouts.iter().flat_map(|l| {
+                std::iter::once(l.id).chain(l.placeholders.iter().map(|p| p.id))
+            }))
+        })
         .max()
         .unwrap_or(0)
 }
@@ -174,9 +194,42 @@ pub fn ensure_ids(slides: &mut [Slide]) {
     }
 }
 
-/// A fresh id, after [`ensure_ids`].
-pub fn next_id(slides: &[Slide]) -> u64 {
-    max_id(slides) + 1
+/// Give every slide, object, master, layout and placeholder without an id
+/// a fresh one, from one session id space. Readers call this once after
+/// import (which leaves every id 0); the controller calls it whenever a
+/// master gains layouts (e.g. the standard six). Idempotent: assigned ids
+/// never change, so stable references survive.
+pub fn ensure_all_ids(slides: &mut [Slide], masters: &mut [MasterSlide]) {
+    let mut next = max_id(slides).max(max_master_id(masters)) + 1;
+    for m in masters.iter_mut() {
+        if m.id == 0 {
+            m.id = next;
+            next += 1;
+        }
+        for l in m.layouts.iter_mut() {
+            if l.id == 0 {
+                l.id = next;
+                next += 1;
+            }
+            for p in l.placeholders.iter_mut() {
+                if p.id == 0 {
+                    p.id = next;
+                    next += 1;
+                }
+            }
+        }
+    }
+    for s in slides.iter_mut() {
+        if s.ids.slide == 0 {
+            s.ids.slide = next;
+            next += 1;
+        }
+        s.ids.objects.truncate(s.objects.len());
+        while s.ids.objects.len() < s.objects.len() {
+            s.ids.objects.push(next);
+            next += 1;
+        }
+    }
 }
 
 fn slide_pos(slides: &[Slide], id: u64) -> Option<usize> {
@@ -254,12 +307,8 @@ pub fn apply(slides: &mut Vec<Slide>, op: &Op) -> Result<Vec<Op>, OpError> {
             s.objects.insert(*at, (**object).clone());
             s.ids.objects.insert(*at, *id);
             s.ids.deleted.retain(|d| d != id);
-            // Builds point at positions: the ones at or after `at` move up.
-            for b in &mut s.builds {
-                if b.object >= *at {
-                    b.object += 1;
-                }
-            }
+            // Builds name objects by stable id: inserting one moves
+            // z-positions but retargets nothing.
             Ok(vec![Op::DeleteObject { slide: *slide, id: *id }])
         }
         Op::DeleteObject { slide, id } => {
@@ -270,8 +319,8 @@ pub fn apply(slides: &mut Vec<Slide>, op: &Op) -> Result<Vec<Op>, OpError> {
             let object = s.objects.remove(at);
             s.ids.objects.remove(at);
             s.ids.deleted.push(*id);
-            let had_builds = s.builds.iter().any(|b| b.object == at);
-            s.builds = after_delete(&s.builds, at);
+            let had_builds = s.builds.iter().any(|b| b.object == *id);
+            s.builds = crate::builds::without_object(&s.builds, *id);
             let mut undo = vec![Op::InsertObject { slide: *slide, at, id: *id, object: Box::new(object) }];
             if had_builds {
                 // Its own builds went with it: put the slide's builds back.
@@ -286,14 +335,11 @@ pub fn apply(slides: &mut Vec<Slide>, op: &Op) -> Result<Vec<Op>, OpError> {
             if *to >= s.objects.len() {
                 return Err(OutOfRange);
             }
-            let mut order: Vec<usize> = (0..s.objects.len()).collect();
-            let o = order.remove(from);
-            order.insert(*to, o);
             let obj = s.objects.remove(from);
             s.objects.insert(*to, obj);
             let oid = s.ids.objects.remove(from);
             s.ids.objects.insert(*to, oid);
-            s.builds = after_reorder(&s.builds, &order);
+            // Builds name objects by stable id: reordering retargets nothing.
             Ok(vec![Op::MoveObject { slide: *slide, id: *id, to: from }])
         }
         Op::SetObject { slide, id, object } => {
@@ -357,11 +403,11 @@ mod tests {
             background: "#ffffff".into(),
             objects: (0..n).map(|i| SlideObject::Rect { x: i as f64 * 10.0, y: 0.0, w: 5.0, h: 5.0, rotation: 0.0 }).collect(),
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Default::default(),
             builds: vec![],
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }
     }
 
@@ -414,15 +460,16 @@ mod tests {
     fn deleting_an_object_takes_its_builds_and_undo_brings_them_back() {
         use crate::builds::BuildEffect;
         let mut d = vec![slide("a", 3)];
-        d[0].builds = vec![
-            Build { object: 1, effect: BuildEffect::Appear, out: false },
-            Build { object: 2, effect: BuildEffect::Dissolve, out: false },
-        ];
         ensure_ids(&mut d);
+        let (second, third) = (d[0].ids.objects[1], d[0].ids.objects[2]);
+        d[0].builds = vec![
+            Build { object: second, effect: BuildEffect::Appear, out: false },
+            Build { object: third, effect: BuildEffect::Dissolve, out: false },
+        ];
         let before = dbg(&d);
-        let (s, o) = (d[0].ids.slide, d[0].ids.objects[1]);
-        let undo = apply(&mut d, &Op::DeleteObject { slide: s, id: o }).unwrap();
-        assert_eq!(d[0].builds, vec![Build { object: 1, effect: BuildEffect::Dissolve, out: false }]);
+        let s = d[0].ids.slide;
+        let undo = apply(&mut d, &Op::DeleteObject { slide: s, id: second }).unwrap();
+        assert_eq!(d[0].builds, vec![Build { object: third, effect: BuildEffect::Dissolve, out: false }]);
         apply_all(&mut d, &undo).unwrap();
         // The tombstone goes when the object comes back.
         assert_eq!(dbg(&d), before);
@@ -449,6 +496,7 @@ mod tests {
     fn a_master_edit_is_one_step_with_an_exact_inverse() {
         use suite_common_core::ops::History;
         let master = |bg: &str| MasterSlide {
+            id: 41,
             name: "M".into(),
             background: bg.into(),
             default_font: "Sans".into(),
@@ -458,15 +506,15 @@ mod tests {
         };
         let mut doc = DeckDoc { slides: vec![slide("a", 1)], masters: vec![master("#ffffff")] };
         let mut h: History<Op> = History::default();
-        let inverse = suite_common_core::ops::apply_all(&mut doc, &[Op::SetMaster { index: 0, master: Box::new(master("#102030")) }]).unwrap();
+        let inverse = suite_common_core::ops::apply_all(&mut doc, &[Op::SetMaster { id: 41, master: Box::new(master("#102030")) }]).unwrap();
         h.record(inverse);
         assert_eq!(doc.masters[0].background, "#102030");
         assert!(h.undo(&mut doc).is_some());
         assert_eq!(format!("{:?}", doc.masters), format!("{:?}", vec![master("#ffffff")]));
         assert!(h.redo(&mut doc).is_some());
         assert_eq!(doc.masters[0].background, "#102030");
-        let past_end = Op::SetMaster { index: 1, master: Box::new(master("#000000")) };
-        assert_eq!(apply_doc(&mut doc, &past_end).err(), Some(OpError::OutOfRange));
+        let unknown = Op::SetMaster { id: 999, master: Box::new(master("#000000")) };
+        assert_eq!(apply_doc(&mut doc, &unknown).err(), Some(OpError::OutOfRange));
     }
 
     #[test]
