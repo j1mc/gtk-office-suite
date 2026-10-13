@@ -1,12 +1,114 @@
 # [P1] Tables: enforce format-safe saves and prove multi-sheet daily-driver journeys
 
-Audited on `e7e4df6`. Keep the existing WorkbookController/IronCalc architecture and the completed sheet/undo fixes.
+Assessment updated 2026-10-13. Keep the Rust `WorkbookController`/IronCalc
+architecture and native GTK/libadwaita interface. The direction is viable,
+but passing individual feature tests is not evidence of an everyday Excel
+replacement.
 
 ## Current gap
-`tables/src/window.rs` accepts XLS/XLSX/ODS/CSV imports, while its Save paths call `save_engine_to_xlsx`, including saving to the existing path. Verify and prevent XLSX bytes being written over an imported CSV/ODS file under its old extension. The older roadmap promises preferred-ODF journeys, but import support does not imply ODS write support.
+Format-safe Save As and several multi-sheet journeys now have evidence below.
+The remaining priority is trustworthy workbook editing: precise XLSX loss
+accounting, calculation/edit consistency, accessible interaction, and measured
+performance. ODS is import-only; neither an Excel-compatible UI nor preferred
+ODF wording can substitute for a working writer.
 
 ## Architecture and scope
 WorkbookController remains the sole mutation gateway. Stable sheet identities bind formulas, selection and undo. IronCalc owns calculation/dependency semantics; the view projects sparse state and does not implement a second formula engine. Format capability is explicit in the session: imported read-only formats require Save As to a writable format until their writers exist.
+
+## Direction and delivery order
+
+The product target is a GNOME-native spreadsheet for budgets, lists, formulas,
+multi-sheet workbooks and ordinary charts exchanged as XLSX. It is not a clone
+of Excel's ribbon or Numbers' free-form canvas. VBA, Power Query, external-data
+refresh and full `.numbers` fidelity are not current capabilities; surface
+unsupported content rather than implying it survives.
+
+Work in this order; unchecked gates remain requirements, not claims:
+
+1. **Trustworthy editing and saves before more analysis features.**
+   - [ ] Expand the existing XLSX loss budget to individual chart series,
+     worksheet relationships, axes, legend, placement/size, cell lock/hidden
+     flags and protection permissions. A broad “chart retained” or
+     “sheet protected” assertion is insufficient.
+   - [ ] Restore supported attributes through the real load/edit/save path;
+     unsupported changes must trigger the existing loss-confirmation policy.
+     Cancel must leave source bytes unchanged. Protection is an editing
+     restriction, not document encryption.
+   - [ ] Exercise these cases on later worksheets, through undo/redo and after
+     crash recovery, then reopen with an independent reader.
+   - [ ] Verify protection at the user-operation boundary for paste, fill,
+     clear, sort, structural edits and pivot output, not just single-cell
+     typing. Rejected compound edits must leave values, metadata and history
+     unchanged; internal undo/recovery must still restore authorized state.
+2. **One calculation authority with a tested editing contract.**
+   - [ ] Audit every formula-affecting operation against IronCalc's existing
+     APIs before adding local reference-rewriting, fill or calculation logic.
+     Keep one controller undo transaction per user operation; avoid parallel
+     engine and UI histories disagreeing.
+   - [ ] Add consumer-level cases for FILTER, SORT, UNIQUE, LET, LAMBDA and
+     spill references, plus edits inside spill regions, resizing, blockers,
+     undo/redo, cross-sheet references and XLSX reopen. Upstream support is a
+     candidate for reuse, not certification of Tables' projection or writer.
+   - [ ] Define which state is authoritative in IronCalc versus SheetModel.
+     Derived visible values must not become independent editable formula data.
+3. **Complete everyday GNOME interactions.**
+   - [ ] Prove keyboard selection/editing, formula reference picking, F4,
+     clipboard ranges, fill, sort/filter with headers, freeze panes, names,
+     search and sheet management as coherent workflows, not isolated widgets.
+   - [ ] Use native GTK actions, dialogs and libadwaita navigation with visible
+     errors, focus restoration, narrow-window behavior and accessible cell
+     state. Require deterministic AT-SPI journeys and manual Orca evidence.
+4. **Analysis features after persistence is trustworthy.**
+   - [ ] Provide chart series/range/title/axis/legend editing with matching
+     on-screen, saved and exported results. Add render-lab fixtures before
+     claiming visible parity.
+   - [ ] Expose pivots only with clear refresh/source/output semantics and
+     undo. Until pivot definitions persist, label output as a static summary
+     and warn about definition loss; do not market it as Excel pivot fidelity.
+5. **Daily-driver graduation on an exact packaged revision.**
+   - [ ] Run real budgeting, expense-list, multi-sheet reporting and chart
+     workflows from fresh Flatpak install through save, restart and reopen.
+   - [ ] Measure open, edit/recalculate, scroll, paste and save latency plus
+     memory on recorded dense and sparse workbooks and identified hardware.
+     Do not infer whole-app scalability from the virtualized view alone.
+   - [ ] Require real-document and installed-app evidence, no unacknowledged
+     loss, and the shared release/recovery/accessibility gates. Keep heavy
+     builds and per-app render jobs parallel in CI.
+
+## Reuse and reference research
+
+- **IronCalc remains the calculation engine.** The lockfile uses 0.8.3.
+  Its [0.8 announcement](https://blog.ironcalc.com/2026/08/01/Changelog-v0.8.html)
+  describes dynamic arrays, LET/LAMBDA and substantial formula additions.
+  Tables currently uses calamine/rust_xlsxwriter for file I/O, so upstream
+  XLSX fixes do not automatically reach Tables. Compare IronCalc's XLSX
+  adapter against the same loss corpus before proposing a migration; do not
+  introduce a second production writer without evidence of a net improvement.
+- **REA is optional research tooling, not a runtime dependency or engine.**
+  [REA](https://github.com/morluto/rea) documents browser observation,
+  JavaScript analysis and native-provider integration. It cannot turn Excel
+  or Numbers into a maintainable Rust implementation automatically. Its
+  [Apple inventory projection](https://github.com/morluto/rea/blob/main/docs/apple-application-analysis.md)
+  explicitly distinguishes package inventory from observed runtime behavior.
+- Start with public specifications, IronCalc source, LibreOffice comparison
+  and small authored workbooks. For an unresolved interaction, record inputs,
+  action sequence, visible result, exported file, application version and
+  provenance from a legitimately accessible reference app. Excel web evidence
+  is not proof of desktop Excel behavior.
+- A bounded REA pilot should answer one question, such as selection and focus
+  transitions during formula-reference picking. Compare ordinary browser
+  observation with REA's evidence; retain the tool only if it resolves an
+  otherwise unanswered question. Native Excel requires an appropriate target
+  environment; native Numbers requires macOS for runtime observation. No
+  proprietary reference application was exercised in this assessment.
+- Numbers is useful as a reference for understandable chart inspectors and
+  approachable formatting. Its multiple-tables-per-canvas model would change
+  workbook semantics and is not a shortcut to Excel compatibility.
+- Keep reference observations separate from implementation. Do not copy
+  proprietary code, assets or branding, bypass licensing/access controls, or
+  assume REA's MIT license grants rights to analyzed applications. Check
+  applicable terms before binary analysis; prefer behavioral specifications.
+
 
 ## Work and acceptance
 - [x] Reproduce CSV/ODS/XLS open → edit → Ctrl+S; preserve the original and offer a correctly suffixed Save As when unsupported.

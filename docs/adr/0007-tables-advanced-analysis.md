@@ -32,7 +32,7 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `legend_position`: `None`, `Top`, `Bottom`, `Left`, `Right`.
   - `series`: Vector of `ChartSeries` (`name`, `cat_range`, `val_range`, `color`).
   - `anchor` & dimensions: Position `(row, col)` and sizing `(width_px, height_px)` for flexible canvas placement.
-- **XLSX Persistence:** Extended DrawingML chart XML generation in `tables-core/src/io.rs` for multi-series, axis titles, legends, and chart types.
+- **XLSX Persistence target:** preserve multi-series, axes, legends, worksheet ownership and chart placement through load/edit/save. The writer in `tables-core/src/io/save.rs` supports more fields than the reader in `tables-core/src/io/charts.rs`; this is not yet a complete round trip.
 
 ### 3. Pivot Table Model & Fixture Verification
 
@@ -55,14 +55,24 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `protected: bool`.
   - `password_hash: Option<String>` (SHA-256 or legacy OOXML hash).
   - `allow_select_locked: bool`, `allow_select_unlocked: bool`, `allow_format_cells: bool`, `allow_insert_rows: bool`, `allow_delete_rows: bool`, etc.
-- **Enforcement Policy:** When `sheet.protection.protected` is `true`, `WorkbookController` enforces edit checks: attempts to mutate locked cells return `Err("Sheet is protected")`.
-- **Loss Policy & Warnings:** Full round-trip preservation into XLSX `<sheetProtection>` elements. Unsupported protection features emit explicit user warnings rather than silent data loss.
+- **Current enforcement:** `WorkbookController::edit_cell` refuses edits to locked cells on protected sheets by returning without mutation. The GUI uses `refuses_edit` to explain the refusal; this API does not return `Err("Sheet is protected")`.
+- **Persistence target, not current capability:** preserve supported cell protection and `<sheetProtection>` attributes; explicitly warn about unsupported losses. Currently XLSX persistence retains only the sheet-protected boolean, not the full permissions/password/cell-lock model. Sheet protection is not encryption.
 
 ### 5. Recalculation & Large-Workbook Budget
 
-- Large workbook benchmark targets (< 100ms for 10,000 cells recalculation) are enforced in `tables-core/benches` and integration test gates.
+- The earlier <100ms/10,000-cell statement is not the implemented gate: there is no `tables-core/benches` directory. `tables-core/tests/performance_budgets.rs` enforces a two-second timing budget, with a recalculation fixture containing 256 input cells and 256 formulas. Extend these existing gates with reproducible dense/sparse whole-workbook workloads, identified hardware and memory measurements; measure loading, recalculation, editing and saving separately from viewport rendering.
 
 ## Consequences
 
 - Clean architectural split preserved: calculation stays inside `ironcalc_base`, presentation in `tables` GTK shell.
 - Current implementation has scoped but incomplete interoperability: pivot output is written as ordinary cells and does not round-trip as an OOXML pivot definition; chart and protection coverage remains limited to implemented formats and tested cases.
+
+## Delivery priority
+
+The [Tables readiness roadmap](../readiness-2026-09/tables-readiness.md#direction-and-delivery-order)
+orders implementation: safe/fidelity-preserving edits and saves, one calculation
+authority, coherent native interaction, persisted analysis features, then
+exact-revision packaged daily-driver evidence. Reuse IronCalc APIs before
+building parallel logic; assess its XLSX adapter against the existing corpus
+before replacing the current file-I/O stack. REA and Excel/Numbers observations
+are optional research inputs, not implementation dependencies or parity proof.

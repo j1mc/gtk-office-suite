@@ -10,6 +10,38 @@ Letters, Tables and Decks must reliably complete create/open → edit → undo/r
 
 “Done” means current-revision tests prove the behavior, not that an issue was closed or a model field exists. No known P0 crash/data-loss issue, silently skipped release-critical test, or unapproved format loss may remain. Advanced features already admitted by newer ADRs require evidence or an explicit revised scope decision; collaboration, plugin marketplaces and enterprise policy systems do not block dependable everyday editing.
 
+## Product direction reassessment — 2026-10-13
+
+Keep Rust document engines/controllers and GTK/libadwaita interfaces. The
+architecture is a viable direction, not evidence that the products are already
+viable replacements. Prioritize complete edit/save/reopen workflows over
+increasing the number of model fields, toolbar actions or supported imports.
+
+| App | Intended alternative | Roadmap emphasis |
+|---|---|---|
+| Letters | Native Word-style document authoring | Canonical rich document state, faithful editing bridge, consistent screen/page/export layout, DOCX/ODT loss accounting |
+| Tables | Native Excel-style workbook authoring | IronCalc calculation authority, safe XLSX editing, lossless supported metadata, coherent keyboard/grid workflows |
+| Decks | Native PowerPoint-style authoring and presentation design | Shared slide geometry, master/theme/layout authoring, reliable canvas manipulation, persisted designs and presenter workflows |
+
+The app assessments and ordered acceptance gates live in
+[Letters](letters-fidelity.md), [Tables](tables-readiness.md), and
+[Decks](decks-readiness.md). Existing checked historical journeys below must
+not be read as certification of these broader product goals. Render scorecards,
+real-document results and exact-revision installed-release evidence remain
+separate gates.
+
+Use maintained open-source engines and public format specifications first.
+Evaluate BetterOffice/other import-layout implementations against the same
+corpus before adopting them; audit licenses and provenance before copying.
+ArtCraft, Word/Excel/PowerPoint and Pages/Numbers/Keynote can inform interaction
+specifications, but a reference product's features are not this suite's features.
+[REA](https://github.com/morluto/rea) is optional investigation tooling, not a
+document engine or a turnkey port. A pilot must answer a bounded unresolved
+question with reproducible observations, respect target access/licensing, and
+produce a behavior specification plus regression fixture. No proprietary
+reference application was executed in this assessment.
+
+
 ## Architecture to preserve
 
 1. `suite-common-core` owns GTK-free lifecycle policy, durability, compatibility reports and genuinely shared primitives. `suite-common` adapts those policies to GTK dialogs/actions/settings.

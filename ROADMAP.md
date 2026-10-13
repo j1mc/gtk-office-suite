@@ -25,14 +25,17 @@ to done. Long-tail ideas are parked in
 separate issues.
 The dated ledger below is historical and does not certify present behavior.
 
-This file states no status of its own. Whether an item is open or done is
-its issue's state, and progress is the
-[readiness ledger](docs/readiness-2026-09/README.md)'s. The only figures
+The per-app [product direction reassessment](docs/readiness-2026-09/README.md#product-direction-reassessment--2026-10-13)
+defines the path to viable GNOME-native alternatives: complete authoring
+workflows, preserved supported content, and independently verified output.
+Issue closure records workflow, not product certification; current behavior
+must be established by the
+[readiness ledger](docs/readiness-2026-09/README.md)'s evidence. The only figures
 here are the ones `tests/test_roadmap_figures.py` checks against the
 repository, and that test fails on any other `n/m` figure added to this
 file, README.md, `docs/ROADMAP.md` or `docs/TESTING.md`.
 
-**Last updated**: 2026-10-02 | **Maintainer**: tuna-os (hanthor) / architect agent
+**Last updated**: 2026-10-13 | **Maintainer**: tuna-os (hanthor) / architect agent
 
 ---
 
