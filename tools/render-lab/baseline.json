@@ -291,6 +291,10 @@
     "B": "green",
     "C": "green"
   },
+  "tables/wrap-merged": {
+    "A": "amber",
+    "B": "amber"
+  },
   "tables/wrap-text": {
     "A": "amber",
     "B": "amber",
