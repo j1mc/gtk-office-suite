@@ -135,13 +135,18 @@ fn supported_list() -> String {
 pub fn write(doc: &Document, path: &Path) -> Result<CompatibilityReport, String> {
     let format = format_for_path(path)?;
     let report = compatibility_report(doc, format);
+    write_in_format(doc, path, format)?;
+    Ok(report)
+}
+
+fn write_in_format(doc: &Document, path: &Path, format: SaveFormat) -> Result<(), String> {
     match format {
-        SaveFormat::Odt => crate::odt::write(doc, path)?,
-        SaveFormat::Docx => crate::docx::write(doc, path)?,
+        SaveFormat::Odt => crate::odt::write(doc, path),
+        SaveFormat::Docx => crate::docx::write(doc, path),
         SaveFormat::Markdown => {
-            write_text(path, &crate::markdown::serialize(doc))?;
+            write_text(path, &crate::markdown::serialize(doc))
         }
-        SaveFormat::Html => write_text(path, &to_html(doc))?,
+        SaveFormat::Html => write_text(path, &to_html(doc)),
         SaveFormat::PlainText => {
             // A text file conventionally ends in a newline; `to_plain_text`
             // joins paragraphs without a trailing one.
@@ -149,24 +154,70 @@ pub fn write(doc: &Document, path: &Path) -> Result<CompatibilityReport, String>
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
-            write_text(path, &text)?;
+            write_text(path, &text)
         }
     }
-    Ok(report)
+}
+
+/// Merge `opaque` into the bytes `write` produces, replacing `target` once
+/// (LET-002): the writer writes a staging file beside `target` with the
+/// same extension, the parts are merged into those staged bytes, and only
+/// the merged bytes ever replace `target` through `atomic_write_bytes`.
+/// There is no moment on disk with the edit but without the carried parts;
+/// a crash can strand the staging file (swept like any other save
+/// temporary) but never a part-less `target`. With nothing to merge, `write`
+/// writes `target` itself.
+pub(crate) fn opaque_single_write(
+    target: &Path,
+    write: impl FnOnce(&Path) -> Result<(), String>,
+    opaque: &suite_common_core::interop::OpaquePackage,
+) -> Result<(), String> {
+    if opaque.is_empty() {
+        return write(target);
+    }
+    let dir = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let suffix = target.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    // The same temporary prefix `atomic_save` sweeps after a crash
+    // (`TEMP_PREFIX` there is crate-private): a kill between staging and
+    // replace must leave a swept file, not a kept one.
+    let staging = tempfile::Builder::new()
+        .prefix(".office-save-")
+        .suffix(&suffix)
+        .tempfile_in(dir)
+        .map_err(|e| format!("Failed to create save file: {e}"))?
+        .into_temp_path();
+    write(&staging)?;
+    opaque.append_to(&staging)?;
+    let bytes = std::fs::read(&staging).map_err(|e| format!("read saved package: {e}"))?;
+    suite_common_core::atomic_save::atomic_write_bytes(target, &bytes)
+    // `staging` is removed when it drops.
 }
 
 /// As [`write`], preserving package members captured on read. Only the
-/// package formats carry opaque parts; for the text formats there is
-/// nowhere to put them, which the report already records.
+/// package formats carry opaque parts, in one atomic replace with the edit
+/// (see [`opaque_single_write`]); for the text formats there is nowhere to
+/// put them, which the report already records.
+///
+/// The live save path does not call this with raw captures: it carries only
+/// the admitted safe subset (`DocumentSession::carried_for_save` — custom
+/// XML, thumbnail, ODF settings, per `suite_common_core::carry`), while
+/// anything the model cannot keep routes to the LET-001 loss dialog built
+/// from the session's stored findings instead of being passed through.
 pub fn write_with_opaque(
     doc: &Document,
     path: &Path,
     opaque: &suite_common_core::interop::OpaquePackage,
 ) -> Result<CompatibilityReport, String> {
-    let report = write(doc, path)?;
-    match format_for_path(path)? {
-        SaveFormat::Odt | SaveFormat::Docx => opaque.append_to(path)?,
-        _ => {}
+    let format = format_for_path(path)?;
+    let report = compatibility_report(doc, format);
+    match format {
+        SaveFormat::Odt | SaveFormat::Docx => {
+            opaque_single_write(path, |p| write_in_format(doc, p, format), opaque)?;
+        }
+        _ => write_in_format(doc, path, format)?,
     }
     Ok(report)
 }
