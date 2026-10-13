@@ -80,8 +80,21 @@ WorkbookController remains the sole mutation gateway. Stable sheet identities bi
       LibreOffice and diff images: labels and values match, with SSIM 0.844, 93.3% word recall and 2.76pt displacement. The baseline
       now records this fixture green for A/B; the full report has 58 green, 4 amber and 0 red in both tiers (one Letters and three
       Tables fixtures remain amber).
-      This remains open: pivot controls are not exposed in the GUI, chart/protection format coverage is incomplete, and
-      the upstream-dependent dynamic-array function limits are not yet enumerated.
+      This remains open: pivot controls are not exposed in the GUI. The
+      chart dialog builds one value series from the selected column and uses
+      column A as categories. XLSX export can write multiple series, axis
+      titles and legend position, but import keeps one category/value range,
+      drops those settings, and defaults the legend. Protection import keeps
+      only the sheet-protected boolean; passwords, permission flags and
+      per-cell lock attributes are not retained, while export writes only
+      the protected state. These chart/protection round trips are XLSX-only;
+      other offered document formats are not writable. Dynamic-array evidence is
+      deliberately narrower: engine tests cover only `SEQUENCE(3)` and a
+      blocked `SEQUENCE(2,2)` spill. Grid projection is bounded to the
+      `TablesEngine`'s configured rows and columns; no function-by-function
+      dynamic-array inventory or upstream shape/size ceiling has been
+      established. The static formula-suggestion catalog is not a runtime
+      support matrix.
 
 Dependencies: P0 save durability, #354, #374, #400. Exit: passing XLSX create/edit/save/reopen journeys and honest import/export capabilities for every offered extension; no unsupported format is silently overwritten.
 

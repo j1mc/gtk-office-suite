@@ -131,8 +131,10 @@ Without a screenshot of their own:
   never writes over them. Tables says it cannot save in that format and
   offers Save As with the same name as `.xlsx`.
 - **Dynamic arrays**: the formula engine evaluates `SEQUENCE` and projects
-  spilled values into the visible grid; a blocked spill reports `#SPILL!`.
-  This is not a claim of full Excel dynamic-array function compatibility.
+  spilled values into visible cells within the configured grid; an occupied
+  spill target reports `#SPILL!`. Regression tests cover a three-row vertical
+  result and a blocked 2 × 2 result. No other dynamic-array function set,
+  spill-size ceiling or Excel compatibility is claimed.
 - **Crash recovery**: unsaved work is snapshotted and offered back after a
   crash.
 
