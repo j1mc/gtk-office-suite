@@ -41,6 +41,12 @@ question with reproducible observations, respect target access/licensing, and
 produce a behavior specification plus regression fixture. No proprietary
 reference application was executed in this assessment.
 
+For implementation, use the [agent-ready specifications](../implementation/README.md).
+They expand the remaining app and shared requirements into bounded work packages
+with source entry points, dependencies, invariants, regression plans and exit
+evidence. The specifications are pending work; this ledger remains the record of
+observed results.
+
 
 ## Architecture to preserve
 
