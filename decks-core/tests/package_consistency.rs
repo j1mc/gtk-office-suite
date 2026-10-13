@@ -130,11 +130,11 @@ fn opaque_dependency_survives_unrelated_edit() {
             background: "#ffffff".into(),
             objects: vec![],
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Default::default(),
             builds: vec![],
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         },
     );
     let deck = controller.deck();
@@ -188,7 +188,7 @@ fn deleting_target_cannot_leave_dangling_relationship() {
     controller.install_opened_deck(deck, context);
     // Delete the slide holding the image reference: the save must not
     // leave a relationship pointing at a part that is no longer there.
-    assert!(controller.delete_slide(0).is_some());
+    assert!(controller.delete_slide(controller.slide_id_at(0).unwrap()));
     let out = dir.path().join("img-deleted.pptx");
     let deck = controller.deck();
     decks_core::write_deck_with_context(

@@ -60,11 +60,11 @@ fn slide(title: &str, xs: &[f64]) -> Slide {
         background: "#ffffff".into(),
         objects: xs.iter().map(|x| rect(*x)).collect(),
         notes: String::new(),
-        master_idx: None,
+        master_id: None,
         transition: Transition::None,
         builds: vec![],
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -94,13 +94,18 @@ proptest! {
 
     #[test]
     fn mixed_edits_undo_and_redo_one_step_each_and_the_selection_stays_valid(steps in prop::collection::vec(step(), 1..60)) {
+        use decks_core::{SelectionMode, SelectionState};
         let c = DecksController::new(vec![slide("a", &[0.0, 100.0]), slide("b", &[50.0]), slide("c", &[])], vec![]);
-        decks_core::ops::ensure_ids(&mut c.slides.borrow_mut());
         // The history model: every state the deck has been in that undo or
         // redo can reach, and where we are among them.
         let mut states = vec![content(&c)];
         let mut at = 0usize;
-        let (mut current, mut selected) = (0usize, None::<usize>);
+        // The driver names slides and objects by view position, as the
+        // window's hit testing does; the controller resolves them to
+        // stable ids at every call. Selection itself lives in the
+        // controller and is asserted there.
+        let slide_id = |c: &DecksController, i: usize| c.slide_id_at(i);
+        let object_id = |c: &DecksController, si: usize, oi: usize| c.object_id_at(si, oi);
         for s in &steps {
             let before = content(&c);
             match s {
@@ -123,49 +128,67 @@ proptest! {
                 edit => {
                     match edit {
                         Step::AddObject { slide, x } => {
-                            c.add_object(*slide, rect(*x));
-                            selected = c.slides.borrow().get(*slide).map(|s| s.objects.len() - 1);
-                            current = *slide;
-                        }
-                        Step::DeleteObject { slide, index } => {
-                            if let Some(o) = object(&c, *slide, *index) {
-                                c.delete_object(*slide, *index, o);
+                            if let Some(id) = slide_id(&c, *slide) {
+                                if let Some(oid) = c.add_object(id, rect(*x)) {
+                                    c.select_objects(id, &[oid], Some(oid), SelectionMode::Object);
+                                } else {
+                                    c.select_slide(id);
+                                }
                             }
                         }
-                        Step::MoveObject { slide, index, dx } => c.move_object(*slide, *index, *dx, 0.0),
+                        Step::DeleteObject { slide, index } => {
+                            if let (Some(id), Some(oid)) = (slide_id(&c, *slide), object_id(&c, *slide, *index)) {
+                                c.delete_object(id, oid);
+                            }
+                        }
+                        Step::MoveObject { slide, index, dx } => {
+                            if let (Some(id), Some(oid)) = (slide_id(&c, *slide), object_id(&c, *slide, *index)) {
+                                c.move_object(id, oid, *dx, 0.0);
+                            }
+                        }
                         Step::Resize { slide, index, w } => {
-                            if let Some(o) = object(&c, *slide, *index) {
-                                let old = decks_core::undo::obj_bounds(&o);
-                                c.resize_object(*slide, *index, old, (old.0, old.1, *w, old.3));
+                            if let (Some(id), Some(oid)) = (slide_id(&c, *slide), object_id(&c, *slide, *index)) {
+                                if let Some(o) = object(&c, *slide, *index) {
+                                    let old = decks_core::undo::obj_bounds(&o);
+                                    c.resize_object(id, oid, (old.0, old.1, *w, old.3));
+                                }
                             }
                         }
                         Step::Rotate { slide, index, angle } => {
-                            if let Some(o) = object(&c, *slide, *index) {
-                                c.rotate_object(*slide, *index, o.rotation(), *angle);
+                            if let (Some(id), Some(oid)) = (slide_id(&c, *slide), object_id(&c, *slide, *index)) {
+                                c.rotate_object(id, oid, *angle);
                             }
                         }
                         Step::ZOrder { slide, index, front } => {
-                            c.z_order_object(*slide, *index, if *front { ZOrderOp::BringToFront } else { ZOrderOp::SendToBack })
+                            if let (Some(id), Some(oid)) = (slide_id(&c, *slide), object_id(&c, *slide, *index)) {
+                                c.z_order_object(id, oid, if *front { ZOrderOp::BringToFront } else { ZOrderOp::SendToBack });
+                            }
                         }
-                        Step::AddSlide { at } => current = c.add_slide(*at, slide("new", &[300.0])),
+                        Step::AddSlide { at } => {
+                            if let Some(id) = c.add_slide(*at, slide("new", &[300.0])) {
+                                c.select_slide(id);
+                            }
+                        }
                         Step::DeleteSlide { slide } => {
-                            if let Some(i) = c.delete_slide(*slide) {
-                                current = i;
+                            if let Some(id) = slide_id(&c, *slide) {
+                                c.delete_slide(id);
                             }
                         }
                         Step::DuplicateSlide { slide } => {
-                            if let Some(i) = c.duplicate_slide(*slide) {
-                                current = i;
+                            if let Some(id) = slide_id(&c, *slide) {
+                                if let Some(copy) = c.duplicate_slide(id) {
+                                    c.select_slide(copy);
+                                }
                             }
                         }
                         Step::SlideUp { slide } => {
-                            if let Some(i) = c.move_slide_up(*slide) {
-                                current = i;
+                            if let Some(id) = slide_id(&c, *slide) {
+                                c.move_slide_up(id);
                             }
                         }
                         Step::SlideDown { slide } => {
-                            if let Some(i) = c.move_slide_down(*slide) {
-                                current = i;
+                            if let Some(id) = slide_id(&c, *slide) {
+                                c.move_slide_down(id);
                             }
                         }
                         Step::Undo | Step::Redo => unreachable!(),
@@ -183,14 +206,20 @@ proptest! {
                 }
             }
             prop_assert!(c.slide_count() >= 1, "Decks always keeps a slide");
-            (current, selected) = c.repair_selection(current, selected);
-            let slides = c.slides.borrow();
-            prop_assert!(current < slides.len(), "current slide {} of {}", current, slides.len());
-            if let Some(i) = selected {
-                prop_assert!(i < slides[current].objects.len(), "selected object {} of {}", i, slides[current].objects.len());
+            // The owned selection always names things that exist.
+            let sel: SelectionState = c.selection();
+            if let Some(id) = sel.slide_id {
+                let si = c.slide_index(id);
+                prop_assert!(si.is_some(), "selected slide {id} is gone");
+                for oid in &sel.object_ids {
+                    prop_assert!(c.object_index(id, *oid).is_some(), "selected object {oid} is gone");
+                }
+                if let Some(primary) = sel.primary_object_id {
+                    prop_assert!(sel.object_ids.contains(&primary), "primary {primary} is not selected");
+                }
             }
             // Ids stay attached to what they name: one per object.
-            for s in slides.iter().filter(|s| !s.ids.objects.is_empty()) {
+            for s in c.slides.borrow().iter().filter(|s| !s.ids.objects.is_empty()) {
                 prop_assert_eq!(s.ids.objects.len(), s.objects.len());
             }
         }
@@ -203,13 +232,18 @@ proptest! {
 #[test]
 fn undoing_an_added_slide_and_object_repairs_a_selection_past_the_end() {
     let c = DecksController::new(vec![slide("a", &[0.0])], vec![]);
-    let current = c.add_slide(1, slide("b", &[]));
-    c.add_object(current, rect(5.0));
-    assert_eq!(c.repair_selection(current, Some(0)), (1, Some(0)));
+    let added = c.add_slide(1, slide("b", &[])).unwrap();
+    let o = c.add_object(added, rect(5.0)).unwrap();
+    c.select_objects(added, &[o], Some(o), decks_core::SelectionMode::Object);
+    assert_eq!(c.selected_slide_index(), Some(1));
+    assert_eq!(c.selected_object_indices(), vec![0]);
     assert!(c.undo());
-    assert_eq!(c.repair_selection(current, Some(0)), (1, None), "the object went with the undo");
+    assert_eq!(c.selection().object_ids, Vec::<u64>::new(), "the object went with the undo");
     assert!(c.undo());
-    assert_eq!(c.repair_selection(current, Some(0)), (0, None), "so did the slide, and object 0 of another slide is not what was selected");
+    assert_eq!(c.selected_slide_index(), Some(0), "so did the slide");
+    assert!(c.selection().object_ids.is_empty(), "object 0 of another slide is not what was selected");
     assert!(c.redo() && c.redo());
-    assert_eq!(c.repair_selection(0, Some(0)), (0, Some(0)));
+    assert_eq!(c.selected_slide_index(), Some(1));
+    assert_eq!(c.selected_object_indices(), vec![0]);
 }
+

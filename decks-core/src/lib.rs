@@ -29,9 +29,8 @@ pub mod snapshot;
 pub mod templates;
 pub mod undo;
 
-pub use controller::DecksController;
+pub use controller::{DecksController, SelectionMode, SelectionState, TextRange, TxnOutcome};
 pub use engine::{Deck, MasterSlide, Slide, SlideObject};
-
 pub use provenance::{DeckSourceContext, MutationSet, ProvenanceFacts, SourceState};
 /// Read a presentation, dispatching on extension (.pptx or .odp).
 pub fn read_deck(path: &str) -> Result<engine::Deck, String> {

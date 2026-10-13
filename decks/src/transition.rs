@@ -362,11 +362,11 @@ mod tests {
             background: "#ffffff".into(),
             objects,
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Transition::MagicMove,
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         };
         let from = slide(vec![sq(100.0, red)]);
         let mut arriving = sq(430.0, blue);

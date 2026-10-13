@@ -53,11 +53,11 @@ fn slide(title: &str, xs: &[f64]) -> Slide {
         background: "#ffffff".into(),
         objects: xs.iter().map(|x| rect(*x)).collect(),
         notes: String::new(),
-        master_idx: None,
+        master_id: None,
         transition: Transition::None,
         builds: vec![],
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -108,7 +108,7 @@ fn ops_for(slides: &[Slide], e: &Edit) -> Vec<Op> {
         Edit::AddBuild { slide, index } => match slides.get(*slide) {
             Some(s) if *index < s.objects.len() => {
                 let mut p = SlideProps::of(s);
-                p.builds.push(Build { object: *index, effect: BuildEffect::Dissolve, out: false });
+                p.builds.push(Build { object: s.ids.objects[*index], effect: BuildEffect::Dissolve, out: false });
                 vec![Op::SetSlide { slide: s.ids.slide, props: Box::new(p) }]
             }
             _ => vec![],
@@ -116,26 +116,39 @@ fn ops_for(slides: &[Slide], e: &Edit) -> Vec<Op> {
     }
 }
 
-/// `e` made directly, the way the model would be changed without ops.
+/// `e` made directly, the way the model would be changed without ops —
+/// including the same id bookkeeping, so builds (which name stable ids)
+/// match the ops side exactly. `content` strips the ids themselves, but
+/// the builds that name them must agree.
 fn direct(slides: &mut Vec<Slide>, e: &Edit) {
+    // One more than every id in use or tombstoned, as `next_id` sees it.
+    let fresh = |slides: &[Slide]| {
+        slides
+            .iter()
+            .flat_map(|s| std::iter::once(s.ids.slide).chain(s.ids.objects.iter().copied()).chain(s.ids.deleted.iter().copied()))
+            .max()
+            .unwrap_or(0)
+            + 1
+    };
     match e {
         Edit::AddObject { slide, at, x } => {
             if let Some(s) = slides.get_mut(*slide) {
                 if *at <= s.objects.len() {
+                    let id = fresh(slides);
                     s.objects.insert(*at, rect(*x));
-                    for b in &mut s.builds {
-                        if b.object >= *at {
-                            b.object += 1;
-                        }
-                    }
+                    s.ids.objects.insert(*at, id);
+                    s.ids.deleted.retain(|d| *d != id);
+                    // Builds name stable ids: inserting one retargets nothing.
                 }
             }
         }
         Edit::DeleteObject { slide, index } => {
             if let Some(s) = slides.get_mut(*slide) {
                 if *index < s.objects.len() {
+                    let id = s.ids.objects.remove(*index);
                     s.objects.remove(*index);
-                    s.builds = decks_core::builds::after_delete(&s.builds, *index);
+                    s.ids.deleted.push(id);
+                    s.builds = decks_core::builds::without_object(&s.builds, id);
                 }
             }
         }
@@ -144,10 +157,9 @@ fn direct(slides: &mut Vec<Slide>, e: &Edit) {
                 if *index < s.objects.len() && *to < s.objects.len() {
                     let o = s.objects.remove(*index);
                     s.objects.insert(*to, o);
-                    let mut order: Vec<usize> = (0..s.objects.len()).collect();
-                    let i = order.remove(*index);
-                    order.insert(*to, i);
-                    s.builds = decks_core::builds::after_reorder(&s.builds, &order);
+                    let id = s.ids.objects.remove(*index);
+                    s.ids.objects.insert(*to, id);
+                    // Reordering retargets nothing.
                 }
             }
         }
@@ -159,11 +171,16 @@ fn direct(slides: &mut Vec<Slide>, e: &Edit) {
         Edit::AddSlide { at, title } => {
             if *at <= slides.len() {
                 slides.insert(*at, slide(title, &[]));
+                ensure_ids(slides);
             }
         }
         Edit::DeleteSlide { slide } => {
             if slides.len() > 1 && *slide < slides.len() {
-                slides.remove(*slide);
+                let removed = slides.remove(*slide);
+                let neighbour = (*slide).min(slides.len() - 1);
+                let keep = &mut slides[neighbour].ids.deleted;
+                keep.push(removed.ids.slide);
+                keep.extend(removed.ids.objects.iter().chain(&removed.ids.deleted));
             }
         }
         Edit::MoveSlide { slide, to } => {
@@ -180,7 +197,8 @@ fn direct(slides: &mut Vec<Slide>, e: &Edit) {
         Edit::AddBuild { slide, index } => {
             if let Some(s) = slides.get_mut(*slide) {
                 if *index < s.objects.len() {
-                    s.builds.push(Build { object: *index, effect: BuildEffect::Dissolve, out: false });
+                    let id = s.ids.objects[*index];
+                    s.builds.push(Build { object: id, effect: BuildEffect::Dissolve, out: false });
                 }
             }
         }

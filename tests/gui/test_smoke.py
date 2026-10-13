@@ -6077,7 +6077,7 @@ class DecksMasterViewSmoke(BaseGUITestCase):
         self.app.child(name="Format", roleName="toggle button").do_action(0)
         self.wait_until(lambda: self.app.child(name="Edit Master", roleName="push button"), lambda b: b is not None and b.showing,
                         description="Edit Master in the inspector").do_action(0)
-        self.wait_until(snap, lambda s: s["editing_master"] == 0, interval=0.5, description="the master view to open")
+        self.wait_until(snap, lambda s: s["editing_master"] == before["masters"][0]["id"], interval=0.5, description="the master view to open")
         self.wait_until(lambda: self.app.findChild(lambda n: "Editing the master" in (n.name or ""), retry=False, requireResult=False),
                         lambda n: n is not None and n.showing, description="the banner")
         subprocess.run(["gapplication", "action", aid, "insert-shape", "uint32 3"], check=True, timeout=5)
@@ -6102,6 +6102,81 @@ class DecksMasterViewSmoke(BaseGUITestCase):
                 return ""
         self.wait_until(master_xml, lambda x: 'prst="triangle"' in x, interval=0.5, description="the triangle in the saved master")
         self.assertIsNone(self.process.poll(), "decks crashed editing the master")
+
+
+class DecksCanonicalSelectionSmoke(BaseGUITestCase):
+    """Stable identities (DCK-005): the selection names slides and objects
+    by id, so inserting, reordering, undoing and saving never retarget it.
+    Two shapes are added (each insert selects what it made), the slide is
+    duplicated and moved (the same ids in a new order), undo and redo keep
+    the ids while moving the order back and forth, and after Save the deck
+    reopens with every slide_id and object id intact and the selection
+    naming the slide it left."""
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self.isolate_snapshot("decks-canonical-snapshot-")
+        self._dir = self.temp_dir(prefix="decks-canonical-")
+        self._doc = os.path.join(self._dir, "stable.pptx")
+        with open(self._doc, "wb") as f:
+            f.write(minimal_pptx_bytes("a slide"))
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def test_stable_ids_survive_reorder_undo_and_save_reopen(self):
+        snap = lambda: self.trigger_snapshot(self.AID)
+        before = self.wait_until(snap, lambda s: s and s["slide_count"] == 1, interval=0.5, description="the deck to open")
+        slide_id = before["slides"][0]["id"]
+        self.assertEqual(before["slide_id"], slide_id, "the selection names the open slide")
+        # Each insert selects what it made: the primary object is the new shape.
+        self.gapplication_action(self.AID, "add-shape")
+        one = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 1, interval=0.5,
+                              description="the first shape")
+        first_id = one["slides"][0]["objects"][0]["id"]
+        self.assertEqual(one["primary_object_id"], first_id, "the insert is selected")
+        self.assertEqual(one["selected_ids"], [first_id], one)
+        self.gapplication_action(self.AID, "add-shape")
+        two = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 2, interval=0.5,
+                              description="the second shape")
+        ids = [o["id"] for o in two["slides"][0]["objects"]]
+        self.assertEqual(len(set(ids)), 2, f"objects have distinct ids: {ids}")
+        self.assertEqual(two["primary_object_id"], ids[1], "the second insert is selected")
+        # Reorder via slide ops: duplicate, then move the copy up. The same
+        # slide ids come back in a new order, and the selection follows the copy.
+        self.gapplication_action(self.AID, "duplicate-slide")
+        dup = self.wait_until(snap, lambda s: s["slide_count"] == 2, interval=0.5, description="the duplicated slide")
+        order = [s["id"] for s in dup["slides"]]
+        self.assertEqual(order[0], slide_id, "the original slide keeps its id")
+        self.assertEqual(dup["slide_id"], order[1], "the selection follows the copy")
+        self.gapplication_action(self.AID, "move-slide-up")
+        moved = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == [order[1], order[0]], interval=0.5,
+                                description="the copy moved up")
+        self.assertEqual(moved["slide_id"], order[1], "the selection stays on the moved slide")
+        self.assertEqual([o["id"] for o in moved["slides"][1]["objects"]], ids, "the objects keep their ids")
+        # Undo takes the order back, redo returns it; the ids never change.
+        self.gapplication_action(self.AID, "undo")
+        back = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == order, interval=0.5,
+                               description="undo of the move")
+        self.assertEqual(back["slide_id"], order[1], "undo keeps the selection on its slide")
+        self.gapplication_action(self.AID, "redo")
+        forth = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == [order[1], order[0]], interval=0.5,
+                                description="redo of the move")
+        self.assertEqual(forth["slide_id"], order[1], forth)
+        # Save and reopen: every slide_id and object id survives, and the
+        # selection still names the slide it left.
+        self.gapplication_action(self.AID, "save")
+        self.wait_until(lambda: os.path.getsize(self._doc) > 0, bool, interval=0.25, description="the save to land")
+        self.relaunch_app(launch_args=[self._doc])
+        reopened = self.wait_until(snap, lambda s: s and s["slide_count"] == 2, interval=0.5, description="the deck to reopen")
+        self.assertEqual([s["id"] for s in reopened["slides"]], [order[1], order[0]], "slide ids survive save/reopen")
+        for got, want in zip(reopened["slides"], forth["slides"]):
+            self.assertEqual([o["id"] for o in got["objects"]], [o["id"] for o in want["objects"]],
+                             f"object ids on slide {got['id']} survive save/reopen")
+        self.assertIn(reopened["slide_id"], [order[1], order[0]], "the selection names a surviving slide")
+        self.assertIsNone(self.process.poll(), "decks crashed keeping identities stable")
+
 
 
 class DecksLayoutsSmoke(BaseGUITestCase):

@@ -126,21 +126,17 @@ fn kind_button(kind: ChartKind, group: Option<&gtk::ToggleButton>) -> gtk::Toggl
     b
 }
 
-pub fn build(
-    ctl: &Rc<DecksController>,
-    current_slide: &Rc<Cell<usize>>,
-    selected: &Rc<Cell<Option<usize>>>,
-    changed: Rc<dyn Fn()>,
-) -> ChartInspector {
+pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> ChartInspector {
     let syncing = Rc::new(Cell::new(false));
     let apply: Rc<dyn Fn(ChartEdit)> = {
-        let (ctl, cs, sel, syncing) = (ctl.clone(), current_slide.clone(), selected.clone(), syncing.clone());
+        let (ctl, syncing) = (ctl.clone(), syncing.clone());
         Rc::new(move |edit: ChartEdit| {
             if syncing.get() {
                 return;
             }
-            let Some(oi) = sel.get() else { return };
-            if ctl.edit_chart(cs.get(), oi, &edit) {
+            let sel = ctl.selection();
+            let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) else { return };
+            if ctl.edit_chart(slide_id, object_id, &edit) {
                 changed();
             }
         })

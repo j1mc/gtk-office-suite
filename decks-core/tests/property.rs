@@ -60,11 +60,11 @@ fn build_deck(slides: &[Vec<String>]) -> Deck {
                 })
                 .collect(),
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         })
         .collect();
     Deck { slides, masters: vec![] }

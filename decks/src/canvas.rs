@@ -257,26 +257,26 @@ pub fn accent_rgb(widget: &impl gtk4::prelude::WidgetExt) -> (f64, f64, f64) {
 
 /// The master a slide is drawn against, if it has one that exists.
 ///
-/// `master_idx` is an index into a list that a reader, an undo step or a
-/// snapshot may have changed, so it can point past the end; every caller
-/// has to handle that. Before this existed `draw_slide_multi` resolved the
-/// master three separate times — twice as `masters.get(mi)` and once as a
-/// hand-written `mi < masters.len()` bounds check — which is three chances
-/// for the styles applied to one slide to disagree about which master it
-/// even has.
-///
-/// A slide on a layout with a look of its own gets the master with that
+/// `master_id` is a stable id a reader, an undo step or a snapshot may
+/// have removed, so an unknown id resolves to no master rather than a
+/// positional guess; a slide naming none inherits the first master
+/// (what a fresh slide gets) — the same policy as `Deck::master_of`,
+/// mirrored here on slices because the renderer only has those. A slide
+/// on a layout with a look of its own gets the master with that
 /// layout's background and decorations over it (`layouts::effective_master`).
 pub fn master_for<'a>(
     slides: &[Slide],
-    current_slide: usize,
+    slide: usize,
     masters: &'a [MasterSlide],
 ) -> Option<std::borrow::Cow<'a, MasterSlide>> {
-    let slide = slides.get(current_slide)?;
-    let m = slide.master_idx.and_then(|mi| masters.get(mi))?;
-    let own_look = slide.layout.and_then(|l| m.layouts.get(l)).is_some_and(|l| l.background.is_some() || !l.shapes.is_empty());
+    let slide = slides.get(slide)?;
+    let m = match slide.master_id {
+        Some(id) => masters.iter().find(|m| m.id == id)?,
+        None => masters.first()?,
+    };
+    let own_look = slide.layout_id.and_then(|lid| m.layouts.iter().find(|l| l.id == lid)).is_some_and(|l| l.background.is_some() || !l.shapes.is_empty());
     Some(if own_look {
-        std::borrow::Cow::Owned(decks_core::layouts::effective_master(m, slide.layout))
+        std::borrow::Cow::Owned(decks_core::layouts::effective_master(m, slide.layout_id))
     } else {
         std::borrow::Cow::Borrowed(m)
     })
@@ -427,10 +427,10 @@ pub fn master_decoration_layout(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slide(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, selected: Option<usize>,
+    slides: &[Slide], slide: usize, selected: Option<usize>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
 ) {
-    draw_slide_multi(cr, width, height, slides, current_slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent);
+    draw_slide_multi(cr, width, height, slides, slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent);
 }
 
 /// What surrounds a slide: the editor's (grey, a shadow and a border, a
@@ -527,7 +527,7 @@ pub type SlideFrame = ((f64, f64, f64, f64), (f64, f64, f64));
 /// colour text contrasts with. Shared by the editor and Magic Move frames.
 pub fn draw_slide_base(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, masters: &[MasterSlide], chrome: Chrome,
+    slides: &[Slide], slide: usize, masters: &[MasterSlide], chrome: Chrome,
 ) -> SlideFrame {
     suite_common::use_ui_font_rendering(cr);
     let (ox, oy, slide_w, slide_h) = slide_frame(width, height, chrome);
@@ -547,9 +547,9 @@ pub fn draw_slide_base(
     // Captured for the text-color contrast check below
     // (tuna-os/gtk-office-suite#78).
     let mut slide_bg_rgb: (f64, f64, f64) = (1.0, 1.0, 1.0);
-    if current_slide < slides.len() {
-        let slide_bg = &slides[current_slide].background;
-        let master = master_for(slides, current_slide, masters);
+    if slide < slides.len() {
+        let slide_bg = &slides[slide].background;
+        let master = master_for(slides, slide, masters);
         let master_bg = master
             .as_deref()
             .map(|m| m.background.as_str())
@@ -582,7 +582,7 @@ pub fn draw_slide_base(
     }
 
     // Draw master slide shapes (background pattern, logos, headers)
-    if let Some(master) = master_for(slides, current_slide, masters) {
+    if let Some(master) = master_for(slides, slide, masters) {
         let master: &MasterSlide = &master;
         for obj in &master.shapes {
             cr.save().unwrap();
@@ -653,20 +653,20 @@ fn draw_placeholder_prompt(cr: &cairo::Context, obj: &SlideObject, rect: (f64, f
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slide_multi(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, selected_indices: &std::collections::HashSet<usize>,
+    slides: &[Slide], slide: usize, selected_indices: &std::collections::HashSet<usize>,
     marquee: Option<(f64, f64, f64, f64)>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
 ) {
     suite_common::use_ui_font_rendering(cr);
     let (ar, ag, ab) = accent;
-    let ((ox, oy, slide_w, slide_h), slide_bg_rgb) = draw_slide_base(cr, width, height, slides, current_slide, masters, Chrome::Editor);
+    let ((ox, oy, slide_w, slide_h), slide_bg_rgb) = draw_slide_base(cr, width, height, slides, slide, masters, Chrome::Editor);
 
     // Draw objects
-    if current_slide < slides.len() {
-        let master = master_for(slides, current_slide, masters);
+    if slide < slides.len() {
+        let master = master_for(slides, slide, masters);
         let master = master.as_deref();
         let frame = (ox, oy, slide_w, slide_h);
-        for (oi, obj) in slides[current_slide].objects.iter().enumerate() {
+        for (oi, obj) in slides[slide].objects.iter().enumerate() {
             let rect = draw_object(cr, obj, frame, slide_bg_rgb, master);
             draw_placeholder_prompt(cr, obj, rect, slide_w / 960.0, slide_bg_rgb);
             if selected_indices.contains(&oi) {
@@ -694,19 +694,19 @@ pub fn draw_slide_multi(
     }
 
     // Empty slide indicator
-    if current_slide < slides.len() && slides[current_slide].objects.is_empty() {
+    if slide < slides.len() && slides[slide].objects.is_empty() {
         cr.set_source_rgba(0.5, 0.5, 0.5, 0.5);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(14.0);
-        let text = format!("Slide {}", current_slide + 1);
+        let text = format!("Slide {}", slide + 1);
         let extents = cr.text_extents(&text).unwrap();
         cr.move_to(ox + (slide_w - extents.width()) / 2.0, oy + slide_h - 20.0);
         cr.show_text(&text).unwrap();
     }
 
     // Slide number badge
-    if current_slide < slides.len() {
-        let badge = format!("{}", current_slide + 1);
+    if slide < slides.len() {
+        let badge = format!("{}", slide + 1);
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.4);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
         cr.set_font_size(11.0);
@@ -1147,14 +1147,14 @@ mod font_tests {
             background: "#ffffff".into(),
             objects: vec![sq(400.0, 100.0, Color(220, 0, 0)), sq(400.0, 300.0, Color(0, 0, 220))],
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Default::default(),
             builds: vec![
-                Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-                Build { object: 1, effect: BuildEffect::Dissolve, out: false },
+                Build { object: 10, effect: BuildEffect::Move(Edge::Left), out: false },
+                Build { object: 11, effect: BuildEffect::Dissolve, out: false },
             ],
-            ids: Default::default(),
-            layout: None,
+            ids: decks_core::ops::SlideIds { slide: 1, objects: vec![10, 11], deleted: vec![] },
+            layout_id: None,
         };
         let slides = [slide];
         let (w, h) = (960, 540);
@@ -1192,15 +1192,15 @@ mod font_tests {
     /// per slide at the model slide's size, with the slide's text in it.
     #[test]
     fn the_pdf_export_has_one_sized_page_per_slide() {
-        let mut two = slide(Some(0));
+        let mut two = slide(Some(7));
         two.objects.push(SlideObject::TextBox {
             text: "Hello export".into(),
             x: 100.0, y: 100.0, w: 400.0, h: 100.0, rotation: 0.0,
             runs: vec![decks_core::engine::Run::plain("Hello export")],
             body: Default::default(),
         });
-        let slides = [slide(Some(0)), two];
-        let masters = [master("Sans")];
+        let slides = [slide(Some(7)), two];
+        let masters = [master(7, "Sans")];
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.pdf");
@@ -1220,12 +1220,13 @@ mod font_tests {
     fn exporting_no_slides_is_an_error_not_an_empty_pdf() {
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = render_slides_pdf(&[], &[master("Sans")], &dir.join("out.pdf")).unwrap_err();
+        let err = render_slides_pdf(&[], &[master(7, "Sans")], &dir.join("out.pdf")).unwrap_err();
         assert!(err.contains("no slides"), "{err}");
     }
 
-    fn master(font: &str) -> MasterSlide {
+    fn master(id: u64, font: &str) -> MasterSlide {
         MasterSlide {
+            id,
             name: "M".into(),
             background: "#ffffff".into(),
             default_font: font.into(),
@@ -1235,17 +1236,17 @@ mod font_tests {
         }
     }
 
-    fn slide(master_idx: Option<usize>) -> Slide {
+    fn slide(master_id: Option<u64>) -> Slide {
         Slide {
             title: "S".into(),
             background: "#ffffff".into(),
             objects: vec![],
             notes: String::new(),
-            master_idx,
+            master_id,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }
     }
 
@@ -1314,45 +1315,46 @@ mod font_tests {
 
     #[test]
     fn a_slide_resolves_the_master_it_points_at() {
-        let masters = vec![master("A"), master("B")];
-        let slides = vec![slide(Some(1))];
+        let masters = vec![master(7, "A"), master(8, "B")];
+        let slides = vec![slide(Some(8))];
         assert_eq!(
             master_for(&slides, 0, &masters).map(|m| m.default_font.clone()).as_deref(),
             Some("B")
         );
     }
 
-    // A master_idx can outlive the list it indexes — a reader, an undo step
-    // or a recovered snapshot can all leave one pointing past the end. The
-    // three hand-rolled resolutions this replaced each had to get that
-    // right separately; now there is one place to be wrong.
+    // A master id can outlive the list it names — a reader, an undo step
+    // or a recovered snapshot can all leave one naming nothing. There is
+    // one place to get that right now, not three hand-rolled resolutions.
     #[test]
-    fn a_master_idx_past_the_end_resolves_to_no_master() {
-        let masters = vec![master("A")];
-        let slides = vec![slide(Some(7))];
+    fn an_unknown_master_id_resolves_to_no_master() {
+        let masters = vec![master(7, "A")];
+        let slides = vec![slide(Some(99))];
         assert!(master_for(&slides, 0, &masters).is_none());
-        // ...and the font falls back rather than panicking on the index.
+        // ...and the font falls back rather than panicking on the id.
         assert_eq!(master_font_family(master_for(&slides, 0, &masters).as_deref()), "Sans");
     }
 
     #[test]
     fn a_slide_index_past_the_end_resolves_to_no_master() {
-        let masters = vec![master("A")];
-        let slides = vec![slide(Some(0))];
+        let masters = vec![master(7, "A")];
+        let slides = vec![slide(Some(7))];
         assert!(master_for(&slides, 4, &masters).is_none());
         assert!(master_for(&[], 0, &masters).is_none());
     }
 
     #[test]
-    fn a_slide_with_no_master_idx_resolves_to_no_master() {
-        let masters = vec![master("A")];
+    fn a_slide_with_no_master_inherits_the_first() {
+        let masters = vec![master(7, "A")];
         let slides = vec![slide(None)];
-        assert!(master_for(&slides, 0, &masters).is_none());
+        assert_eq!(
+            master_for(&slides, 0, &masters).map(|m| m.default_font.clone()).as_deref(),
+            Some("A")
+        );
     }
 
-    #[test]
     fn a_master_that_names_a_font_gets_it() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         assert_eq!(master_font_family(Some(&m)), "Liberation Serif");
     }
 
@@ -1369,7 +1371,7 @@ mod font_tests {
     #[test]
     fn a_master_whose_font_is_blank_falls_back_rather_than_asking_for_nothing() {
         for blank in ["", "   ", "\t"] {
-            let m = master(blank);
+            let m = master(7, blank);
             assert_eq!(
                 master_font_family(Some(&m)),
                 "Sans",
@@ -1384,7 +1386,7 @@ mod font_tests {
     // back the family it was asked for whether or not it can resolve it.
     #[test]
     fn the_masters_font_reaches_the_description_the_renderer_draws_with() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         let desc = document_font_description(Some(&m), 18.0);
         assert_eq!(desc.family().map(|f| f.to_string()).as_deref(), Some("Liberation Serif"));
     }
@@ -1480,7 +1482,7 @@ mod font_tests {
     /// reachable without depending on which fonts are installed.
     #[test]
     fn a_master_decorations_emphasis_reaches_the_layout_it_is_drawn_from() {
-        let m = master("Cantarell");
+        let m = master(7, "Cantarell");
         let l = master_decoration_layout(
             &ctx(),
             &m,
@@ -1511,7 +1513,7 @@ mod font_tests {
     /// also responsible for.
     #[test]
     fn a_master_decoration_is_drawn_in_the_masters_font() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         let l = master_decoration_layout(&ctx(), &m, "plain", &[], 1.0);
         assert_eq!(
             l.font_description()
