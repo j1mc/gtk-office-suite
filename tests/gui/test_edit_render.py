@@ -20,7 +20,7 @@ import time
 import zipfile
 
 from framework import BaseGUITestCase
-from test_smoke import TablesCellEntryMixin
+from test_smoke import TablesCellEntryMixin, DecksCanvasGeometry
 
 PARAGRAPH = "Edited in the app, saved, and reopened."
 
@@ -173,9 +173,8 @@ class TablesEditRenderJourney(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed in the edit-render journey")
 
 
-class DecksEditRenderJourney(BaseGUITestCase):
-    """Add a text box and a shape to a new deck, save as PPTX, reopen: the
-    saved slide and the reopened model carry both objects."""
+class DecksEditRenderJourney(DecksCanvasGeometry, BaseGUITestCase):
+    """Edit a text box and add a shape, then save/reopen and render the result."""
 
     app_name = "decks"
 
@@ -194,6 +193,26 @@ class DecksEditRenderJourney(BaseGUITestCase):
         self.wait_until(lambda: len(self._kinds()) >= 1, bool, description="a new deck")
         before = self._kinds()[0]
         self.gapplication_action(aid, "add-text-box")
+        from dogtail import rawinput
+
+        obj = self.trigger_snapshot(aid)["slides"][0]["objects"][-1]
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2,
+                                       obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Slide text editor",
+                                       retry=False, requireResult=False),
+            lambda n: n is not None and n.showing,
+            description="the slide text editor",
+        )
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Edited slide title")
+        rawinput.keyCombo("<Control>Return")
+        self.wait_until(
+            lambda: self.trigger_snapshot(aid)["slides"][0]["objects"][-1]["text"],
+            lambda text: text == "Edited slide title",
+            description="the edited slide title",
+        )
         self.gapplication_action(aid, "add-shape")
         added = self.wait_until(lambda: self._kinds()[0], lambda got: len(got) == len(before) + 2,
                                 interval=0.3, description="the text box and the shape on slide 1")
@@ -201,10 +220,13 @@ class DecksEditRenderJourney(BaseGUITestCase):
         path = out_path(self, "decks", "pptx")
         parts = save_as(self, aid, path)
         slide = parts["ppt/slides/slide1.xml"]
-        self.assertIn(">Text<", slide, "the text box's text was not saved")
+        self.assertIn(">Edited slide title<", slide, "the edited text was not saved")
         self.assertGreaterEqual(len(re.findall(r"<p:sp>", slide)), 2, "the slide lost a shape")
 
         self.relaunch_app(launch_args=[path])
         self.wait_until(lambda: self._kinds()[0] if self._kinds() else None, lambda got: got == added,
                         interval=0.3, description="the reopened slide to hold the same objects")
+        texts = [o["text"] for o in self.trigger_snapshot(aid)["slides"][0]["objects"]
+                 if o["kind"] == "TextBox"]
+        self.assertIn("Edited slide title", texts)
         self.assertIsNone(self.process.poll(), "decks crashed in the edit-render journey")
