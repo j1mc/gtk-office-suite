@@ -370,13 +370,18 @@ fn inspect_package(
         let mut scoped_user_name = false;
         while let Some(start) = rest.find("<definedName") {
             let tag: &str = &rest[start..];
-            let end = tag.find('>').map(|i| start + i).unwrap_or(xml.len());
-            let element = &xml[start..end];
+            if tag.as_bytes().get("<definedName".len()) == Some(&b's') {
+                // The `<definedNames>` container, not an entry.
+                rest = &tag["<definedName".len()..];
+                continue;
+            }
+            let end = tag.find('>').unwrap_or(tag.len());
+            let element = &tag[..end];
             if element.contains("localSheetId") && !is_print_area_name(element) {
                 scoped_user_name = true;
                 break;
             }
-            rest = &xml[end..];
+            rest = &tag[end..];
         }
         if scoped_user_name {
             record(report, SCOPED_NAMES, "xl/workbook.xml", "sheet-scoped names are read as workbook-global; a same-named range on another sheet does not come back");
