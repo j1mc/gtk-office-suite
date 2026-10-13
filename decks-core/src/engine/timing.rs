@@ -126,8 +126,11 @@ pub(crate) fn timing_xml(builds: &[Build], spid: impl Fn(u64) -> u32) -> Option<
 /// is the stable object id with that cNvPr id (None for one the reader
 /// didn't keep).
 pub(crate) fn read_builds(slide_xml: &str, object_of: impl Fn(u32) -> Option<u64>) -> Vec<Build> {
+    let mut reader = Reader::from_str(slide_xml);
+    let mut in_timing = false;
+    // The effect being read: (class, preset, subtype, target spid).
+    let mut effect: Option<(bool, u32, u32, Option<u32>)> = None;
     let mut depth_in_effect = 0usize;
-    let mut out = Vec::new();
     let attr = |e: &quick_xml::events::BytesStart, k: &str| -> Option<String> {
         e.attributes()
             .flatten()

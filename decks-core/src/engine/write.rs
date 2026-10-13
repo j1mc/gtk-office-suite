@@ -1528,8 +1528,10 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
                 writer.get_mut().write_all(xml.as_bytes()).map_err(|e| e.to_string())?;
             }
             // Builds, after the transition as CT_Slide orders them; shapes
-            // are numbered 2 + index above.
-            if let Some(xml) = super::timing::timing_xml(&slide.builds, |i| 2 + i as u32) {
+            // are numbered 2 + index above, so each build's stable object
+            // id maps back to its cNvPr id here.
+            let spid = |id: u64| slide.ids.objects.iter().position(|o| *o == id).map(|j| 2 + j as u32).unwrap_or(0);
+            if let Some(xml) = super::timing::timing_xml(&slide.builds, spid) {
                 writer.get_mut().write_all(xml.as_bytes()).map_err(|e| e.to_string())?;
             }
             writer.write_event(Event::End(BytesEnd::new("p:sld"))).map_err(|e| e.to_string())?;
@@ -1545,11 +1547,18 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
         // part is now written for every slide rather than only for slides
         // that carry an image or notes.
         let has_notes = !slide.notes.is_empty();
+        // The slide's master and layout, resolved by stable id (DCK-005);
+        // the (master, layout) positions below only live inside this
+        // write. An unknown master id falls back to the first master, as
+        // an out-of-range index did before.
         let layout = slide
-            .master_idx
-            .filter(|k| *k < deck.masters.len())
+            .master_id
+            .and_then(|id| deck.masters.iter().position(|m| m.id == id))
             .or(if deck.masters.is_empty() { None } else { Some(0) })
-            .and_then(|k| layout_part_of(&parts, k, slide.layout));
+            .and_then(|k| {
+                let j = slide.layout_id.and_then(|id| deck.masters[k].layouts.iter().position(|l| l.id == id));
+                layout_part_of(&parts, k, j)
+            });
         if !slide_rels.is_empty() || has_notes || layout.is_some() {
             let mut rels_str = String::from(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
@@ -1669,7 +1678,7 @@ mod emu_rounding_tests {
                 title: String::new(),
                 background: String::new(),
                 notes: String::new(),
-                master_idx: None,
+                master_id: None,
                 objects: vec![SlideObject::TextBox {
                     text: text.into(),
                     x: at, y: at, w, h,
@@ -1680,7 +1689,7 @@ mod emu_rounding_tests {
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
             ..Default::default()
         }

@@ -232,6 +232,11 @@ pub fn ensure_all_ids(slides: &mut [Slide], masters: &mut [MasterSlide]) {
     }
 }
 
+/// A fresh id, after [`ensure_ids`].
+pub fn next_id(slides: &[Slide]) -> u64 {
+    max_id(slides) + 1
+}
+
 fn slide_pos(slides: &[Slide], id: u64) -> Option<usize> {
     slides.iter().position(|s| s.ids.slide == id)
 }

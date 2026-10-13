@@ -405,13 +405,15 @@ fn read_layout(
         .filter_map(|p| {
             let role = crate::layouts::Placeholder::from_pptx(Some(&p.key.ty))?;
             let r = p.rect.or_else(|| inherited_rect(&p.key, &layout_phs, master_phs))?;
-            Some(LayoutPlaceholder { role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y })
+            Some(LayoutPlaceholder { id: 0, role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y })
         })
         .collect();
     let name = parse_c_sld_name(xml).unwrap_or_else(|| {
         Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Layout".into())
     });
-    Layout { name, kind, background: bg.filter(|b| Some(b.as_str()) != master_bg), shapes, placeholders }
+    // Ids are stamped by the caller from the session space (DCK-005):
+    // 0 here means not assigned yet.
+    Layout { id: 0, name, kind, background: bg.filter(|b| Some(b.as_str()) != master_bg), shapes, placeholders }
 }
 
 /// A part's own background, if it states one.

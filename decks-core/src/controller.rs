@@ -1122,13 +1122,22 @@ impl DecksController {
         self.ids_ready();
         let target: crate::layouts::Layout = {
             let slides = self.slides.borrow();
-            let Some(s) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
+            let s = match slides.iter().find(|s| s.ids.slide == slide_id) {
+                Some(s) => s.clone(),
+                None => return false,
+            };
             let masters = self.masters.borrow();
             let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
-                Some(m) => m,
-                None => masters.first()?,
+                Some(m) => m.clone(),
+                None => match masters.first() {
+                    Some(m) => m.clone(),
+                    None => return false,
+                },
             };
-            master.layouts.iter().find(|l| l.id == layout_id)?.clone()
+            match master.layouts.iter().find(|l| l.id == layout_id) {
+                Some(l) => l.clone(),
+                None => return false,
+            }
         };
         self.apply_arranged_layout(slide_id, &target)
     }
@@ -1146,11 +1155,17 @@ impl DecksController {
         self.ids_ready();
         let (master_id, standard) = {
             let slides = self.slides.borrow();
-            let Some(s) = slides.iter().find(|s| s.ids.slide == slide_id) else { return false };
+            let s = match slides.iter().find(|s| s.ids.slide == slide_id) {
+                Some(s) => s.clone(),
+                None => return false,
+            };
             let masters = self.masters.borrow();
             let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
-                Some(m) => m,
-                None => masters.first()?,
+                Some(m) => m.clone(),
+                None => match masters.first() {
+                    Some(m) => m.clone(),
+                    None => return false,
+                },
             };
             if !master.layouts.is_empty() {
                 return false;
@@ -1175,13 +1190,22 @@ impl DecksController {
                 }
             }
         }
-        let target = layouts.get(at)?.clone();
-        let mut master = self.masters.borrow().iter().find(|m| m.id == master_id).cloned()?;
+        let target = match layouts.get(at) {
+            Some(l) => l.clone(),
+            None => return false,
+        };
+        let mut master = match self.masters.borrow().iter().find(|m| m.id == master_id).cloned() {
+            Some(m) => m,
+            None => return false,
+        };
         master.layouts = layouts;
         // The SetMaster op goes first; the arranged-slide ops follow in
         // the same group, so undo takes the added layouts away too.
         let mut ops = vec![Op::SetMaster { id: master_id, master: Box::new(master) }];
-        ops.extend(self.arranged_ops(slide_id, master_id, &target)?);
+        match self.arranged_ops(slide_id, master_id, &target) {
+            Some(more) => ops.extend(more),
+            None => return false,
+        }
         self.apply_ops(ops)
     }
 
@@ -1216,13 +1240,22 @@ impl DecksController {
     fn apply_arranged_layout(&self, slide_id: u64, target: &crate::layouts::Layout) -> bool {
         let ops = {
             let slides = self.slides.borrow();
-            let s = slides.iter().find(|s| s.ids.slide == slide_id)?;
+            let s = match slides.iter().find(|s| s.ids.slide == slide_id) {
+                Some(s) => s.clone(),
+                None => return false,
+            };
             let masters = self.masters.borrow();
             let master = match s.master_id.and_then(|id| masters.iter().find(|m| m.id == id)) {
-                Some(m) => m,
-                None => masters.first()?,
+                Some(m) => m.clone(),
+                None => match masters.first() {
+                    Some(m) => m.clone(),
+                    None => return false,
+                },
             };
-            self.arranged_ops(slide_id, master.id, target)?
+            match self.arranged_ops(slide_id, master.id, target) {
+                Some(ops) => ops,
+                None => return false,
+            }
         };
         self.apply_ops(ops)
     }

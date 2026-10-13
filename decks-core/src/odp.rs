@@ -800,13 +800,17 @@ fn content_xml(deck: &Deck, media: &mut Vec<Media>) -> Result<String, String> {
             format!(" draw:name=\"{}\"", esc(&slide.title))
         };
         // Its master page, or its layout's own one (odp_layouts), and its
-        // layout's page layout.
-        let master_attrs = deck
-            .masters
-            .get(slide.master_idx.unwrap_or(0))
+        // layout's page layout. Resolved by stable id (DCK-005): `None`
+        // inherits the first master, as before; an unknown id names no
+        // master rather than a positional guess.
+        let master = match slide.master_id {
+            Some(id) => deck.masters.iter().find(|m| m.id == id),
+            None => deck.masters.first(),
+        };
+        let master_attrs = master
             .map(|m| {
                 let style = encode_style_name(&m.name);
-                let layout = slide.layout.filter(|j| *j < m.layouts.len()).or((!m.layouts.is_empty()).then_some(0));
+                let layout = slide.layout_id.and_then(|id| m.layouts.iter().position(|l| l.id == id)).or((!m.layouts.is_empty()).then_some(0));
                 let page = match layout {
                     Some(j) if crate::odp_layouts::has_look(&m.layouts[j]) => crate::odp_layouts::look_page_name(&style, j),
                     _ => style.clone(),
@@ -824,7 +828,12 @@ fn content_xml(deck: &Deck, media: &mut Vec<Media>) -> Result<String, String> {
         } else {
             // Builds target their shapes by xml:id: give each object one.
             pages.push_str(&with_ids(&shapes, slide.objects.len(), si));
-            if let Some(anim) = crate::odp_builds::animations_xml(&slide.builds, |i| object_id(si, i)) {
+            // Each build's stable object id maps back to its xml:id here.
+            let xml_id = |id: u64| {
+                let i = slide.ids.objects.iter().position(|o| *o == id).unwrap_or(0);
+                object_id(si, i)
+            };
+            if let Some(anim) = crate::odp_builds::animations_xml(&slide.builds, xml_id) {
                 pages.push_str(&anim);
             }
         }
@@ -1466,6 +1475,9 @@ fn parse_pages(
     scale: (f64, f64),
     resolve_image: &mut dyn FnMut(&str) -> Option<String>,
     charts: &std::collections::HashMap<String, crate::engine::chart::ChartData>,
+    /// Session id counter (DCK-005): every page stamps its slide and
+    /// objects once at import, so builds name stable ids.
+    fresh: &mut u64,
 ) -> Result<Vec<Page>, String> {
     let mut pages: Vec<Page> = Vec::new();
     let mut uses_master: Option<String> = None;
@@ -1586,11 +1598,11 @@ fn parse_pages(
                         background: bg,
                         objects: vec![],
                         notes: String::new(),
-                        master_idx: Some(0),
+                        master_id: None,
                         transition: Default::default(),
                         builds: Vec::new(),
                         ids: Default::default(),
-                        layout: None,
+                        layout_id: None,
                     });
                 }
                 "presentation:notes" => in_notes = true,
@@ -1854,7 +1866,17 @@ fn parse_pages(
                         while ids.len() < s.objects.len() {
                             ids.push(last_id.clone());
                         }
-                        s.builds = builds.builds(&ids);
+                        // Stable ids, minted once at import from the
+                        // session space (DCK-005); the builds below name
+                        // these, never positions.
+                        s.ids.slide = *fresh;
+                        *fresh += 1;
+                        for _ in &s.objects {
+                            s.ids.objects.push(*fresh);
+                            *fresh += 1;
+                        }
+                        let xml_ids: Vec<(String, u64)> = ids.iter().zip(s.ids.objects.iter().copied()).filter_map(|(x, id)| x.clone().map(|x| (x, id))).collect();
+                        s.builds = builds.builds(&xml_ids);
                         pages.push(Page {
                             slide: s,
                             uses_master: uses_master.take(),
@@ -1978,11 +2000,14 @@ pub fn read(path: &str) -> Result<Deck, String> {
     let charts = read_chart_objects(&mut zip, &mut budget);
 
     // Second pass: the master pages, then the slides that name them.
+    // Stable ids minted once at import (DCK-005): one counter for the
+    // whole package, shared by every `parse_pages` call below.
+    let mut fresh = 1u64;
     let mut masters: Vec<MasterSlide> = Vec::new();
     let mut master_idx_by_name: std::collections::HashMap<String, usize> = Default::default();
     let master_pages = {
         let mut resolve = |href: &str| extract_picture(href, &mut zip, &mut budget);
-        parse_pages(&styles, "style:master-page", &page_bg, &text_styles, &text_defs, &graphic_defs, scale, &mut resolve, &charts)?
+        parse_pages(&styles, "style:master-page", &page_bg, &text_styles, &text_defs, &graphic_defs, scale, &mut resolve, &charts, &mut fresh)?
     };
     // Layouts (odp_layouts): the page layouts, each master's own (or, in a
     // file we didn't write, every one), and the master pages that are a
@@ -2005,6 +2030,8 @@ pub fn read(path: &str) -> Result<Deck, String> {
         layout_names.push(mine.iter().map(|p| p.name.clone()).collect());
         master_idx_by_name.insert(page.slide.title.clone(), masters.len());
         masters.push(MasterSlide {
+            // Stamped with the session id below; 0 is never stored.
+            id: 0,
             name: page.slide.title,
             background: page.slide.background,
             default_font: doc_font.clone(),
@@ -2012,6 +2039,22 @@ pub fn read(path: &str) -> Result<Deck, String> {
             page_emu: None,
             layouts: mine.into_iter().map(|p| p.layout.clone()).collect(),
         });
+        // Stable master, layout and placeholder ids, minted once at
+        // import from the same session space as the slides.
+        let mi = masters.len() - 1;
+        {
+            let m = &mut masters[mi];
+            m.id = fresh;
+            fresh += 1;
+            for l in m.layouts.iter_mut() {
+                l.id = fresh;
+                fresh += 1;
+                for p in l.placeholders.iter_mut() {
+                    p.id = fresh;
+                    fresh += 1;
+                }
+            }
+        }
     }
     // A layout's look page: the master's decorations, then the layout's.
     let mut look_slot: std::collections::HashMap<String, (usize, usize)> = Default::default();
@@ -2027,7 +2070,10 @@ pub fn read(path: &str) -> Result<Deck, String> {
         }
     }
     if masters.is_empty() {
+        let id = fresh;
+        fresh += 1;
         masters.push(MasterSlide {
+            id,
             name: "Default".into(),
             background: "#ffffff".into(),
             default_font: doc_font.clone(),
@@ -2043,7 +2089,7 @@ pub fn read(path: &str) -> Result<Deck, String> {
     let mut deck = Deck { slides: Vec::new(), masters };
     let slide_pages = {
         let mut resolve = |href: &str| extract_picture(href, &mut zip, &mut budget);
-        parse_pages(&content, "draw:page", &page_bg, &text_styles, &text_defs, &graphic_defs, scale, &mut resolve, &charts)?
+        parse_pages(&content, "draw:page", &page_bg, &text_styles, &text_defs, &graphic_defs, scale, &mut resolve, &charts, &mut fresh)?
     };
     for (i, page) in slide_pages.into_iter().enumerate() {
         let mut slide = page.slide;
@@ -2058,34 +2104,44 @@ pub fn read(path: &str) -> Result<Deck, String> {
         if slide.title.trim().is_empty() {
             slide.title = format!("Slide {}", i + 1);
         }
+        // Slides name their master and layout by stable id (DCK-005):
+        // the (master, layout) positions above only live inside this
+        // import. An unknown master falls back to the first, as an
+        // out-of-range index did before.
         let named = page.uses_master.as_deref().map(decode_style_name);
         if let Some(&(mi, j)) = named.as_ref().and_then(|n| look_slot.get(n)) {
-            slide.master_idx = Some(mi);
-            slide.layout = Some(j);
+            slide.master_id = Some(deck.masters[mi].id);
+            slide.layout_id = deck.masters[mi].layouts.get(j).map(|l| l.id);
         } else {
-            slide.master_idx = named.and_then(|n| master_idx_by_name.get(&n).copied()).or(Some(0));
-            let mi = slide.master_idx.unwrap_or(0);
-            slide.layout = page
-                .page_layout
-                .as_ref()
-                .and_then(|name| layout_names.get(mi)?.iter().position(|n| n == name));
+            let mi = named.and_then(|n| master_idx_by_name.get(&n).copied()).or(Some(0));
+            slide.master_id = mi.map(|mi| deck.masters[mi].id);
+            slide.layout_id = mi.and_then(|mi| {
+                page.page_layout
+                    .as_ref()
+                    .and_then(|name| layout_names.get(mi)?.iter().position(|n| n == name))
+            }).and_then(|j| mi.and_then(|mi| deck.masters[mi].layouts.get(j)).map(|l| l.id));
         }
         deck.slides.push(slide);
     }
 
     if deck.slides.is_empty() {
+        let slide_id = fresh;
+        fresh += 1;
         deck.slides.push(Slide {
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             objects: vec![],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
-            ids: Default::default(),
-            layout: None,
+            ids: crate::ops::SlideIds { slide: slide_id, objects: Vec::new(), deleted: Vec::new() },
+            layout_id: None,
         });
     }
+    // Safety net: anything the paths above left at 0 gets a session id
+    // here, still once per document.
+    crate::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
     Ok(deck)
 }
 
@@ -2133,11 +2189,11 @@ mod tests {
                 body: Default::default(),
             }],
             notes: notes.into(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }
     }
 
@@ -2340,11 +2396,11 @@ mod tests {
                 background: String::new(),
                 objects: vec![],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
         };
         let styles = styles_xml(&deck, &mut Vec::new()).unwrap();
@@ -2394,11 +2450,11 @@ mod tests {
                     rotation: 0.0, crop: Default::default()
                 }],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
         }
     }
@@ -2583,11 +2639,11 @@ mod tests {
                 SlideObject::Circle { x: 500.0, y: 300.0, r: 80.0, rotation: 0.0 },
             ],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }];
         let rt = round_trip(&deck);
         let close = |a: f64, b: f64| (a - b).abs() < 0.1;
@@ -2637,11 +2693,11 @@ mod tests {
                 body: Default::default(),
             }],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }];
         let rt = round_trip(&deck);
         let SlideObject::TextBox { runs, .. } = &rt.slides[0].objects[0] else { panic!() };
@@ -2791,7 +2847,7 @@ mod tests {
                 title: String::new(),
                 background: String::new(),
                 notes: String::new(),
-                master_idx: None,
+                master_id: None,
                 objects: vec![SlideObject::TextBox {
                     text: text.into(),
                     x: at, y: at, w: 200.0, h: 50.0,
@@ -2802,7 +2858,7 @@ mod tests {
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
             ..Default::default()
         }
