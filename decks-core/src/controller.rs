@@ -105,6 +105,17 @@ pub struct DecksController {
     /// through it are the only ways the controller changes the slides,
     /// and each marks the deck dirty.
     history: RefCell<History<Op>>,
+    /// The selection before each recorded history step, in step order:
+    /// undo restores the selection the undone step saw, redo the one it
+    /// left. Merged keystrokes (notes word typing) share one entry, as
+    /// their ops share one step. Repaired against the slides on restore,
+    /// never trusted blindly.
+    undo_sels: RefCell<Vec<SelectionState>>,
+    redo_sels: RefCell<Vec<SelectionState>>,
+    /// Whether the previous apply extended a notes word-typing step: the
+    /// controller's mirror of the history's merge flag, so the stacks
+    /// above stay in step with coalesced records.
+    merge_chain: Cell<bool>,
     /// The master view (`edit_master`): the deck's slides and history while
     /// the master is in their place.
     master_edit: RefCell<Option<MasterEdit>>,
@@ -136,6 +147,9 @@ struct MasterEdit {
     slides: Vec<Slide>,
     history: History<Op>,
     selection: SelectionState,
+    undo_sels: Vec<SelectionState>,
+    redo_sels: Vec<SelectionState>,
+    merge_chain: bool,
     /// The slide the view was opened from, by stable id, to return to.
     from_slide_id: u64,
 }
@@ -209,11 +223,10 @@ impl DecksController {
             dirty: Rc::new(Cell::new(false)),
             file_path: Rc::new(RefCell::new(None)),
             history: RefCell::new(History::default()),
+            undo_sels: RefCell::new(Vec::new()),
+            redo_sels: RefCell::new(Vec::new()),
+            merge_chain: Cell::new(false),
             master_edit: RefCell::new(None),
-            source_context: RefCell::new(None),
-            revision: Cell::new(0),
-            saved_revision: Cell::new(None),
-            selection: RefCell::new(selection),
         }
     }
 
@@ -273,6 +286,9 @@ impl DecksController {
         crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
         *self.source_context.borrow_mut() = Some(context);
         *self.history.borrow_mut() = History::default();
+        self.undo_sels.borrow_mut().clear();
+        self.redo_sels.borrow_mut().clear();
+        self.merge_chain.set(false);
         self.revision.set(0);
         self.saved_revision.set(None);
         let first = self.slides.borrow().first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
@@ -415,8 +431,11 @@ impl DecksController {
         let slides = std::mem::replace(&mut *self.slides.borrow_mut(), vec![stand_in]);
         let history = std::mem::take(&mut *self.history.borrow_mut());
         let selection = std::mem::take(&mut *self.selection.borrow_mut());
+        let undo_sels = std::mem::take(&mut *self.undo_sels.borrow_mut());
+        let redo_sels = std::mem::take(&mut *self.redo_sels.borrow_mut());
+        let merge_chain = self.merge_chain.replace(false);
         *self.selection.borrow_mut() = SelectionState::single(stand_in_id, None);
-        *self.master_edit.borrow_mut() = Some(MasterEdit { master_id, slides, history, selection, from_slide_id: slide_id });
+        *self.master_edit.borrow_mut() = Some(MasterEdit { master_id, slides, history, selection, undo_sels, redo_sels, merge_chain, from_slide_id: slide_id });
         Some(master_id)
     }
 
@@ -432,6 +451,9 @@ impl DecksController {
         let edit = self.master_edit.borrow_mut().take()?;
         let stand_in = std::mem::replace(&mut *self.slides.borrow_mut(), edit.slides);
         *self.history.borrow_mut() = edit.history;
+        *self.undo_sels.borrow_mut() = edit.undo_sels;
+        *self.redo_sels.borrow_mut() = edit.redo_sels;
+        self.merge_chain.set(edit.merge_chain);
         *self.selection.borrow_mut() = SelectionState::single(edit.from_slide_id, None);
         self.repair_selection();
         if let Some(s) = stand_in.first() {
@@ -454,6 +476,9 @@ impl DecksController {
         let edit = self.master_edit.borrow_mut().take()?;
         *self.slides.borrow_mut() = edit.slides;
         *self.history.borrow_mut() = edit.history;
+        *self.undo_sels.borrow_mut() = edit.undo_sels;
+        *self.redo_sels.borrow_mut() = edit.redo_sels;
+        self.merge_chain.set(edit.merge_chain);
         *self.selection.borrow_mut() = edit.selection;
         self.repair_selection();
         Some(edit.from_slide_id)
@@ -736,7 +761,15 @@ impl DecksController {
     /// no-op and cancelled changes record nothing: they do not dirty the
     /// document, clear redo, or bump the revision.
     pub fn apply_ops_txn(&self, ops: Vec<Op>) -> TxnOutcome {
-        let failed = TxnOutcome { applied: false, changed_slides: Vec::new(), changed_objects: Vec::new(), revision: self.revision.get(), selection: self.selection.borrow().clone() };
+        self.apply_ops_inner(ops, false)
+    }
+
+    /// The `merged` flag is for notes word typing (`set_notes`): when the
+    /// ops coalesce into the previous history step, the selection entry
+    /// for that step is already on the stack.
+    fn apply_ops_inner(&self, ops: Vec<Op>, merged: bool) -> TxnOutcome {
+        let pre_selection = self.selection.borrow().clone();
+        let failed = TxnOutcome { applied: false, changed_slides: Vec::new(), changed_objects: Vec::new(), revision: self.revision.get(), selection: pre_selection.clone() };
         if ops.is_empty() {
             return failed;
         }
@@ -751,6 +784,11 @@ impl DecksController {
         }
         // One user action, one step.
         self.history.borrow_mut().record(inverses);
+        if !merged {
+            self.undo_sels.borrow_mut().push(pre_selection);
+        }
+        self.redo_sels.borrow_mut().clear();
+        self.merge_chain.set(false);
         if let Some(context) = self.source_context.borrow_mut().as_mut() {
             context.note_ops(&ops);
         }
@@ -1101,11 +1139,18 @@ impl DecksController {
             Some(s) => one_word_char_added(&s.notes, notes),
             None => return false,
         };
+        // A word character joins the previous word step (one selection
+        // entry for the whole word, as one history step); anything else
+        // starts a step of its own.
+        let merged = typing && self.merge_chain.get();
         self.history.borrow_mut().set_merge(typing);
-        let changed = self.set_slide_props(slide_id, |p| p.notes = notes.to_string());
+        let changed = self.set_slide_props_inner(slide_id, merged, |p| p.notes = notes.to_string());
         if !changed {
             // Nothing recorded, so the mark must not reach the next step.
             self.history.borrow_mut().set_merge(false);
+            self.merge_chain.set(false);
+        } else {
+            self.merge_chain.set(typing);
         }
         changed
     }
@@ -1262,6 +1307,12 @@ impl DecksController {
 
     /// Change slide `slide_id`'s properties as one undo step.
     fn set_slide_props(&self, slide_id: u64, change: impl FnOnce(&mut crate::ops::SlideProps)) -> bool {
+        self.set_slide_props_inner(slide_id, false, change)
+    }
+
+    /// As `set_slide_props`, sharing the history step (and the selection
+    /// entry) with the previous step when `merged`.
+    fn set_slide_props_inner(&self, slide_id: u64, merged: bool, change: impl FnOnce(&mut crate::ops::SlideProps)) -> bool {
         let op = {
             self.ids_ready();
             let slides = self.slides.borrow();
@@ -1274,7 +1325,7 @@ impl DecksController {
             }
             Op::SetSlide { slide: slide_id, props: Box::new(new) }
         };
-        self.apply_ops(vec![op])
+        self.apply_ops_inner(vec![op], merged).applied
     }
 
     /// Set how slide `slide_id` arrives when presented, as one undo step.
@@ -1305,36 +1356,65 @@ impl DecksController {
         slide.objects.get(at).map(crate::format::ObjectFormat::of)
     }
 
+    /// Undo one step. The document, the revision and the selection all go
+    /// back: the selection the undone step saw is restored (repaired
+    /// against what is present), so an undone insert cannot leave the
+    /// window pointing past the end.
     pub fn undo(&self) -> bool {
+        let pre = self.selection.borrow().clone();
         let mut history = self.history.borrow_mut();
         let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
             history.undo(doc)
         })
         .is_some();
         if done {
+            self.redo_sels.borrow_mut().push(pre);
+            match self.undo_sels.borrow_mut().pop() {
+                Some(sel) => self.set_selection(sel),
+                None => {
+                    self.repair_selection();
+                }
+            }
             if let Some(context) = self.source_context.borrow_mut().as_mut() {
                 context.note_history_step();
             }
             self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
-            self.repair_selection();
+            self.merge_chain.set(false);
+        } else {
+            // Nothing to undo, or history no longer fits and dropped
+            // itself: the stacks mirror it either way.
+            self.undo_sels.borrow_mut().clear();
+            self.redo_sels.borrow_mut().clear();
         }
         done
     }
 
+    /// Redo one step, restoring the selection it left as well.
     pub fn redo(&self) -> bool {
+        let pre = self.selection.borrow().clone();
         let mut history = self.history.borrow_mut();
         let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
             history.redo(doc)
         })
         .is_some();
         if done {
+            self.undo_sels.borrow_mut().push(pre);
+            match self.redo_sels.borrow_mut().pop() {
+                Some(sel) => self.set_selection(sel),
+                None => {
+                    self.repair_selection();
+                }
+            }
             if let Some(context) = self.source_context.borrow_mut().as_mut() {
                 context.note_history_step();
             }
             self.revision.set(self.revision.get().wrapping_add(1));
             self.dirty.set(true);
-            self.repair_selection();
+            self.merge_chain.set(false);
+        } else {
+            self.undo_sels.borrow_mut().clear();
+            self.redo_sels.borrow_mut().clear();
         }
         done
     }
@@ -1426,11 +1506,22 @@ mod tests {
     use crate::engine::Slide;
 
     fn slide(title: &str) -> Slide {
-        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None }
+        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None }
     }
 
     fn rect(x: f64, y: f64) -> SlideObject {
         SlideObject::Rect { x, y, w: 10.0, h: 10.0, rotation: 0.0 }
+    }
+
+    /// The stable id of the slide at view position `i`.
+    fn sid(c: &DecksController, i: usize) -> u64 {
+        c.slide_id_at(i).unwrap()
+    }
+
+    /// The stable id of the object at z-position `oi` on the slide at
+    /// view position `si`.
+    fn oid(c: &DecksController, si: usize, oi: usize) -> u64 {
+        c.object_id_at(si, oi).unwrap()
     }
 
     /// Each chart edit is one undo step, and one that changes nothing
@@ -1439,16 +1530,18 @@ mod tests {
     fn each_chart_edit_is_one_undo_step() {
         use crate::engine::chart::{ChartEdit, ChartKind};
         let c = DecksController::new(vec![slide("S1")], vec![]);
-        c.add_object(0, crate::insert::chart(ChartKind::Bar));
+        let s = sid(&c, 0);
+        c.add_object(s, crate::insert::chart(ChartKind::Bar));
+        let o = oid(&c, 0, 0);
         let chart = |c: &DecksController| match &c.slides.borrow()[0].objects[0] {
             SlideObject::Chart { chart, .. } => chart.clone(),
             _ => panic!("expected a chart"),
         };
         let inserted = chart(&c);
-        assert!(c.edit_chart(0, 0, &ChartEdit::Value(1, 9.0)));
-        assert!(c.edit_chart(0, 0, &ChartEdit::Kind(ChartKind::Pie)));
-        assert!(!c.edit_chart(0, 0, &ChartEdit::Kind(ChartKind::Pie)), "no change, no step");
-        assert!(!c.edit_chart(0, 1, &ChartEdit::AddPoint), "no object there");
+        assert!(c.edit_chart(s, o, &ChartEdit::Value(1, 9.0)));
+        assert!(c.edit_chart(s, o, &ChartEdit::Kind(ChartKind::Pie)));
+        assert!(!c.edit_chart(s, o, &ChartEdit::Kind(ChartKind::Pie)), "no change, no step");
+        assert!(!c.edit_chart(s, u64::MAX, &ChartEdit::AddPoint), "no object there");
         assert_eq!((chart(&c).kind, chart(&c).points[1].1), (ChartKind::Pie, 9.0));
         assert!(c.undo());
         assert_eq!((chart(&c).kind, chart(&c).points[1].1), (ChartKind::Bar, 9.0), "one undo, the type");
@@ -1461,16 +1554,20 @@ mod tests {
     #[test]
     fn add_object_appends_to_slide_and_marks_dirty() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
-        c.add_object(0, rect(1.0, 2.0));
+        let s = sid(&c, 0);
+        let id = c.add_object(s, rect(1.0, 2.0)).unwrap();
         assert_eq!(c.slides.borrow()[0].objects.len(), 1);
+        assert_eq!(c.object_id_at(0, 0), Some(id));
         assert!(c.dirty.get());
     }
 
     #[test]
     fn move_object_offsets_position() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
-        c.add_object(0, rect(1.0, 2.0));
-        c.move_object(0, 0, 5.0, -1.0);
+        let s = sid(&c, 0);
+        c.add_object(s, rect(1.0, 2.0));
+        let o = oid(&c, 0, 0);
+        c.move_object(s, o, 5.0, -1.0);
         let slides = c.slides.borrow();
         match slides[0].objects[0] {
             SlideObject::Rect { x, y, .. } => {
@@ -1484,12 +1581,16 @@ mod tests {
     #[test]
     fn delete_object_removes_it_and_undo_restores_it() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
-        c.add_object(0, rect(0.0, 0.0));
-        let obj = c.slides.borrow()[0].objects[0].clone();
-        c.delete_object(0, 0, obj);
+        let s = sid(&c, 0);
+        c.add_object(s, rect(0.0, 0.0));
+        let o = oid(&c, 0, 0);
+        assert!(c.delete_object(s, o));
         assert!(c.slides.borrow()[0].objects.is_empty());
+        assert!(!c.delete_object(s, o), "already deleted");
         assert!(c.undo());
         assert_eq!(c.slides.borrow()[0].objects.len(), 1);
+        // Undo brings the same identity back, not a fresh one.
+        assert_eq!(c.object_id_at(0, 0), Some(o));
     }
 
     #[test]
@@ -1497,7 +1598,8 @@ mod tests {
         let mut s = slide("S1");
         s.objects.push(SlideObject::TextBox { text: "old".into(), x: 0.0, y: 0.0, w: 10.0, h: 10.0, runs: vec![], rotation: 0.0, body: Default::default() });
         let c = DecksController::new(vec![s], vec![]);
-        c.change_text(0, 0, "old".into(), "new".into());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        c.change_text(s, o, "new".into());
         {
             let slides = c.slides.borrow();
             match &slides[0].objects[0] {
@@ -1542,7 +1644,8 @@ mod tests {
         ], Default::default());
         let before = format!("{:?}", c.slides.borrow()[0].objects[0]);
         // A stale caller snapshot must not become the source of style offsets or undo.
-        c.change_text(0, 0, "stale".into(), "Keep cañon 東京😀".into());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        c.change_text(s, o, "Keep cañon 東京😀".into());
         let (text, runs, _) = text_state(&c);
         assert_eq!(text, "Keep cañon 東京😀");
         assert_eq!(runs, vec![
@@ -1598,7 +1701,8 @@ mod tests {
         for (new_text, expected) in cases {
             let c = styled_text_controller(original.clone(), Default::default());
             let before = text_state(&c);
-            c.change_text(0, 0, before.0.clone(), new_text.into());
+            let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+            c.change_text(s, o, new_text.into());
             assert_eq!(text_state(&c).1, expected, "{new_text}");
             assert_eq!(text_state(&c).0, new_text);
             assert!(c.undo());
@@ -1614,18 +1718,19 @@ mod tests {
         let style = RunStyle { bold: true, font_size_hp: Some(48), ..Default::default() };
         let c = styled_text_controller(vec![Run { text: "Hi".into(), style: style.clone() }], Default::default());
         let before = text_state(&c);
-        c.change_text(0, 0, "Hi".into(), "Hi".into());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        c.change_text(s, o, "Hi".into());
         assert!(!c.dirty.get());
         assert!(!c.can_undo());
-        c.change_text(0, 0, "Hi".into(), String::new());
+        c.change_text(s, o, String::new());
         assert_eq!(text_state(&c).1, vec![Run { text: String::new(), style: style.clone() }]);
-        c.change_text(0, 0, String::new(), "😀".into());
+        c.change_text(s, o, "😀".into());
         assert_eq!(text_state(&c).1, vec![Run { text: "😀".into(), style }]);
         assert!(c.undo());
         assert!(text_state(&c).0.is_empty());
         assert!(c.undo());
         assert_eq!(text_state(&c), before);
-        c.change_text(0, 0, "Hi".into(), "Hi".into());
+        c.change_text(s, o, "Hi".into());
         assert!(c.can_redo(), "no-op must not discard redo");
         assert!(c.redo());
         assert!(c.redo());
@@ -1644,12 +1749,13 @@ mod tests {
             anchor: Anchor::Middle, ..Default::default()
         });
         let before = text_state(&c);
-        c.change_text(0, 0, before.0.clone(), "one\nnew\ntwo\n三".into());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        c.change_text(s, o, "one\nnew\ntwo\n三".into());
         let inserted = text_state(&c);
         assert_eq!(inserted.1.iter().map(|r| r.text.as_str()).collect::<String>(), inserted.0);
         assert_eq!(inserted.2.paras, vec![first.clone(), second.clone(), second.clone(), third.clone()]);
         assert_eq!(inserted.2.anchor, Anchor::Middle);
-        c.change_text(0, 0, inserted.0.clone(), "one\nnewtwo\n三".into());
+        c.change_text(s, o, "one\nnewtwo\n三".into());
         assert_eq!(text_state(&c).2.paras, vec![first, second, third]);
         assert!(c.undo());
         assert_eq!(text_state(&c), inserted);
@@ -1663,26 +1769,34 @@ mod tests {
     fn add_slide_appends_and_marks_dirty() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
         assert!(!c.dirty.get());
-        let idx = c.add_slide(1, slide("S2"));
-        assert_eq!(idx, 1);
+        let id = c.add_slide(1, slide("S2")).unwrap();
+        assert_eq!(c.slide_index(id), Some(1));
         assert_eq!(c.slide_count(), 2);
         assert_eq!(c.slides.borrow()[1].title, "S2");
         assert!(c.dirty.get());
+        // Redo after undo keeps the slide's identity.
+        assert!(c.undo());
+        assert!(c.redo());
+        assert_eq!(c.slide_id_at(1), Some(id));
     }
 
     #[test]
-    fn delete_slide_removes_and_selects_prior() {
+    fn delete_slide_removes_and_repairs_selection() {
         let c = DecksController::new(vec![slide("S1"), slide("S2"), slide("S3")], vec![]);
-        let new_idx = c.delete_slide(1).unwrap();
-        assert_eq!(new_idx, 1);
+        let doomed = sid(&c, 1);
+        c.select_slide(doomed);
+        assert!(c.delete_slide(doomed));
         assert_eq!(c.slide_count(), 2);
         assert_eq!(c.slides.borrow()[1].title, "S3");
+        // The selection fell back to a slide that still exists.
+        assert_ne!(c.selection().slide_id, Some(doomed));
+        assert!(c.slide_index(c.selection().slide_id.unwrap()).is_some());
     }
 
     #[test]
     fn delete_slide_refuses_to_empty_deck() {
         let c = DecksController::new(vec![slide("Only")], vec![]);
-        assert_eq!(c.delete_slide(0), None);
+        assert!(!c.delete_slide(sid(&c, 0)));
         assert_eq!(c.slide_count(), 1);
     }
 
@@ -1701,16 +1815,17 @@ mod tests {
             crop: Default::default(),
         });
         let c = DecksController::new(vec![s], vec![]);
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
         let crop = |c: &DecksController| match &c.slides.borrow()[0].objects[0] {
             SlideObject::Image { crop, .. } => *crop,
             _ => unreachable!(),
         };
-        assert!(c.crop_picture(0, 0, true));
+        assert!(c.crop_picture(s, o, true));
         let fill = crop(&c);
         assert!((fill.left - 0.25).abs() < 1e-9 && (fill.right - 0.25).abs() < 1e-9, "a 2:1 picture in a square box loses a quarter each side: {fill:?}");
         assert_eq!((fill.top, fill.bottom), (0.0, 0.0));
-        assert!(!c.crop_picture(0, 0, true), "already filled: no step");
-        assert!(c.crop_picture(0, 0, false));
+        assert!(!c.crop_picture(s, o, true), "already filled: no step");
+        assert!(c.crop_picture(s, o, false));
         assert!(crop(&c).is_none());
         assert!(c.undo());
         assert_eq!(crop(&c), fill, "one undo puts the crop back");
@@ -1722,7 +1837,9 @@ mod tests {
         first.notes = "say this".into();
         first.objects.push(rect(5.0, 6.0));
         let c = DecksController::new(vec![first.clone(), slide("Two")], vec![]);
-        assert_eq!(c.duplicate_slide(0), Some(1));
+        let orig = sid(&c, 0);
+        let copy = c.duplicate_slide(orig).unwrap();
+        assert_eq!(c.slide_index(copy), Some(1));
         {
             let s = c.slides.borrow();
             assert_eq!(s.len(), 3);
@@ -1732,32 +1849,41 @@ mod tests {
             assert_ne!(s[1].ids.slide, s[0].ids.slide, "the copy is a slide of its own");
             assert!(s[1].ids.objects.iter().all(|id| !s[0].ids.objects.contains(id)), "with objects of its own");
         }
-        assert_eq!(c.duplicate_slide(9), None);
+        assert_eq!(c.duplicate_slide(u64::MAX), None);
         assert!(c.undo());
         let s = c.slides.borrow();
         assert_eq!(s.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["One", "Two"], "one undo removes the copy");
+        assert!(c.redo());
+        // Redo keeps the copy's identity: it is the same slide, not a new one.
+        assert_eq!(c.slide_id_at(1), Some(copy));
     }
 
     #[test]
     fn move_slide_up_and_down_swap_neighbors() {
         let c = DecksController::new(vec![slide("S1"), slide("S2")], vec![]);
-        assert_eq!(c.move_slide_up(0), None);
-        assert_eq!(c.move_slide_down(1), None);
-        let idx = c.move_slide_down(0).unwrap();
-        assert_eq!(idx, 1);
+        let (first, second) = (sid(&c, 0), sid(&c, 1));
+        assert!(!c.move_slide_up(first));
+        assert!(!c.move_slide_down(second));
+        assert!(c.move_slide_down(first));
+        assert_eq!(c.slide_index(first), Some(1));
         assert_eq!(c.slides.borrow()[0].title, "S2");
-        let idx = c.move_slide_up(1).unwrap();
-        assert_eq!(idx, 0);
+        assert!(c.move_slide_up(first));
+        assert_eq!(c.slide_index(first), Some(0));
         assert_eq!(c.slides.borrow()[0].title, "S1");
+        // The selection follows the id through the reorder.
+        c.select_slide(first);
+        assert!(c.move_slide_down(first));
+        assert_eq!(c.selection().slide_id, Some(first));
     }
 
-    /// Type `text` into slide 0's notes one character at a time, as the
-    /// notes pane reports it.
+    /// Type `text` into the first slide's notes one character at a time,
+    /// as the notes pane reports it.
     fn type_notes(c: &DecksController, text: &str) {
+        let s = sid(c, 0);
         for ch in text.chars() {
             let mut now = c.slides.borrow()[0].notes.clone();
             now.push(ch);
-            c.set_notes(0, &now);
+            c.set_notes(s, &now);
         }
     }
 
@@ -1781,10 +1907,11 @@ mod tests {
     #[test]
     fn a_notes_paste_or_deletion_is_its_own_step() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
+        let s = sid(&c, 0);
         type_notes(&c, "ab");
-        assert!(c.set_notes(0, "ab pasted text"));
-        assert!(c.set_notes(0, "ab pasted tex"));
-        assert!(!c.set_notes(0, "ab pasted tex"), "no change, no step");
+        assert!(c.set_notes(s, "ab pasted text"));
+        assert!(c.set_notes(s, "ab pasted tex"));
+        assert!(!c.set_notes(s, "ab pasted tex"), "no change, no step");
         type_notes(&c, "t");
         assert!(c.undo());
         assert_eq!(c.slides.borrow()[0].notes, "ab pasted tex");
@@ -1809,6 +1936,8 @@ mod tests {
 
     fn decorated_master() -> MasterSlide {
         MasterSlide {
+            // The controller stamps the session id at construction.
+            id: 0,
             name: "Theme".into(),
             background: "#0b3d6b".into(),
             default_font: "Sans".into(),
@@ -1820,18 +1949,19 @@ mod tests {
 
     #[test]
     fn the_master_view_edits_the_master_and_done_is_one_undo_step() {
-        let mut s1 = slide("S1");
-        s1.master_idx = Some(0);
-        let c = DecksController::new(vec![s1, slide("S2")], vec![decorated_master()]);
-        c.add_object(0, SlideObject::Rect { x: 5.0, y: 5.0, w: 5.0, h: 5.0, rotation: 0.0 });
-        assert_eq!(c.edit_master(0), Some(0));
-        assert_eq!(c.editing_master(), Some(0));
+        let c = DecksController::new(vec![slide("S1"), slide("S2")], vec![decorated_master()]);
+        let (first, second) = (sid(&c, 0), sid(&c, 1));
+        let master_id = c.masters.borrow()[0].id;
+        c.add_object(first, SlideObject::Rect { x: 5.0, y: 5.0, w: 5.0, h: 5.0, rotation: 0.0 });
+        assert_eq!(c.edit_master(first), Some(master_id));
+        assert_eq!(c.editing_master(), Some(master_id));
         assert_eq!(c.slide_count(), 1, "the master stands in for the slides");
         assert_eq!(c.slides.borrow()[0].objects.len(), 1, "its decorations are the objects");
         assert!(!c.can_undo(), "the view has its own history");
         // Edits, each undoable inside the view.
-        c.add_object(0, SlideObject::Rect { x: 900.0, y: 0.0, w: 60.0, h: 60.0, rotation: 0.0 });
-        c.move_object(0, 0, 10.0, 0.0);
+        let stand_in = sid(&c, 0);
+        c.add_object(stand_in, SlideObject::Rect { x: 900.0, y: 0.0, w: 60.0, h: 60.0, rotation: 0.0 });
+        c.move_object(stand_in, oid(&c, 0, 0), 10.0, 0.0);
         assert!(c.undo());
         assert_eq!(crate::undo::obj_bounds(&c.slides.borrow()[0].objects[0]).0, 0.0);
         assert!(c.redo());
@@ -1839,29 +1969,61 @@ mod tests {
         let saved = c.deck();
         assert_eq!(saved.slides.len(), 2);
         assert_eq!(saved.masters[0].shapes.len(), 2);
-        assert_eq!(c.finish_master(), Some(0));
+        assert_eq!(c.finish_master(), Some(first));
         assert_eq!(c.editing_master(), None);
         assert_eq!(c.slide_count(), 2, "the slides are back");
         assert_eq!(c.masters.borrow()[0].shapes.len(), 2);
         assert_eq!(c.slides.borrow()[0].objects.len(), 1, "the slide's own objects are untouched");
+        assert_eq!(sid(&c, 1), second, "slide identities survive the round trip");
         // One step undoes the whole master edit; the slide edit before it
         // is still in the history.
         assert!(c.undo());
-        assert_eq!(format!("{:?}", c.masters.borrow()[0]), format!("{:?}", decorated_master()));
+        assert_eq!(format!("{:?}", c.masters.borrow()[0]), format!("{:?}", decorated_master_stamped(&c, master_id)));
         assert!(c.undo());
         assert!(c.slides.borrow()[0].objects.is_empty());
         assert!(c.redo() && c.redo());
         assert_eq!(c.masters.borrow()[0].shapes.len(), 2);
     }
 
+    /// `decorated_master` with the session id the controller stamped.
+    fn decorated_master_stamped(c: &DecksController, id: u64) -> MasterSlide {
+        let mut m = decorated_master();
+        m.id = id;
+        // Layouts the master view may have added are not decorations.
+        m.layouts = c.masters.borrow()[0].layouts.clone();
+        m
+    }
+
     #[test]
     fn a_master_view_with_no_change_records_nothing() {
         let c = DecksController::new(vec![slide("S1")], vec![decorated_master()]);
-        c.edit_master(0);
-        assert_eq!(c.edit_master(0), None, "one master view at a time");
+        let s = sid(&c, 0);
+        c.edit_master(s);
+        assert_eq!(c.edit_master(s), None, "one master view at a time");
         c.finish_master();
         assert!(!c.can_undo());
         assert!(c.finish_master().is_none());
+    }
+
+    #[test]
+    fn master_edit_cancel_restores_history() {
+        let c = DecksController::new(vec![slide("S1")], vec![decorated_master()]);
+        let s = sid(&c, 0);
+        c.add_object(s, rect(1.0, 2.0));
+        assert!(c.edit_master(s).is_some());
+        let stand_in = sid(&c, 0);
+        c.add_object(stand_in, rect(9.0, 9.0));
+        assert!(c.can_undo(), "the view has its own history");
+        assert_eq!(c.cancel_master(), Some(s));
+        assert_eq!(c.editing_master(), None);
+        assert_eq!(c.slide_count(), 1);
+        assert_eq!(c.slides.borrow()[0].objects.len(), 1, "the view's objects are gone");
+        assert_eq!(c.masters.borrow()[0].shapes.len(), 1, "the master is untouched");
+        // The original history is back exactly: one step undoes the slide edit.
+        assert!(c.undo());
+        assert!(c.slides.borrow()[0].objects.is_empty());
+        assert!(!c.can_undo());
+        assert_eq!(c.selection().slide_id, Some(s));
     }
 
     #[test]
@@ -1879,19 +2041,29 @@ mod tests {
             body: crate::engine::TextBody { placeholder: Some(Placeholder::Title), ..Default::default() },
         });
         let c = DecksController::new(vec![s1], vec![decorated_master()]);
-        assert!(c.apply_layout(0, 1), "Title and Content");
+        let s = sid(&c, 0);
+        assert!(c.apply_standard_layout(s, 1), "Title and Content");
         assert_eq!(c.masters.borrow()[0].layouts.len(), 6);
+        let layout_id = c.masters.borrow()[0].layouts[1].id;
         {
             let slides = c.slides.borrow();
-            assert_eq!(slides[0].layout, Some(1));
+            assert_eq!(slides[0].layout_id, Some(layout_id));
             assert_eq!(slides[0].objects.len(), 2, "the body is added");
             assert_eq!(crate::undo::obj_bounds(&slides[0].objects[0]), (80.0, 40.0, 800.0, 90.0), "the title moves");
         }
-        assert!(!c.apply_layout(0, 9), "no such layout");
+        // Deleting the added body and re-applying by stable id brings it back.
+        let body = oid(&c, 0, 1);
+        assert!(c.delete_object(s, body));
+        assert_eq!(c.slides.borrow()[0].objects.len(), 1);
+        assert!(c.apply_layout(s, layout_id));
+        assert_eq!(c.slides.borrow()[0].objects.len(), 2, "the body is back");
+        assert!(!c.apply_layout(s, u64::MAX), "no such layout");
+        assert!(c.undo());
+        assert!(c.undo());
         assert!(c.undo());
         assert!(c.masters.borrow()[0].layouts.is_empty(), "undo takes the added layouts too");
         assert_eq!(c.slides.borrow()[0].objects.len(), 1);
-        assert_eq!(c.slides.borrow()[0].layout, None);
+        assert_eq!(c.slides.borrow()[0].layout_id, None);
         assert!(!c.can_undo());
     }
 
@@ -1924,8 +2096,9 @@ mod tests {
         let c = DecksController::new(vec![s1], vec![]);
         c.add_slide(1, s2);
         c.add_slide(2, s3);
-        c.move_slide_down(0);
-        c.delete_slide(2);
+        let first = sid(&c, 0);
+        c.move_slide_down(first);
+        c.delete_slide(sid(&c, 2));
         assert_eq!(c.slide_count(), 2);
         let notes: Vec<String> = c.slides.borrow().iter().map(|s| s.notes.clone()).collect();
 
@@ -1947,12 +2120,13 @@ mod tests {
         let mut s = slide("S1");
         s.objects.push(SlideObject::Rect { x: 10.0, y: 10.0, w: 50.0, h: 50.0, rotation: 0.0 });
         let c = DecksController::new(vec![s], vec![]);
-        c.resize_object(0, 0, (10.0, 10.0, 50.0, 50.0), (20.0, 20.0, 100.0, 80.0));
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        c.resize_object(s, o, (20.0, 20.0, 100.0, 80.0));
         assert_eq!(crate::undo::obj_bounds(&c.slides.borrow()[0].objects[0]), (20.0, 20.0, 100.0, 80.0));
         assert!(c.undo());
         assert_eq!(crate::undo::obj_bounds(&c.slides.borrow()[0].objects[0]), (10.0, 10.0, 50.0, 50.0));
 
-        c.rotate_object(0, 0, 0.0, 45.0);
+        c.rotate_object(s, o, 45.0);
         assert_eq!(c.slides.borrow()[0].objects[0].rotation(), 45.0);
         assert!(c.undo());
         assert_eq!(c.slides.borrow()[0].objects[0].rotation(), 0.0);
@@ -1966,15 +2140,17 @@ mod tests {
         s.objects.push(SlideObject::Rect { x: 50.0, y: 30.0, w: 20.0, h: 20.0, rotation: 0.0 });
         s.objects.push(SlideObject::Rect { x: 100.0, y: 50.0, w: 20.0, h: 20.0, rotation: 0.0 });
         let c = DecksController::new(vec![s], vec![]);
+        let s = sid(&c, 0);
+        let ids = [oid(&c, 0, 0), oid(&c, 0, 1), oid(&c, 0, 2)];
 
-        c.align_objects(0, &[0, 1, 2], AlignMode::Left);
+        c.align_objects(s, &ids, AlignMode::Left);
         assert_eq!(c.slides.borrow()[0].objects[0].x(), 10.0);
         assert_eq!(c.slides.borrow()[0].objects[1].x(), 10.0);
         assert_eq!(c.slides.borrow()[0].objects[2].x(), 10.0);
         assert!(c.undo());
         assert_eq!(c.slides.borrow()[0].objects[2].x(), 100.0);
 
-        c.distribute_objects(0, &[0, 1, 2], DistributeMode::Horizontal);
+        c.distribute_objects(s, &ids, DistributeMode::Horizontal);
         assert_eq!(c.slides.borrow()[0].objects[0].x(), 10.0);
         assert_eq!(c.slides.borrow()[0].objects[1].x(), 55.0);
         assert_eq!(c.slides.borrow()[0].objects[2].x(), 100.0);
@@ -1989,11 +2165,14 @@ mod tests {
         s.objects.push(SlideObject::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0, rotation: 0.0 });
         s.objects.push(SlideObject::Circle { x: 50.0, y: 50.0, r: 10.0, rotation: 0.0 });
         let c = DecksController::new(vec![s], vec![]);
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
 
-        c.z_order_object(0, 0, ZOrderOp::BringToFront);
+        assert!(c.z_order_object(s, o, ZOrderOp::BringToFront));
         assert!(matches!(c.slides.borrow()[0].objects[1], SlideObject::Rect { .. }));
         assert!(c.undo());
         assert!(matches!(c.slides.borrow()[0].objects[0], SlideObject::Rect { .. }));
+        // The z-order move keeps the object's identity.
+        assert_eq!(c.object_id_at(0, 0), Some(o));
     }
 
     #[test]
@@ -2003,12 +2182,14 @@ mod tests {
         s.objects.push(SlideObject::Rect { x: 10.0, y: 10.0, w: 20.0, h: 20.0, rotation: 0.0 });
         s.objects.push(SlideObject::Rect { x: 40.0, y: 10.0, w: 20.0, h: 20.0, rotation: 0.0 });
         let c = DecksController::new(vec![s], vec![]);
-        assert!(c.format_objects(0, &[0, 1], &FormatEdit::Width(50.0)));
-        assert_eq!(c.object_format(0, 1).unwrap().bounds.2, 50.0);
-        assert!(!c.format_objects(0, &[0, 1], &FormatEdit::Width(50.0)), "nothing to change");
+        let s = sid(&c, 0);
+        let (o1, o2) = (oid(&c, 0, 0), oid(&c, 0, 1));
+        assert!(c.format_objects(s, &[o1, o2], &FormatEdit::Width(50.0)));
+        assert_eq!(c.object_format(s, o2).unwrap().bounds.2, 50.0);
+        assert!(!c.format_objects(s, &[o1, o2], &FormatEdit::Width(50.0)), "nothing to change");
         assert!(c.undo());
-        assert_eq!(c.object_format(0, 0).unwrap().bounds.2, 20.0);
-        assert_eq!(c.object_format(0, 1).unwrap().bounds.2, 20.0, "both in the one step");
+        assert_eq!(c.object_format(s, o1).unwrap().bounds.2, 20.0);
+        assert_eq!(c.object_format(s, o2).unwrap().bounds.2, 20.0, "both in the one step");
         assert!(!c.can_undo());
         assert!(c.dirty.get());
     }
@@ -2017,10 +2198,11 @@ mod tests {
     fn a_slides_transition_is_set_as_one_undo_step() {
         use crate::engine::Transition;
         let c = DecksController::new(vec![slide("S1"), slide("S2")], vec![]);
-        assert!(c.set_transition(1, Transition::MagicMove));
+        let second = sid(&c, 1);
+        assert!(c.set_transition(second, Transition::MagicMove));
         assert_eq!(c.slides.borrow()[1].transition, Transition::MagicMove);
-        assert!(!c.set_transition(1, Transition::MagicMove), "no change, no step");
-        assert!(!c.set_transition(9, Transition::Fade), "no such slide");
+        assert!(!c.set_transition(second, Transition::MagicMove), "no change, no step");
+        assert!(!c.set_transition(u64::MAX, Transition::Fade), "no such slide");
         assert!(c.undo());
         assert_eq!(c.slides.borrow()[1].transition, Transition::None);
         assert!(!c.can_undo());
@@ -2034,25 +2216,123 @@ mod tests {
             s.objects.push(SlideObject::Rect { x, y: 0.0, w: 20.0, h: 20.0, rotation: 0.0 });
         }
         let c = DecksController::new(vec![s], vec![]);
-        assert!(c.set_build(0, 2, false, Some(BuildEffect::Dissolve)));
-        assert!(c.set_build(0, 0, false, Some(BuildEffect::Appear)));
-        assert!(!c.set_build(0, 0, false, Some(BuildEffect::Appear)), "no change");
+        let s = sid(&c, 0);
+        let (o1, o2, o3) = (oid(&c, 0, 0), oid(&c, 0, 1), oid(&c, 0, 2));
+        assert!(c.set_build(s, o3, false, Some(BuildEffect::Dissolve)));
+        assert!(c.set_build(s, o1, false, Some(BuildEffect::Appear)));
+        assert!(!c.set_build(s, o1, false, Some(BuildEffect::Appear)), "no change");
         let builds = || c.slides.borrow()[0].builds.clone();
-        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [2, 0], "in the order they were added");
-        // Deleting object 1 renumbers the build on object 2.
-        let obj = c.slides.borrow()[0].objects[1].clone();
-        c.delete_object(0, 1, obj);
-        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [1, 0]);
+        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [o3, o1], "in the order they were added");
+        // Deleting the middle object drops only the builds that name it;
+        // the build on the third object keeps its identity.
+        assert!(c.delete_object(s, o2));
+        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [o3, o1]);
         assert!(c.undo());
-        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [2, 0]);
-        // Bringing object 0 to the front: it is now index 2.
-        c.z_order_object(0, 0, crate::undo::ZOrderOp::BringToFront);
+        assert_eq!(builds().iter().map(|b| b.object).collect::<Vec<_>>(), [o3, o1]);
+        // Reordering never retargets a build: the same ids name the same boxes.
+        assert!(c.z_order_object(s, o1, crate::undo::ZOrderOp::BringToFront));
         assert_eq!(builds(), vec![
-            Build { object: 1, effect: BuildEffect::Dissolve, out: false },
-            Build { object: 2, effect: BuildEffect::Appear, out: false },
+            Build { object: o3, effect: BuildEffect::Dissolve, out: false },
+            Build { object: o1, effect: BuildEffect::Appear, out: false },
         ]);
         assert!(c.undo());
-        assert!(c.set_build(0, 2, false, None));
+        assert!(c.set_build(s, o3, false, None));
         assert_eq!(builds().len(), 1);
+    }
+
+    #[test]
+    fn stable_selection_survives_reorder_and_undo() {
+        let c = DecksController::new(vec![slide("S1"), slide("S2"), slide("S3")], vec![]);
+        let (first, second, third) = (sid(&c, 0), sid(&c, 1), sid(&c, 2));
+        c.add_object(second, rect(1.0, 1.0));
+        let o = oid(&c, 1, 0);
+        assert!(c.select_objects(second, &[o], Some(o), SelectionMode::Object));
+        // Reordering moves positions, not the selection.
+        assert!(c.move_slide_up(second));
+        assert_eq!(c.selection(), SelectionState { slide_id: Some(second), object_ids: vec![o], primary_object_id: Some(o), mode: SelectionMode::Object, text_range: None });
+        assert_eq!(c.slide_index(second), Some(0));
+        // Deleting the selected slide repairs the selection; undo restores both.
+        assert!(c.delete_slide(second));
+        assert_ne!(c.selection().slide_id, Some(second));
+        assert!(c.undo());
+        assert_eq!(c.selection().slide_id, Some(second));
+        assert_eq!(c.slide_index(second), Some(0));
+        // Redo re-applies the delete with the same identity.
+        assert!(c.redo());
+        assert_eq!(c.slide_index(first), Some(0));
+        assert_eq!(c.slide_index(third), Some(1));
+        assert!(c.selection().slide_id.is_some_and(|id| id == first || id == third));
+    }
+
+    #[test]
+    fn save_ack_does_not_clean_newer_revision() {
+        let c = DecksController::new(vec![slide("S1")], vec![]);
+        assert!(!c.dirty.get());
+        assert_eq!(c.saved_revision(), None);
+        let s = sid(&c, 0);
+        c.add_object(s, rect(1.0, 1.0));
+        assert!(c.dirty.get());
+        let staged = c.checkpoint();
+        // An edit after staging leaves the ack stale: still dirty.
+        c.move_object(s, oid(&c, 0, 0), 1.0, 0.0);
+        assert!(!c.acknowledge_save(staged));
+        assert!(c.dirty.get());
+        // Acknowledging the current revision marks clean.
+        assert!(c.acknowledge_save(c.checkpoint()));
+        assert!(!c.dirty.get());
+        assert_eq!(c.saved_revision(), Some(c.revision()));
+        // Undo after a save dirties again.
+        assert!(c.undo());
+        assert!(c.dirty.get());
+    }
+
+    #[test]
+    fn text_ranges_are_validated_session_state() {
+        let mut s = slide("S1");
+        s.objects.push(SlideObject::TextBox { text: "héllo".into(), x: 0.0, y: 0.0, w: 10.0, h: 10.0, runs: vec![], rotation: 0.0, body: Default::default() });
+        s.objects.push(rect(50.0, 50.0));
+        let c = DecksController::new(vec![s], vec![]);
+        let (s, text_box, shape) = (sid(&c, 0), oid(&c, 0, 0), oid(&c, 0, 1));
+        assert!(c.select_slide(s));
+        // "héllo" is 6 bytes: h(1) é(2) l l o. Offset 2 is inside é.
+        assert!(!c.set_text_range(text_box, 2, 3), "mid-character split rejected");
+        assert!(!c.set_text_range(text_box, 3, 2), "start after end rejected");
+        assert!(!c.set_text_range(text_box, 0, 99), "past the end rejected");
+        assert!(!c.set_text_range(shape, 0, 0), "non-text object rejected");
+        assert!(!c.set_text_range(u64::MAX, 0, 0), "unknown object rejected");
+        assert!(c.set_text_range(text_box, 1, 3));
+        assert_eq!(c.selection().mode, SelectionMode::Text);
+        assert_eq!(c.selection().text_range, Some(TextRange { object_id: text_box, start: 1, end: 3 }));
+        // Selection-only movement never dirties or bumps the revision.
+        assert!(!c.dirty.get());
+        let revision = c.revision();
+        assert!(c.select_slide(s));
+        assert_eq!(c.revision(), revision);
+        assert_eq!(c.selection().text_range, None, "leaving text mode drops the range");
+    }
+
+    #[test]
+    fn transactions_report_changed_ids_and_repaired_selection() {
+        let c = DecksController::new(vec![slide("S1")], vec![]);
+        let s = sid(&c, 0);
+        let revision = c.revision();
+        let outcome = c.apply_ops_txn(vec![Op::InsertObject {
+            slide: s,
+            at: 0,
+            id: crate::ops::next_id(&c.slides.borrow()),
+            object: Box::new(rect(3.0, 4.0)),
+        }]);
+        assert!(outcome.applied);
+        assert_eq!(outcome.changed_slides, vec![s]);
+        assert_eq!(outcome.changed_objects.len(), 1);
+        assert_eq!(outcome.revision, revision + 1);
+        assert_eq!(outcome.selection.slide_id, Some(s));
+        // No-op and invalid groups record nothing.
+        let quiet = c.apply_ops_txn(vec![]);
+        assert!(!quiet.applied);
+        assert_eq!(quiet.revision, outcome.revision);
+        let unknown = c.apply_ops_txn(vec![Op::DeleteObject { slide: s, id: u64::MAX }]);
+        assert!(!unknown.applied);
+        assert!(!c.dirty.get() || c.revision() == outcome.revision, "no new revision");
     }
 }
