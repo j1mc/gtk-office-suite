@@ -557,6 +557,51 @@ fn chart_survives_calc_rewrite() {
     assert_eq!(c.val, (1, 1, 3), "values range changed: {c:?}");
 }
 
+/// TBL-002: every admitted field must survive a Calc rewrite — title, both
+/// named series, axis titles and legend — read back by our own chart
+/// reader through Calc's own relationship/anchor layout.
+#[test]
+fn chart_fields_survive_calc_rewrite() {
+    if !require_or_skip() { return; }
+    use tables_core::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition, SheetModel};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chart-fields.xlsx");
+    let mut sh = SheetModel::new("Sheet1", 10, 5, 0);
+    for (i, (l, a, b)) in [("North", "10", "4"), ("South", "20", "6"), ("East", "30", "2")].iter().enumerate() {
+        sh.data[i + 1][0] = l.to_string();
+        sh.data[i + 1][1] = a.to_string();
+        sh.data[i + 1][2] = b.to_string();
+    }
+    sh.charts.push(ChartSpec {
+        kind: ChartKind::Bar,
+        title: "Regions".into(),
+        x_axis_title: Some("Area".into()),
+        y_axis_title: Some("Sales".into()),
+        legend_position: LegendPosition::Bottom,
+        series: vec![
+            ChartSeries { name: "Sold".into(), cat: (1, 0, 3), val: (1, 1, 3), color: Some("4472C4".into()) },
+            ChartSeries { name: "Back".into(), cat: (1, 0, 3), val: (1, 2, 3), color: None },
+        ],
+        cat: (1, 0, 3),
+        val: (1, 1, 3),
+        anchor: (5, 3),
+        width_px: 480.0,
+        height_px: 280.0,
+    });
+    tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[sh]).unwrap();
+
+    let rewritten = convert(&path, "xlsx").expect("Calc rewrite failed");
+    let charts = tables_core::io::read_charts_from_xlsx(rewritten.to_str().unwrap());
+    assert_eq!(charts.len(), 1, "Calc dropped or duplicated the chart");
+    let c = &charts[0];
+    assert_eq!(c.title, "Regions", "chart title changed: {c:?}");
+    assert_eq!(c.series.len(), 2, "Calc dropped a series: {c:?}");
+    assert_eq!((c.cat, c.val), ((1, 0, 3), (1, 1, 3)), "ranges changed: {c:?}");
+    assert_eq!(c.x_axis_title.as_deref(), Some("Area"), "x-axis title changed: {c:?}");
+    assert_eq!(c.y_axis_title.as_deref(), Some("Sales"), "y-axis title changed: {c:?}");
+    assert_eq!(c.legend_position, LegendPosition::Bottom, "legend moved: {c:?}");
+}
+
 // ── Conditional formatting (ADR 0003 §4) ─────────────────────────────
 
 /// A cell-value rule must survive a Calc rewrite: operator, threshold,

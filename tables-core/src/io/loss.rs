@@ -26,23 +26,18 @@
 // | Cell values, formulas and their cached values | kept | loss budget | — |
 // | Global defined names | kept | loss budget | — |
 // | First-sheet cellIs rules (op, range, threshold, fill) | kept | loss budget | — |
-// | First-sheet supported charts (kind, title, first series ranges, anchor) | kept | loss budget | — |
+// | Charts on any sheet (kind, every series, names, sRGB colors, ranges, title, axis titles, legend, anchor, size) | kept (TBL-002) | loss budget | — |
 // | Manual hidden rows/columns, column widths, row heights | kept | loss budget | — |
 // | Print area and page setup | kept | loss budget | — |
 // | Notes and writable validation rules | kept | loss budget | — |
 // | Cell locks, hidden formulas, modeled protection flags | kept (#1552) | loss budget | — |
 // | Safe opaque parts (thumbnail, custom XML/properties) | kept (#1274) | package_consistency, opaque-parts smoke | carry, not this file |
-// | Chart series past the first | WarnOnLoss (`chart-series`) | loss budget + unit tests | `chart_drops`, `scan_chart_xml` |
-// | Chart series names and colors | WarnOnLoss (`chart-series-identity`) | loss budget | `chart_drops` |
-// | Chart axis titles and non-default legend | WarnOnLoss (`chart-annotations`) | loss budget | `chart_drops` |
-// | Chart size | WarnOnLoss (`chart-size`) | loss budget | `chart_drops` |
-// | Charts owned by a later sheet | WarnOnLoss (`chart-later-sheet`) | loss budget | `model_drops` |
 // | Conditional rules owned by a later sheet | WarnOnLoss (`rule-later-sheet`) | loss budget + unit tests | `model_drops`, `inspect_package` |
 // | Filter state (which rows a filter hid) | WarnOnLoss (`filter-state`) | loss budget | `model_drops` |
 // | Filter criteria (`autoFilter`) | WarnOnLoss (`filter-criteria`) | unit tests | `scan_sheet_content` |
 // | Array formulas (`t="array"`) | WarnOnLoss (`array-formulas`) | unit tests | `scan_sheet_content` |
 // | Sheet-scoped names (`localSheetId`) | WarnOnLoss (`scoped-names`) | unit tests | `inspect_package` |
-// | Unsupported chart kinds | WarnOnLoss (`unsupported-charts`) | unit tests | `scan_chart_xml` |
+// | Unsupported chart kinds, absolute anchors, unresolvable chart rels | WarnOnLoss (`unsupported-charts`) | unit tests | `scan_chart_xml`, drawing scan |
 // | Unsupported rule shapes (non-cellIs, unknown operator, multi-range) | WarnOnLoss (`unsupported-rules`) | unit tests | `scan_sheet_content` |
 // | Pivot definitions, unwritable validation, passwords, inactive permissions | WarnOnLoss | unit tests | `model_drops`, `protection_drops` |
 // | Macros, pictures, comments, Excel tables, slicers, links, connections, OLE, sparklines | WarnOnLoss | unit tests | `inspect_package`, `inspect_ods` |
@@ -61,7 +56,7 @@ use std::collections::BTreeSet;
 use suite_common_core::interop::{CompatibilityReport, FeatureDisposition, UnsupportedFeature};
 use suite_common_core::zip_guard::{BoundedArchive, ZipBudget};
 
-use crate::sheet::{LegendPosition, SheetModel, ValidationRule};
+use crate::sheet::{SheetModel, ValidationRule};
 
 const PIVOTS: (&str, &str) = ("pivot-tables", "Pivot tables (their results stay, as values)");
 const VALIDATION: (&str, &str) = ("validation-rules", "Validation rules xlsx can't express");
@@ -80,20 +75,11 @@ const FILTER_STATE: (&str, &str) = ("filter-state", "Filter state (which rows a 
 const FILTER_CRITERIA: (&str, &str) = ("filter-criteria", "Filter criteria");
 const ARRAY_FORMULAS: (&str, &str) = ("array-formulas", "Array formulas");
 const SCOPED_NAMES: (&str, &str) = ("scoped-names", "Sheet-scoped names");
-const CHART_LATER_SHEET: (&str, &str) = ("chart-later-sheet", "Charts on later sheets");
-const CHART_SERIES: (&str, &str) = ("chart-series", "Chart series beyond the first");
-const CHART_IDENTITY: (&str, &str) = ("chart-series-identity", "Chart series names and colors");
-const CHART_NOTES: (&str, &str) = ("chart-annotations", "Chart axis titles and legend");
-const CHART_SIZE: (&str, &str) = ("chart-size", "Chart size");
 const RULE_LATER_SHEET: (&str, &str) = ("rule-later-sheet", "Conditional rules on later sheets");
 const UNSUPPORTED_CHARTS: (&str, &str) = ("unsupported-charts", "Charts Tables can't read");
 const UNSUPPORTED_RULES: (&str, &str) = ("unsupported-rules", "Conditional formatting Tables can't read");
 const LEGACY_XLS: (&str, &str) = ("legacy-xls-content", "Original .xls content");
 const INSPECTION_FAILED: (&str, &str) = ("source-inspection-failed", "Source content could not be checked");
-
-/// The chart size a reopened chart comes back at when the file states no
-/// size (io/charts.rs): only a chart already at this size round-trips.
-const CHART_DEFAULT_SIZE_PX: (f64, f64) = (480.0, 280.0);
 
 fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location: &str, detail: &str) {
     report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
@@ -149,7 +135,6 @@ pub fn content_a_save_drops(source: Option<&str>, sheets: &[SheetModel]) -> Comp
 /// the document came from a file. Protection IO itself is #1552's merged
 /// work; this only inventories what that IO cannot reproduce.
 fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
-    let first_name = sheets.first().map(|s| s.name.as_str()).unwrap_or("Sheet1");
     for (index, sheet) in sheets.iter().enumerate() {
         if !sheet.pivot_tables.is_empty() {
             record(report, PIVOTS, &sheet.name, "the pivot's definition isn't written; its cells are");
@@ -177,14 +162,10 @@ fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
             ));
         }
         if index > 0 {
-            // Ownership dominates: a later sheet's chart moves to the first
-            // sheet on reopen, so per-field details would describe a chart
-            // that is no longer where the model says it is.
-            for (ci, chart) in sheet.charts.iter().enumerate() {
-                record(report, CHART_LATER_SHEET, &chart_location(&sheet.name, ci, chart), &format!(
-                    "the chart is written, but Tables reads every chart onto the first sheet; reopening here moves it to '{first_name}'"
-                ));
-            }
+            // Charts resolve to their owning sheet through relationships
+            // (TBL-002), so a later sheet's charts round-trip where they
+            // are. Conditional rules still resolve to the first worksheet
+            // (TBL-003).
             if !sheet.cond_rules.is_empty() {
                 let n = sheet.cond_rules.len();
                 record(report, RULE_LATER_SHEET, &sheet.name, &format!(
@@ -193,69 +174,6 @@ fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
             }
             continue;
         }
-        for (ci, chart) in sheet.charts.iter().enumerate() {
-            chart_drops(&sheet.name, ci, chart, report);
-        }
-    }
-}
-
-fn chart_location(sheet_name: &str, index: usize, chart: &crate::sheet::ChartSpec) -> String {
-    if chart.title.trim().is_empty() {
-        format!("Sheet '{sheet_name}', chart #{}", index + 1)
-    } else {
-        format!("Sheet '{sheet_name}', chart '{}'", chart.title)
-    }
-}
-
-/// What saving one first-sheet chart loses field by field. Kind, title,
-/// the first series' ranges and the anchor round-trip (loss budget); every
-/// other admitted field is inventoried here so the save question can name
-/// it before the write.
-fn chart_drops(sheet_name: &str, index: usize, chart: &crate::sheet::ChartSpec, report: &mut CompatibilityReport) {
-    let location = chart_location(sheet_name, index, chart);
-    if chart.series.len() > 1 {
-        let first = chart.series.first().map(|s| s.name.as_str()).unwrap_or("");
-        record(report, CHART_SERIES, &location, &format!(
-            "{} series are written, but Tables reads back only the first{}; the rest come back only in Excel or LibreOffice",
-            chart.series.len(),
-            if first.trim().is_empty() { String::new() } else { format!(" ('{first}')") },
-        ));
-    }
-    let named: Vec<&str> = chart.series.iter().filter(|s| !s.name.trim().is_empty()).map(|s| s.name.as_str()).collect();
-    let colored = chart.series.iter().filter(|s| s.color.is_some()).count();
-    if !named.is_empty() || colored > 0 {
-        let mut parts = Vec::new();
-        if !named.is_empty() {
-            parts.push(format!("names ({}) are written but Tables does not read them back", named.join(", ")));
-        }
-        if colored > 0 {
-            parts.push(format!("{colored} series color(s) are not written at all"));
-        }
-        record(report, CHART_IDENTITY, &location, &format!(
-            "{}; reopening here shows the series without them", parts.join("; ")
-        ));
-    }
-    let mut notes = Vec::new();
-    if let Some(x) = chart.x_axis_title.as_deref().filter(|t| !t.trim().is_empty()) {
-        notes.push(format!("x-axis title '{x}'"));
-    }
-    if let Some(y) = chart.y_axis_title.as_deref().filter(|t| !t.trim().is_empty()) {
-        notes.push(format!("y-axis title '{y}'"));
-    }
-    if chart.legend_position != LegendPosition::Right {
-        notes.push(format!("legend '{:?}'", chart.legend_position));
-    }
-    if !notes.is_empty() {
-        record(report, CHART_NOTES, &location, &format!(
-            "{} are written, but Tables does not read them back; reopening here shows no axis titles and a Right legend",
-            notes.join(", ")
-        ));
-    }
-    if chart.width_px != CHART_DEFAULT_SIZE_PX.0 || chart.height_px != CHART_DEFAULT_SIZE_PX.1 {
-        record(report, CHART_SIZE, &location, &format!(
-            "the {}×{} px size is not written; the chart comes back at the default {}×{} px",
-            chart.width_px, chart.height_px, CHART_DEFAULT_SIZE_PX.0, CHART_DEFAULT_SIZE_PX.1,
-        ));
     }
 }
 
@@ -391,6 +309,12 @@ fn inspect_package(
         let xml = read_part(zip, name, budget)?;
         scan_chart_xml(&xml, name, report);
     }
+    for name in names.iter().filter(|n| n.starts_with("xl/drawings/drawing") && n.ends_with(".xml")) {
+        let xml = read_part(zip, name, budget)?;
+        if xml.contains("<xdr:absoluteAnchor") || xml.contains("<absoluteAnchor") {
+            record(report, UNSUPPORTED_CHARTS, name, "an absolutely-anchored drawing has no cell to place it at; saving over this file drops its position");
+        }
+    }
     let sheets: Vec<String> = names.iter().filter(|n| n.starts_with("xl/worksheets/") && n.ends_with(".xml")).cloned().collect();
     for sheet in &sheets {
         let xml = read_part(zip, sheet, budget)?;
@@ -452,15 +376,13 @@ fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityRepor
 }
 
 /// What one chart part holds that the model cannot carry: a chart kind the
-/// reader skips, or series past the first, which the reader drops. A part
-/// with a single supported series and no unknown kinds records nothing.
+/// reader skips. Every admitted series now round-trips (TBL-002), so a part
+/// with only supported kinds records nothing — no matter how many series it
+/// holds.
 fn scan_chart_xml(xml: &str, location: &str, report: &mut CompatibilityReport) {
     use std::sync::LazyLock;
     static KIND: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?(\w+Chart)\b").unwrap()
-    });
-    static SERIES: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?ser[\s>/]").unwrap()
     });
     let mut unknown: Vec<String> = KIND.captures_iter(xml)
         .map(|c| c[1].to_string())
@@ -473,12 +395,6 @@ fn scan_chart_xml(xml: &str, location: &str, report: &mut CompatibilityReport) {
             "{} ({}) are not read; their data cells stay, but the graphic does not come back",
             if unknown.len() == 1 { "this chart kind" } else { "these chart kinds" },
             unknown.join(", "),
-        ));
-    }
-    let series = SERIES.find_iter(xml).count();
-    if series > 1 {
-        record(report, CHART_SERIES, location, &format!(
-            "{series} series are stored, but Tables reads back only the first; saving over this file drops the rest here"
         ));
     }
 }
@@ -742,7 +658,10 @@ mod tests {
     }
 
     #[test]
-    fn later_sheet_charts_and_rules_warn_with_their_owner() {
+    fn later_sheet_charts_are_kept_while_rules_warn_with_their_owner() {
+        // TBL-002: charts resolve to their owning sheet through
+        // relationships, so a later sheet's chart warns about nothing. Its
+        // rules still resolve to the first worksheet (TBL-003) and warn.
         use crate::sheet::{ChartKind, ChartSeries, ChartSpec, CondOp, CondRule, LegendPosition};
         let first = sheet();
         let later = SheetModel::new("Later", 4, 4, 2);
@@ -752,11 +671,12 @@ mod tests {
             x_axis_title: None, y_axis_title: None, legend_position: LegendPosition::Right,
             series: vec![ChartSeries { name: String::new(), cat: (0, 0, 1), val: (0, 1, 1), color: None }],
             cat: (0, 0, 1), val: (0, 1, 1), anchor: (0, 2),
-            width_px: CHART_DEFAULT_SIZE_PX.0, height_px: CHART_DEFAULT_SIZE_PX.1,
+            width_px: 480.0, height_px: 280.0,
         });
+        assert!(content_a_save_drops(None, &sheets).features.is_empty(), "a later sheet's chart is kept");
         sheets[1].cond_rules.push(CondRule { range: (0, 0, 1, 0), op: CondOp::Less, value: 2.0, value2: 0.0, fill: "FFEB9C".into() });
         let report = content_a_save_drops(None, &sheets);
-        assert_eq!(ids(&report), ["chart-later-sheet", "rule-later-sheet"]);
+        assert_eq!(ids(&report), ["rule-later-sheet"]);
         for feature in &report.features {
             assert!(!feature.location.is_empty(), "every loss names its location");
             assert!(!feature.detail.is_empty(), "every loss names its consequence");
@@ -765,12 +685,15 @@ mod tests {
     }
 
     #[test]
-    fn chart_fields_warn_one_bullet_each() {
+    fn every_admitted_chart_field_is_kept() {
+        // TBL-002: kind, every series, literal names, sRGB colors, ranges,
+        // title, axis titles, legend and size all round-trip, so a rich
+        // chart warns about nothing — and neither does the plain core.
         use crate::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition};
         let mut s = sheet();
         s.charts.push(ChartSpec {
             kind: ChartKind::Bar, title: "Big".into(),
-            x_axis_title: Some("X".into()), y_axis_title: None, legend_position: LegendPosition::Bottom,
+            x_axis_title: Some("X".into()), y_axis_title: Some("Y".into()), legend_position: LegendPosition::Bottom,
             series: vec![
                 ChartSeries { name: "One".into(), cat: (0, 0, 1), val: (0, 1, 1), color: Some("4472C4".into()) },
                 ChartSeries { name: "Two".into(), cat: (0, 0, 1), val: (0, 2, 1), color: None },
@@ -778,23 +701,14 @@ mod tests {
             cat: (0, 0, 1), val: (0, 1, 1), anchor: (0, 3),
             width_px: 320.0, height_px: 200.0,
         });
-        let report = content_a_save_drops(None, &[s]);
-        assert_eq!(ids(&report), ["chart-annotations", "chart-series", "chart-series-identity", "chart-size"]);
-        for feature in &report.features {
-            assert!(feature.location.contains("Big"), "names the chart: {:?}", feature);
-            assert!(!feature.detail.is_empty());
-        }
-        assert!(report.requires_confirmation());
-        // The retained core stays silent: one unnamed uncolored series, a
-        // Right legend, no axis titles and the default size warn about
-        // nothing.
+        assert!(content_a_save_drops(None, &[s]).features.is_empty(), "a rich chart is kept");
         let mut kept = sheet();
         kept.charts.push(ChartSpec {
             kind: ChartKind::Bar, title: "Plain".into(),
             x_axis_title: None, y_axis_title: None, legend_position: LegendPosition::Right,
             series: vec![ChartSeries { name: String::new(), cat: (0, 0, 1), val: (0, 1, 1), color: None }],
             cat: (0, 0, 1), val: (0, 1, 1), anchor: (0, 3),
-            width_px: CHART_DEFAULT_SIZE_PX.0, height_px: CHART_DEFAULT_SIZE_PX.1,
+            width_px: 480.0, height_px: 280.0,
         });
         assert!(content_a_save_drops(None, &[kept]).features.is_empty());
     }
@@ -828,7 +742,7 @@ mod tests {
         let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
         assert_eq!(
             ids(&report),
-            ["array-formulas", "chart-series", "filter-criteria", "rule-later-sheet", "scoped-names", "unsupported-charts", "unsupported-rules"]
+            ["array-formulas", "filter-criteria", "rule-later-sheet", "scoped-names", "unsupported-charts", "unsupported-rules"]
         );
         for feature in &report.features {
             assert!(!feature.location.is_empty(), "every loss names its location");

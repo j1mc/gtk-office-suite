@@ -374,14 +374,20 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         }
         let _ = engine.model.new_defined_name(name, None, formula);
     }
-    // Charts and conditional-formatting rules. Their readers resolve the
-    // first worksheet only, so they attach there (the XLSX loss budget in
-    // tests/xlsx_loss_budget.rs declares the later sheets' as lost). They
-    // used to be attached by the GUI after this returned, so every other
-    // opener of this function (recovery's tests, the corpus tooling)
-    // silently had neither.
+    // Charts resolve to their owning worksheet through the
+    // workbook→worksheet→drawing→chart relationship chain (TBL-002): a
+    // later sheet's charts land on that sheet, and unsupported content is
+    // reported by the reader and the package scan rather than silently
+    // moved or dropped. Conditional-formatting rules still resolve to the
+    // first worksheet (TBL-003); they used to be attached by the GUI after
+    // this returned, so every other opener of this function (recovery's
+    // tests, the corpus tooling) silently had neither.
+    for (owner, spec) in super::read_charts_detailed(path, &sheets).0 {
+        if let Some(sheet) = sheets.iter_mut().find(|s| s.name == owner) {
+            sheet.charts.push(spec);
+        }
+    }
     if let Some(first) = sheets.first_mut() {
-        first.charts = super::read_charts_from_xlsx(path);
         first.cond_rules = super::read_cond_rules_from_xlsx(path);
     }
     Ok((engine, sheets))

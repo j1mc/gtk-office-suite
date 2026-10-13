@@ -78,9 +78,8 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     // Conditional formatting.
     s.cond_rules.push(CondRule { range: (1, 1, 3, 1), op: CondOp::Greater, value: 15.0, value2: 0.0, fill: "C6EFCE".into() });
     // A chart over the data: two named series (one colored), axis titles,
-    // a non-default legend and a non-default size. Kind, title, the first
-    // series' ranges and the anchor round-trip; the rest is inventoried
-    // per field below.
+    // a non-default legend and a non-default size. TBL-002 keeps every
+    // admitted field: the budget asserts each one below.
     s.charts.push(ChartSpec {
         kind: ChartKind::Bar,
         title: "Sales by region".into(),
@@ -231,20 +230,13 @@ const BUDGET: &[(&str, Budget, Check)] = &[
         |_, s| s[0].hidden_rows.contains(&9)),
     ("conditional formatting on a later sheet", Lost("the rule reader resolves the first worksheet only, so a later sheet's rules never come back"),
         |_, s| s.get(1).is_some_and(|t| !t.cond_rules.is_empty())),
-    ("charts on a later sheet", Lost("the chart reader attaches every chart to the first sheet, so a later sheet's charts move there"),
-        |_, s| s.get(1).is_some_and(|t| !t.charts.is_empty())),
-    ("chart series past the first", Lost("Tables reads back only the first series; the rest come back only in Excel or LibreOffice"),
-        |_, s| s[0].charts.iter().any(|c| c.series.len() > 1)),
-    ("chart series names", Lost("Tables writes series names but does not read them back"),
-        |_, s| s[0].charts.iter().flat_map(|c| &c.series).any(|x| !x.name.trim().is_empty())),
-    ("chart series colors", Lost("series colors are not written at all"),
-        |_, s| s[0].charts.iter().flat_map(|c| &c.series).any(|x| x.color.is_some())),
-    ("chart axis titles", Lost("axis titles are written but Tables does not read them back"),
-        |_, s| s[0].charts.iter().any(|c| c.x_axis_title.is_some() || c.y_axis_title.is_some())),
-    ("chart legend position", Lost("a non-Right legend is written but Tables reads every legend back as Right"),
-        |_, s| s[0].charts.iter().any(|c| c.legend_position != LegendPosition::Right)),
-    ("chart size", Lost("the chart size is not written; every chart comes back at the default 480×280 px"),
-        |_, s| s[0].charts.iter().any(|c| c.width_px != 480.0 || c.height_px != 280.0)),
+    ("charts on a later sheet", Kept, |_, s| s.get(1).is_some_and(|t| t.charts.iter().any(|c| c.title == "Later chart"))),
+    ("chart series past the first", Kept, |_, s| s[0].charts.iter().any(|c| c.series.len() > 1)),
+    ("chart series names", Kept, |_, s| s[0].charts.iter().flat_map(|c| &c.series).any(|x| !x.name.trim().is_empty())),
+    ("chart series colors", Kept, |_, s| s[0].charts.iter().flat_map(|c| &c.series).any(|x| x.color.as_deref() == Some("4472C4"))),
+    ("chart axis titles", Kept, |_, s| s[0].charts.iter().any(|c| c.x_axis_title.as_deref() == Some("Region") && c.y_axis_title.as_deref() == Some("Revenue"))),
+    ("chart legend position", Kept, |_, s| s[0].charts.iter().any(|c| c.legend_position == LegendPosition::Bottom)),
+    ("chart size", Kept, |_, s| s[0].charts.iter().any(|c| (c.width_px - 320.0).abs() < 1.0 && (c.height_px - 200.0).abs() < 1.0)),
     ("protection password", Lost("the stored password hash cannot be written; protection is saved without it"),
         |_, s| s[0].protection.password_hash.is_some()),
     ("regex validation", Lost("a pattern rule has no xlsx form and is not written"),
@@ -261,13 +253,6 @@ const BUDGET: &[(&str, Budget, Check)] = &[
 const LOST_COVERAGE: &[(&str, &str)] = &[
     ("a filter's hide, as a filter", "filter-state"),
     ("conditional formatting on a later sheet", "rule-later-sheet"),
-    ("charts on a later sheet", "chart-later-sheet"),
-    ("chart series past the first", "chart-series"),
-    ("chart series names", "chart-series-identity"),
-    ("chart series colors", "chart-series-identity"),
-    ("chart axis titles", "chart-annotations"),
-    ("chart legend position", "chart-annotations"),
-    ("chart size", "chart-size"),
     ("protection password", "sheet-protection-password"),
     ("regex validation", "validation-rules"),
     ("unbounded validation", "validation-rules"),
@@ -348,10 +333,10 @@ fn retained_fields_save_without_a_question() {
 
 /// TBL-001: a real foreign file's model-insufficient content is reported
 /// per part. The saved full fixture carries a later sheet's rules (which
-/// the reader resolves to the first worksheet only) and a two-series
-/// chart (of which only the first series comes back), and the package
-/// scan names both — while the supported first-sheet content stays
-/// silent.
+/// the reader resolves to the first worksheet only), and the package scan
+/// names them — while every chart Tables writes (multi-series, named,
+/// colored, annotated, sized, later-sheet) stays silent, because TBL-002
+/// reads all of it back.
 #[test]
 fn the_saved_package_reports_what_the_model_cannot_carry() {
     let (engine, sheets) = workbook();
@@ -361,13 +346,11 @@ fn the_saved_package_reports_what_the_model_cannot_carry() {
     std::fs::write(&path, &bytes).unwrap();
     let (_, back) = load_workbook(path.to_str().unwrap()).expect("reopen");
     let report = tables_core::io::loss::content_a_save_drops(Some(path.to_str().unwrap()), &back);
-    for id in ["rule-later-sheet", "chart-series"] {
-        let hit = report.features.iter().find(|f| f.id == id)
-            .unwrap_or_else(|| panic!("the package scan must report '{id}'"));
-        assert!(!hit.location.is_empty(), "'{id}' names no location");
-        assert!(!hit.detail.is_empty(), "'{id}' names no consequence");
-    }
-    for id in ["source-inspection-failed", "unsupported-charts", "filter-criteria", "pictures", "macros"] {
+    let hit = report.features.iter().find(|f| f.id == "rule-later-sheet")
+        .expect("the package scan must report 'rule-later-sheet'");
+    assert!(!hit.location.is_empty(), "'rule-later-sheet' names no location");
+    assert!(!hit.detail.is_empty(), "'rule-later-sheet' names no consequence");
+    for id in ["source-inspection-failed", "unsupported-charts", "chart-series", "filter-criteria", "pictures", "macros"] {
         assert!(report.features.iter().all(|f| f.id != id), "'{id}' fires on Tables' own supported output");
     }
 }
@@ -395,6 +378,9 @@ fn saved_xml_carries_what_both_readers_keep() {
     };
     assert!(chart.contains("Revenue"), "the axis title is written for every reader");
     assert_eq!(chart.matches("<c:ser").count(), 2, "both series are written for independent readers");
+    for marker in ["Sales", "Returns", "4472C4", "legendPos", "Region"] {
+        assert!(chart.contains(marker), "independent readers must see '{marker}'");
+    }
     assert!(read_part(&mut zip, &names, "xl/workbook.xml").contains("Total"), "the defined name is written");
     assert!(read_part(&mut zip, &names, "xl/worksheets/sheet1.xml").contains("sheetProtection"), "protection is written");
     for n in names.iter().filter(|n| n.starts_with("xl/worksheets/")) {

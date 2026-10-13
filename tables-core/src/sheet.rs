@@ -775,19 +775,64 @@ pub struct ChartSpec {
 }
 
 impl ChartSpec {
+    /// A single-series chart from one category/value range: the canonical
+    /// series vector holds the series and the legacy `cat`/`val` mirror
+    /// it, so readers, the writer and callers never hold two copies that
+    /// can disagree (TBL-002).
+    pub fn single_series(
+        kind: ChartKind,
+        title: String,
+        cat: (usize, usize, usize),
+        val: (usize, usize, usize),
+        anchor: (usize, usize),
+        width_px: f64,
+        height_px: f64,
+    ) -> ChartSpec {
+        ChartSpec {
+            kind,
+            title,
+            x_axis_title: None,
+            y_axis_title: None,
+            legend_position: LegendPosition::Right,
+            series: vec![ChartSeries { name: String::new(), cat, val, color: None }],
+            cat,
+            val,
+            anchor,
+            width_px,
+            height_px,
+        }
+    }
+
+    /// Every admitted series, in file order. The legacy `cat`/`val` are a
+    /// mirror of the first series, not a second copy: a chart built before
+    /// the series vector existed (empty `series`) reads through it.
+    pub fn canonical_series(&self) -> Vec<ChartSeries> {
+        if self.series.is_empty() {
+            vec![ChartSeries { name: String::new(), cat: self.cat, val: self.val, color: None }]
+        } else {
+            self.series.clone()
+        }
+    }
+
+    /// The first series' ranges: what a single-series plot draws and what
+    /// the legacy `cat`/`val` mirror.
+    pub fn primary_ranges(&self) -> ((usize, usize, usize), (usize, usize, usize)) {
+        self.series.first().map_or((self.cat, self.val), |s| (s.cat, s.val))
+    }
+
     /// The name a single series is shown under: its own, else the one
     /// LibreOffice gives an untitled series, "Column B".
     pub fn series_name(&self) -> String {
         match self.series.first() {
             Some(s) if !s.name.trim().is_empty() => s.name.clone(),
-            _ => format!("Column {}", col_label(self.val.1)),
+            _ => format!("Column {}", col_label(self.primary_ranges().1.1)),
         }
     }
 
     /// The (category, value) points a single-series chart plots, read from
     /// the sheet. A value that isn't a number plots as 0, as in Excel.
     pub fn points(&self, sheet: &SheetModel) -> Vec<(String, f64)> {
-        let (cat, val) = self.series.first().map_or((self.cat, self.val), |s| (s.cat, s.val));
+        let (cat, val) = self.primary_ranges();
         let (r0, vc, r1) = val;
         (r0..=r1)
             .map(|r| {

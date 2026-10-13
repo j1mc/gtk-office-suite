@@ -331,44 +331,37 @@ pub fn save_sheets_to_xlsx_bytes(
                 ChartKind::Area => XType::Area,
             });
 
-            if !ch.series.is_empty() {
-                for s in &ch.series {
-                    let series = chart.add_series();
-                    if !s.name.is_empty() {
-                        series.set_name(&s.name);
-                    }
-                    series.set_categories((
-                        sh.name.as_str(),
-                        s.cat.0 as u32,
-                        s.cat.1 as u16,
-                        s.cat.2 as u32,
-                        s.cat.1 as u16,
-                    ));
-                    series.set_values((
-                        sh.name.as_str(),
-                        s.val.0 as u32,
-                        s.val.1 as u16,
-                        s.val.2 as u32,
-                        s.val.1 as u16,
-                    ));
+            // The canonical series vector is the single source: the legacy
+            // `cat`/`val` mirror the first series (TBL-002), so writing the
+            // canonical form writes both.
+            for s in ch.canonical_series() {
+                let series = chart.add_series();
+                if !s.name.trim().is_empty() {
+                    // A plain string is not a range: the writer stores it
+                    // as a literal `<tx><v>` name, which the reader takes
+                    // back verbatim.
+                    series.set_name(s.name.as_str());
                 }
-            } else {
-                chart
-                    .add_series()
-                    .set_categories((
-                        sh.name.as_str(),
-                        ch.cat.0 as u32,
-                        ch.cat.1 as u16,
-                        ch.cat.2 as u32,
-                        ch.cat.1 as u16,
-                    ))
-                    .set_values((
-                        sh.name.as_str(),
-                        ch.val.0 as u32,
-                        ch.val.1 as u16,
-                        ch.val.2 as u32,
-                        ch.val.1 as u16,
-                    ));
+                if let Some(hex) = s.color.as_deref().filter(|c| is_chart_hex(c)) {
+                    series.set_format(
+                        rust_xlsxwriter::ChartFormat::new()
+                            .set_solid_fill(&rust_xlsxwriter::ChartSolidFill::new().set_color(hex)),
+                    );
+                }
+                series.set_categories((
+                    sh.name.as_str(),
+                    s.cat.0 as u32,
+                    s.cat.1 as u16,
+                    s.cat.2 as u32,
+                    s.cat.1 as u16,
+                ));
+                series.set_values((
+                    sh.name.as_str(),
+                    s.val.0 as u32,
+                    s.val.1 as u16,
+                    s.val.2 as u32,
+                    s.val.1 as u16,
+                ));
             }
 
             if !ch.title.is_empty() {
@@ -387,6 +380,16 @@ pub fn save_sheets_to_xlsx_bytes(
                 LegendPosition::Left => chart.legend().set_position(ChartLegendPosition::Left),
                 LegendPosition::Right => chart.legend().set_position(ChartLegendPosition::Right),
             };
+            // Real size: the writer lays the chart out as a two-cell anchor
+            // over the sheet's own geometry, which the reader inverts back
+            // to these pixels (TBL-002). Missing sizes fall back to the
+            // writer default both ways.
+            if ch.width_px.is_finite() && ch.width_px > 0.0 {
+                chart.set_width(ch.width_px.round().clamp(1.0, 20_000.0) as u32);
+            }
+            if ch.height_px.is_finite() && ch.height_px > 0.0 {
+                chart.set_height(ch.height_px.round().clamp(1.0, 20_000.0) as u32);
+            }
 
             sheet
                 .insert_chart(ch.anchor.0 as u32, ch.anchor.1 as u16, &chart)
@@ -420,6 +423,13 @@ pub fn save_sheets_to_xlsx_bytes(
     workbook
         .save_to_buffer()
         .map_err(|e| format!("Save error: {}", e))
+}
+
+/// Whether `color` is a plain six-digit hex fill the chart writer can
+/// emit as sRGB (TBL-002). Theme and indexed colors have no hex to keep.
+fn is_chart_hex(color: &str) -> bool {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A validation rule in xlsx's terms, or `None` where it has none (a
