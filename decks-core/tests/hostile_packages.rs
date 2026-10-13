@@ -123,3 +123,49 @@ fn an_ordinary_deck_still_opens() {
     decks_core::engine::read_pptx(path.to_str().unwrap()).expect("an ordinary deck opens");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn loss_scan_names_aliased_content_and_still_blocks_unreadable_parts() {
+    // DCK-001: the loss detector is part of the hostile-input boundary. A
+    // package that spells supported prefixes differently must warn exactly
+    // like the canonical one, and a part whose bytes cannot be decoded is a
+    // hard inspection error — never a clean bill of health.
+    let mut buffer = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut buffer));
+        // Stored, so the slide bytes sit verbatim in the archive and the
+        // corruption below breaks the part's CRC, not the archive itself.
+        let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("ppt/slides/slide1.xml", stored).unwrap();
+        writer
+            .write_all(
+                b"<q:sld xmlns:q=\"urn:p\"><d:videoFile xmlns:d=\"urn:a\"/><q:cTn w:presetClass='path' xmlns:w=\"urn:x\"/></q:sld>",
+            )
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aliased.pptx");
+    std::fs::write(&path, &buffer).unwrap();
+    let report = decks_core::loss::content_a_save_drops(path.to_str().unwrap());
+    let ids: Vec<&str> = {
+        let mut v: Vec<&str> = report.features.iter().map(|f| f.id.as_str()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids, ["animations", "media"]);
+    assert!(report.features.iter().all(|f| f.location == "ppt/slides/slide1.xml"));
+    assert!(report.validate_save(false).is_err() && report.validate_save(true).is_ok());
+
+    // Corrupt the slide part in place so its CRC fails: the scan must block
+    // even a confirmed save instead of reporting the now-unreadable slide
+    // as clean.
+    let mut bytes = buffer;
+    let needle = b"videoFile";
+    let offset = bytes.windows(needle.len()).position(|s| s == needle).unwrap();
+    bytes[offset] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    let report = decks_core::loss::content_a_save_drops(path.to_str().unwrap());
+    assert!(report.has_hard_errors());
+    assert!(report.validate_save(true).is_err(), "confirmation must not override a failed inspection");
+}

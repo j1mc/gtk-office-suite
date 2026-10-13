@@ -55,3 +55,27 @@ fn rewriting_written_decks_gives_consistent_packages() {
         }
     }
 }
+
+/// A deck Decks wrote — including its single-series chart — is consistent
+/// and loses nothing (DCK-001 inventory row 9): the next save must not ask.
+#[test]
+fn a_written_single_series_chart_loses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut deck = Deck::new();
+    deck.slides[0].objects.push(SlideObject::Chart {
+        x: 10.0,
+        y: 10.0,
+        w: 300.0,
+        h: 200.0,
+        rotation: 0.0,
+        chart: decks_core::engine::chart::ChartData::sample(suite_common_core::charts::ChartKind::Bar),
+    });
+    for ext in ["pptx", "odp"] {
+        let path = dir.path().join(format!("chart.{ext}"));
+        decks_core::write_deck(path.to_str().unwrap(), &deck).unwrap();
+        assert_eq!(suite_common_core::carry::problems(&path), Vec::<String>::new(), "{ext}");
+        let report = decks_core::loss::content_a_save_drops(path.to_str().unwrap());
+        assert!(report.features.is_empty(), "{ext}: {:?}", report.features);
+        assert!(!report.requires_confirmation());
+    }
+}

@@ -6270,6 +6270,76 @@ class DecksUnsupportedContentSmoke(BaseGUITestCase):
         self.assertNotEqual(self._bytes(), self._original, "Save Anyway wrote the file")
 
 
+class DecksLossDetailsSmoke(BaseGUITestCase):
+    """The save question names the affected slide/part and the reason
+    (DCK-001 loss matrix), not just a feature label — and consent is scoped
+    to that report: Cancel writes nothing and keeps the edit.
+
+    A pptx with a comment part and an emphasis build on slide 1: Ctrl+S
+    asks; the dialog names ppt/slides/slide1.xml for the animation and the
+    comments part; Cancel leaves the file's bytes as they were; Save Anyway
+    writes the edit without the comment."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        import io
+        import zipfile
+        self._dir = self.temp_dir(prefix="decks-loss-details-")
+        self.isolate_snapshot(prefix="decks-loss-details-snap-")
+        self.isolate_autosave_state()
+        self._doc = os.path.join(self._dir, "talk.pptx")
+        buf = io.BytesIO(minimal_pptx_bytes("kept"))
+        timing = (
+            '<p:timing><p:tnLst><p:par><p:cTn id="1" presetID="1" '
+            'presetClass="emph" presetSubtype="0" fill="hold" '
+            'nodeType="clickEffect"><p:childTnLst/></p:cTn></p:par></p:tnLst></p:timing></p:sld>'
+        )
+        out = io.BytesIO()
+        with zipfile.ZipFile(buf, "r") as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name in zin.namelist():
+                data = zin.read(name)
+                if name == "ppt/slides/slide1.xml":
+                    data = data.decode("utf-8").replace("</p:sld>", timing).encode("utf-8")
+                zout.writestr(name, data)
+            zout.writestr("ppt/comments/comment1.xml", '<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>')
+        with open(self._doc, "wb") as f:
+            f.write(out.getvalue())
+        self._original = out.getvalue()
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _bytes(self):
+        with open(self._doc, "rb") as f:
+            return f.read()
+
+    def test_the_question_names_slide_part_and_reason(self):
+        aid = "org.tunaos.decks"
+        self.wait_until(lambda: self.app.child(name="Slide canvas"), lambda c: c is not None, description="the deck to open")
+        self.gapplication_action(aid, "add-shape")
+        self.gapplication_action(aid, "save-file")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "ppt/slides/slide1.xml" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the affected slide named in the question")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "ppt/comments" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the comments part named in the question")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        time.sleep(1.0)  # settling: a Cancel that wrote would have by now
+        self.assertEqual(self._bytes(), self._original, "Cancel wrote the file")
+        assert_close_guard_asks(self)
+
+        self.gapplication_action(aid, "save-file")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+        self.wait_until(self._bytes, lambda b: b != self._original, description="Save Anyway to write the file")
+        self.assertIsNone(self.process.poll(), "decks crashed saving")
+
+
 class DecksSourceInspectionSmoke(BaseGUITestCase):
     """Failed source inspection must not silently authorize destructive saves.
 
