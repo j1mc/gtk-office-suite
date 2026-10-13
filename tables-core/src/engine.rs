@@ -1,14 +1,11 @@
 // engine.rs — Spreadsheet engine using IronCalc for formula evaluation.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Decision: IronCalc (v0.7.1) over Formualizer.
-// Rationale:
-//   - IronCalc is MIT/Apache 2.0 licensed (Formualizer license unclear)
-//   - 83 functions covering all common spreadsheet operations
-//   - Pure Rust, minimal dependencies
-//   - Active development, v0.7.1 stable
-//   - Simpler API surface for our needs
-//   - XLSX import/export via calamine + rust_xlsxwriter (existing deps)
+// Decision: IronCalc; `ironcalc_base = "0.8"` is locked to 0.8.3.
+// Upstream 0.8 added dynamic arrays/spilling, LAMBDA/LET, and 100+ functions.
+// Tables delegates evaluation, but its tests only establish the SEQUENCE
+// spill cases below; they do not certify the full upstream or Excel feature set.
+// XLSX import/export remain separate: calamine + rust_xlsxwriter.
 //
 // Architecture:
 //   TablesEngine wraps ironcalc_base::Model and provides:
