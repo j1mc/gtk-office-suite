@@ -1915,12 +1915,15 @@ impl TablesWindow {
             let history_action = |name: &str, step: fn(&mut WorkbookController) -> bool| {
                 let (ctl, da) = (controller.clone(), drawing_area.clone());
                 let (sm, sd, st) = (sheet_model.clone(), sheet_switcher.clone(), state.clone());
+                let refresh = refresh_sel.clone();
                 let action = gtk4::gio::SimpleAction::new(name, None);
                 action.set_enabled(false);
                 action.connect_activate(move |_, _| {
                     let stepped = step(&mut ctl.borrow_mut());
                     if stepped {
                         crate::sheet_bar::follow(&sm, &sd, &st);
+                        refresh();
+                        crate::grid_area::refresh_grid_a11y(&da, &st);
                         da.queue_draw();
                     }
                 });
