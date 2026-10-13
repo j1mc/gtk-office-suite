@@ -7,7 +7,7 @@
 // NumberFormat and CellStyle.
 
 use super::numfmt::{builtin_code, kind_for_code};
-use crate::sheet::{BorderStyle, CellBorder};
+use crate::sheet::{BorderStyle, CellBorder, CellProtection};
 use crate::style::{CellStyle, HAlign, Rgb, VAlign};
 use suite_common_core::format::NumberFormat;
 
@@ -17,6 +17,7 @@ pub struct XfStyle {
     pub format: NumberFormat,
     pub style: CellStyle,
     pub border: CellBorder,
+    pub protection: CellProtection,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -242,6 +243,16 @@ pub fn default_font(styles_xml: &str) -> Option<(String, f64)> {
     Some((font.family?, font.size?))
 }
 
+/// Protection is a complete XF component: omitted attributes on a present
+/// `<protection>` use OOXML's locked=true, hidden=false defaults.
+fn parse_protection(body: &str) -> Option<CellProtection> {
+    let (attrs, _) = *elements(body, "protection").first()?;
+    Some(CellProtection {
+        locked: !matches!(xml_attr(attrs, "locked"), Some("0" | "false")),
+        hidden_formula: matches!(xml_attr(attrs, "hidden"), Some("1" | "true")),
+    })
+}
+
 /// Every cell style (`cellXfs` order) in styles.xml.
 /// `parse_cell_styles`, with theme colours from the workbook's own theme
 /// (`theme_palette`). A fill Excel names as "accent 1, lighter 60%" drew in
@@ -267,6 +278,16 @@ pub fn parse_cell_styles(styles_xml: &str) -> Vec<XfStyle> {
     let fills: Vec<Option<Rgb>> = elements(block(styles_xml, "fills"), "fill").into_iter().map(|(_, b)| parse_fill(b)).collect();
     let borders: Vec<CellBorder> =
         elements(block(styles_xml, "borders"), "border").into_iter().map(|(_, b)| parse_border(b)).collect();
+    let style_protections: Vec<CellProtection> = elements(block(styles_xml, "cellStyleXfs"), "xf")
+        .into_iter()
+        .map(|(attrs, body)| {
+            if matches!(xml_attr(attrs, "applyProtection"), Some("0" | "false")) {
+                CellProtection::default()
+            } else {
+                parse_protection(body).unwrap_or_default()
+            }
+        })
+        .collect();
     // Font 0 is the workbook's default font: a cell on it has no font of its own.
     let default_font = fonts.first().cloned().unwrap_or_default();
 
@@ -310,7 +331,19 @@ pub fn parse_cell_styles(styles_xml: &str) -> Vec<XfStyle> {
                 style.indent = xml_attr(&a, "indent").and_then(|v| v.parse().ok()).unwrap_or(0);
             }
             let border = borders.get(id("borderId")).cloned().unwrap_or_default();
-            XfStyle { format: NumberFormat::new(kind_for_code(code)), style, border }
+            let inherited = xml_attr(&attrs, "xfId")
+                .and_then(|v| v.parse::<usize>().ok())
+                .and_then(|id| style_protections.get(id))
+                .cloned()
+                .unwrap_or_default();
+            let protection = match xml_attr(&attrs, "applyProtection") {
+                Some("0" | "false") => inherited,
+                Some("1" | "true") => parse_protection(body).unwrap_or_default(),
+                // Producers may omit applyProtection on a direct component.
+                // Without one, use the referenced cellStyleXf.
+                _ => parse_protection(body).unwrap_or(inherited),
+            };
+            XfStyle { format: NumberFormat::new(kind_for_code(code)), style, border, protection }
         })
         .collect()
 }
@@ -319,6 +352,38 @@ pub fn parse_cell_styles(styles_xml: &str) -> Vec<XfStyle> {
 mod tests {
     use super::*;
     use suite_common_core::format::NumberFormatKind;
+
+    #[test]
+    fn protection_resolves_defaults_inheritance_and_application_flags() {
+        let styles = r#"<styleSheet>
+            <cellStyleXfs count="3">
+                <xf/>
+                <xf><protection locked="false" hidden="true"/></xf>
+                <xf applyProtection="false"><protection locked="0" hidden="1"/></xf>
+            </cellStyleXfs>
+            <cellXfs count="10">
+                <xf/>
+                <xf applyProtection="1"><protection locked="0" hidden="0"/></xf>
+                <xf applyProtection="true"><protection locked="true" hidden="true"/></xf>
+                <xf xfId="1"/>
+                <xf xfId="1" applyProtection="false"><protection locked="1" hidden="0"/></xf>
+                <xf xfId="1" applyProtection="true"><protection/></xf>
+                <xf xfId="1" applyProtection="1"/>
+                <xf xfId="2"/>
+                <xf xfId="99"/>
+                <xf><protection locked="false"/></xf>
+            </cellXfs>
+        </styleSheet>"#;
+        let actual: Vec<_> = parse_cell_styles(styles).into_iter().map(|x| x.protection).collect();
+        let default = CellProtection::default();
+        let unlocked = CellProtection { locked: false, hidden_formula: false };
+        let hidden = CellProtection { locked: true, hidden_formula: true };
+        let inherited = CellProtection { locked: false, hidden_formula: true };
+        assert_eq!(actual, vec![
+            default.clone(), unlocked.clone(), hidden, inherited.clone(), inherited,
+            default.clone(), default.clone(), default.clone(), default, unlocked,
+        ]);
+    }
 
     const STYLES: &str = r#"<styleSheet>
       <numFmts count="1"><numFmt numFmtId="164" formatCode="0.0%"/></numFmts>
