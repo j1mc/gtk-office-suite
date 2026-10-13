@@ -39,6 +39,22 @@
       }
     },
     {
+      "id": "tables.protection.persistence",
+      "app": "tables",
+      "issue": 439,
+      "title": "XLSX cell lock and sheet permission state persists across edit/save/reopen",
+      "scope": "Per-cell locked/hidden flags, style-default inheritance and modeled permission bits round-trip through the real XLSX path including later sheets; unsupported credentials warn with consent and cancel preserves source. Does not certify chart persistence, credential-bearing round trips or workbook structure protection.",
+      "status": "verified",
+      "revision": "3b97d980fbd33d32c87c11a5da3f812e5c6684b3",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::TablesProtectionPersistenceSmoke::test_unlocked_blank_cell_remains_editable_after_save_and_reopen",
+          "tests/gui/test_smoke.py::TablesProtectionPersistenceSmoke::test_password_loss_requires_consent_and_cancel_preserves_source"
+        ]
+      }
+    },
+    {
       "id": "decks.save.source-inspection",
       "app": "decks",
       "issue": 374,

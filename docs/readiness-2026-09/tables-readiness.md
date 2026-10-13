@@ -137,6 +137,16 @@ Work in this order; unchecked gates remain requirements, not claims:
       OLE, sparklines, and validation rules xlsx has no form for), and every save path — Ctrl+S, Save As and the close
       guard's Save — asks "Save Without This Content?" first. Cancel writes nothing. `TablesLossQuestionSmoke` drives
       it: a workbook with a macro project, edited, Ctrl+S, Cancel leaves its bytes; Save Anyway writes the edit.
+  XLSX cell/permission protection now persists across the real load/edit/save path (#1552, observed at
+  `3b97d980fbd33d32c87c11a5da3f812e5c6684b3`): cell lock/hidden flags, style-default inheritance and
+  `applyProtection` semantics round-trip on ordinary, formula, blank styled and merged cells, including later
+  sheets; modeled worksheet permissions serialize with OOXML disallow-bit inversion (all 32 combinations in
+  `pivot_and_protection_tests`); unsupported imported credentials and non-representable permission settings raise
+  explicit loss warnings and are never treated as encryption. `TablesProtectionPersistenceSmoke` drives both the
+  unlocked-cell edit/save/reopen/undo journey and the password-loss consent/cancel journey (GUI run
+  38439078711, smoke 13m9s pass; core `test`, oracle and tables corpus green at the same revision; undo/redo also
+  refreshes the grid accessible description). Capability ledger: `tables.protection.persistence`. This does not
+  certify chart persistence, credential-bearing round trips, or workbook structure protection.
 - [x] Two-sheet journey: edit/formula → rename/reorder/delete/undo → switch → save → reopen; no cross-sheet overwrite or retargeted history.
       `TablesTwoSheetJourneySmoke` (#1204): a value on Sheet1, a formula on Sheet2 reading it, rename through the
       dialog, move first, delete and undo, switch to Sheet1 through the sheet switcher, Save As; the saved xlsx must
@@ -193,10 +203,10 @@ Work in this order; unchecked gates remain requirements, not claims:
       chart dialog builds one value series from the selected column and uses
       column A as categories. XLSX export can write multiple series, axis
       titles and legend position, but import keeps one category/value range,
-      drops those settings, and defaults the legend. Protection import keeps
-      only the sheet-protected boolean; passwords, permission flags and
-      per-cell lock attributes are not retained, while export writes only
-      the protected state. These chart/protection round trips are XLSX-only;
+      drops those settings, and defaults the legend. Protection import/export now retains per-cell lock/hidden flags
+      and modeled permission bits across the real path (#1552, evidence above); password hashes and other credential
+      material remain explicitly non-round-tripped with a consent warning, never treated as encryption. These
+      chart/protection round trips are XLSX-only;
       other offered document formats are not writable. Dynamic-array evidence is
       deliberately narrower: engine tests cover only `SEQUENCE(3)` and a
       blocked `SEQUENCE(2,2)` spill. Grid projection is bounded to the
