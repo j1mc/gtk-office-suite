@@ -3,18 +3,49 @@
 //!
 //! Decks writes its whole package from the model, so anything the readers
 //! don't model is gone after a save over (or a Save As from) a file that
-//! had it: comments, audio and video, embedded OLE objects, SmartArt,
-//! emphasis and motion-path animations, and pictures the file names but
-//! does not contain. decks-readiness.md asks that such content be
-//! "preserved or blocked/warned by #374 before save"; this finds it, as a
+//! had it. decks-readiness.md asks that such content be "preserved or
+//! blocked/warned by #374 before save"; this finds it, as a
 //! `CompatibilityReport` of `WarnOnLoss` features (or `HardError` when
-//! inspection fails), so the window can ask
-//! before writing (`decks/src/loss_ui.rs`), as Letters does for a format
-//! that can't hold what a document has.
+//! inspection fails), so the window can ask before writing
+//! (`decks/src/loss_ui.rs`), as Letters does for a format that can't hold
+//! what a document has.
 //!
 //! It reads the file on disk at save time, not a note taken at open: the
 //! file a save replaces or copies from is the one that can lose something,
 //! and once Decks has written it there is nothing left to warn about.
+//! Planning only reads; it never edits the deck or records history. Consent
+//! given for the resulting report is scoped to that source revision, target
+//! and feature set: `loss_ui` re-inspects before writing and blocks the save
+//! instead of reusing consent when the source no longer matches.
+//!
+//! DCK-001 loss-matrix inventory. Each row names its per-format disposition
+//! in the shared vocabulary (`FeatureDisposition`), the fixture that proves
+//! it, and where the detector looks. Plain words map as: editable means the
+//! reader models it (`MustPreserve`, so no warning); safe-opaque would mean
+//! byte-preserved without interpretation (not claimed for any row yet —
+//! DCK-002 owns that); explicit-loss is `WarnOnLoss`: the dialog names the
+//! affected slide/object/part before a destructive save; blocked is
+//! `HardError`: the save cannot go ahead, and confirming cannot override it.
+//!
+//! | # | Content | PPTX disposition | ODP disposition | Fixture | Detector |
+//! |---|---|---|---|---|---|
+//! | 1 | Comments | explicit-loss (`comments`): `ppt/comments/*.xml` | explicit-loss (`comments`): annotation elements in `content.xml`/`styles.xml` | `impress-loss-pptx-v1`, `impress-loss-odp-v1` | `pptx_drops`, `odp_drops` below |
+//! | 2 | Audio and video | explicit-loss (`media`): `videoFile`/`audioFile`/prefixed `media` elements | explicit-loss (`media`): `plugin` elements | `impress-loss-pptx-v1`, `impress-loss-odp-v1` | `pptx_drops`, `odp_drops` below |
+//! | 3 | Embedded OLE objects | explicit-loss (`embedded-objects`): `oleObj` elements | explicit-loss (`embedded-objects`): `object-ole` elements | `impress-loss-pptx-v1`, `impress-loss-odp-v1` | `pptx_drops`, `odp_drops` below |
+//! | 4 | SmartArt diagrams | explicit-loss (`smartart`): `ppt/diagrams/` parts | not applicable: ODP has no diagram part; plain shapes import as shapes | `impress-loss-pptx-v1` | `pptx_drops` below |
+//! | 5 | Emphasis and motion-path animation (entrance/exit stay editable) | explicit-loss (`animations`): `presetClass` `emph`/`path` | explicit-loss (`animations`): `preset-class` `emphasis`/`motion-path` | `impress-loss-pptx-v1`, `impress-loss-odp-v1` | `pptx_drops`, `odp_drops` below |
+//! | 6 | Chart series past the first (the reader keeps the first series only) | explicit-loss (`multi-series-charts`): chart parts with two or more `ser` elements | explicit-loss (`multi-series-charts`): chart objects with two or more `series` elements | `impress-loss-pptx-v1`, `impress-loss-odp-v1` | `chart_parts`, `odp_chart_objects` below |
+//! | 7 | Pictures the file names but does not contain | explicit-loss (`missing-pictures`): dangling `image` relationship targets per slide | explicit-loss (`missing-pictures`): dangling image `href`s per document part | loss unit tests (a dangling target cannot ship in `interop/corpus.json`, whose validator requires every relationship/manifest target to exist) | `pptx_drops`, `odp_drops` below |
+//! | 8 | A source that cannot be inspected (missing, corrupt, over budget) | blocked (`source-inspection-failed`): no save, not even a confirmed one | blocked (`source-inspection-failed`) | loss unit tests, `hostile_packages.rs`, `malformed_inputs.rs` | `inspect_source`, `scan_part` below |
+//! | 9 | Anything in a package Decks itself wrote | clean: no warning in either format | clean | `package_consistency.rs`, `a_deck_decks_wrote_loses_nothing` below | — |
+//!
+//! Detection is namespace/relationship-aware bounded parsing, not
+//! prefix-sensitive substring search: element and attribute names compare by
+//! local name (the part after any `:`), both quote styles and spacing around
+//! `=` are accepted, comments and processing instructions are skipped, and
+//! relationship targets resolve against their part folder with external
+//! targets left out. A part that cannot be decoded under the zip budget is a
+//! hard inspection error, never an empty scan that authorizes the save.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -22,23 +53,34 @@ use std::io::Read;
 use suite_common_core::interop::{CompatibilityReport, FeatureDisposition, UnsupportedFeature};
 use suite_common_core::zip_guard::{BoundedArchive, ZipBudget};
 
-/// One kind of content Decks drops: its id and the label the dialog shows.
+/// One kind of content Decks drops: its stable id and the label the dialog shows.
+///
+/// Ids are stable across releases: the dialog, the corpus fixtures and the
+/// tests below all name these, so renaming one is a migration, not a rename.
 const COMMENTS: (&str, &str) = ("comments", "Comments");
 const MEDIA: (&str, &str) = ("media", "Audio and video");
 const OLE: (&str, &str) = ("embedded-objects", "Embedded objects");
 const SMARTART: (&str, &str) = ("smartart", "SmartArt graphics");
 const ANIMATION: (&str, &str) = ("animations", "Emphasis and motion-path animations");
+const CHARTS: (&str, &str) = ("multi-series-charts", "Charts with more than one series");
 const MISSING: (&str, &str) = ("missing-pictures", "Pictures missing from the file");
 
 fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location: &str, detail: &str) {
-    report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
+    // Deduplicate on the full triple, not just id and location: one slide
+    // can name two missing pictures, and the shared `record` would keep only
+    // the first. Every finding names its affected part in `location` or
+    // `detail`, so dropping the second would hide a loss the dialog promised.
+    if !report.features.iter().any(|existing| existing.id == id && existing.location == location && existing.detail == detail) {
+        report.features.push(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
+    }
 }
 
 /// The content of the presentation at `path` that a save of the deck read
 /// from it would lose. A source that cannot be inspected blocks ordinary
 /// saving: missing is not a new document, whose caller has no source.
 /// A separately confirmed recovery copy does not claim to preserve source
-/// content. This is a bounded lexical scan, not full package/XML validation.
+/// content. This is namespace/relationship-aware bounded parsing, not full
+/// package/XML validation.
 pub fn content_a_save_drops(path: &str) -> CompatibilityReport {
     content_a_save_drops_with_budget(path, &mut ZipBudget::default())
 }
@@ -117,13 +159,14 @@ fn pptx_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTr
     }
     for slide in names.iter().filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml")) {
         let xml = scan_part(zip, slide, budget)?;
-        if xml.contains("<a:videoFile") || xml.contains("<a:audioFile") || xml.contains("<p14:media") {
+        let tags = start_tags(&xml);
+        if tags.iter().any(|t| matches!(t.local, "videoFile" | "audioFile" | "media")) {
             record(report, MEDIA, slide, "audio and video are not kept");
         }
-        if xml.contains("<p:oleObj") {
+        if tags.iter().any(|t| t.local == "oleObj" || t.local.eq_ignore_ascii_case("oleobject")) {
             record(report, OLE, slide, "embedded objects are not kept");
         }
-        if xml.contains("presetClass=\"emph\"") || xml.contains("presetClass=\"path\"") {
+        if tags.iter().any(|t| matches!(attr_value(t.attrs, "presetClass"), Some("emph" | "path"))) {
             record(report, ANIMATION, slide, "only entrance and exit builds are kept");
         }
         let rels = slide.replacen("ppt/slides/", "ppt/slides/_rels/", 1) + ".rels";
@@ -139,69 +182,291 @@ fn pptx_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTr
             }
         }
     }
+    for chart in chart_parts(zip, names, budget, report)? {
+        let xml = scan_part(zip, &chart, budget)?;
+        if start_tags(&xml).iter().filter(|t| t.local == "ser").count() > 1 {
+            record(report, CHARTS, &chart, "only the first chart series is kept");
+        }
+    }
     Ok(())
+}
+
+/// Every DrawingML chart part the package's relationships name, resolved to
+/// a part path. A failure to inspect a relationships part is a hard error,
+/// not an empty chart list that would authorize the save.
+fn chart_parts<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    names: &BTreeSet<String>,
+    budget: &mut ZipBudget,
+    report: &mut CompatibilityReport,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let rels_parts: Vec<&String> = names.iter().filter(|n| n.ends_with(".rels")).collect();
+    for rels_name in rels_parts {
+        let xml = scan_part(zip, rels_name, budget)?;
+        let base = rels_base(rels_name);
+        for target in internal_targets(&xml, "/chart") {
+            let part = resolve(&base, &target);
+            if names.contains(&part) {
+                if !out.contains(&part) {
+                    out.push(part);
+                }
+            } else {
+                // A chart the relationships name but the package does not
+                // contain: the save cannot keep what is not there to read.
+                record(report, MISSING, rels_name.as_str(), &format!("{target} is not in the file"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The folder relationships in `rels_path` resolve against: the part folder
+/// holding the relationships directory (`ppt/slides/_rels/slide1.xml.rels`
+/// resolves against `ppt/slides`; the package root `_rels/.rels` against
+/// the root).
+fn rels_base(rels_path: &str) -> String {
+    let mut parts: Vec<&str> = rels_path.split('/').filter(|p| !p.is_empty()).collect();
+    parts.pop();
+    if parts.last() == Some(&"_rels") {
+        parts.pop();
+    }
+    parts.join("/")
 }
 
 fn odp_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTreeSet<String>, budget: &mut ZipBudget, report: &mut CompatibilityReport) -> Result<(), String> {
-    let content = scan_part(zip, "content.xml", budget)?;
-    if content.contains("<officeooo:annotation") || content.contains("<office:annotation") {
-        record(report, COMMENTS, "content.xml", "comments on slides are not kept");
+    // Master and layout artwork lives in styles.xml; content.xml alone would
+    // miss a comment, a movie or a dangling picture the master names.
+    // styles.xml is optional: its absence is not an inspection failure.
+    let mut parts = vec!["content.xml".to_string()];
+    if names.contains("styles.xml") {
+        parts.push("styles.xml".to_string());
     }
-    if content.contains("<draw:plugin") {
-        record(report, MEDIA, "content.xml", "audio and video are not kept");
+    for part in &parts {
+        let xml = scan_part(zip, part, budget)?;
+        let tags = start_tags(&xml);
+        if tags.iter().any(|t| t.local == "annotation") {
+            record(report, COMMENTS, part, "comments on slides are not kept");
+        }
+        if tags.iter().any(|t| t.local == "plugin") {
+            record(report, MEDIA, part, "audio and video are not kept");
+        }
+        if tags.iter().any(|t| t.local == "object-ole") {
+            record(report, OLE, part, "embedded objects are not kept");
+        }
+        if tags.iter().any(|t| matches!(attr_value(t.attrs, "preset-class"), Some("emphasis" | "motion-path"))) {
+            record(report, ANIMATION, part, "only entrance and exit builds are kept");
+        }
+        for tag in tags.iter().filter(|t| t.local == "image") {
+            if let Some(href) = attr_value(tag.attrs, "href") {
+                let internal = !href.contains(':') && !href.starts_with('/') && !href.starts_with("../");
+                if internal && !names.contains(href.trim_start_matches("./")) {
+                    record(report, MISSING, part, &format!("{href} is not in the file"));
+                }
+            }
+        }
     }
-    if content.contains("<draw:object-ole") {
-        record(report, OLE, "content.xml", "embedded objects are not kept");
-    }
-    if content.contains("presentation:preset-class=\"emphasis\"") || content.contains("presentation:preset-class=\"motion-path\"") {
-        record(report, ANIMATION, "content.xml", "only entrance and exit builds are kept");
-    }
-    for href in attr_values(&content, "<draw:image", "xlink:href") {
-        let internal = !href.contains(':') && !href.starts_with('/') && !href.starts_with("../");
-        if internal && !names.contains(href.trim_start_matches("./")) {
-            record(report, MISSING, "content.xml", &format!("{href} is not in the file"));
+    for object in odp_chart_objects(names) {
+        let xml = scan_part(zip, &object, budget)?;
+        let tags = start_tags(&xml);
+        if tags.iter().any(|t| t.local == "chart") && tags.iter().filter(|t| t.local == "series").count() > 1 {
+            record(report, CHARTS, &object, "only the first chart series is kept");
         }
     }
     Ok(())
 }
 
-/// The values of `attr` on every `element` start tag in `xml`.
-fn attr_values<'a>(xml: &'a str, element: &str, attr: &str) -> Vec<&'a str> {
-    let needle = format!("{attr}=\"");
-    let mut out = Vec::new();
-    let mut rest = xml;
-    while let Some(i) = rest.find(element) {
-        let tag = &rest[i..];
-        let end = tag.find('>').unwrap_or(tag.len());
-        let tag = &tag[..end];
-        if let Some(j) = tag.find(&needle) {
-            let v = &tag[j + needle.len()..];
-            if let Some(k) = v.find('"') {
-                out.push(&v[..k]);
+/// Every embedded chart object's `content.xml` (`Object 1/content.xml`, as
+/// Impress writes one). Only parts the package actually contains: a missing
+/// object is the reader's error path, not this scanner's.
+fn odp_chart_objects(names: &BTreeSet<String>) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| {
+            n.ends_with("/content.xml")
+                && n.split('/').next().is_some_and(|first| first.starts_with("Object "))
+        })
+        .cloned()
+        .collect()
+}
+
+/// A start tag (empty-element tags included) with its name split into the
+/// qualified name as written (`p:cTn`) and the local name after any prefix
+/// (`cTn`), plus the raw attribute text.
+struct StartTag<'a> {
+    #[allow(dead_code)]
+    qualified: &'a str,
+    local: &'a str,
+    attrs: &'a str,
+}
+
+/// The local part of a qualified element or attribute name: `p:cTn` is
+/// `cTn`, and an unprefixed name is itself. Namespace aliases are a writer's
+/// choice, so detection must never depend on the prefix.
+fn local_of(qualified: &str) -> &str {
+    qualified.rsplit(':').next().unwrap_or(qualified)
+}
+
+/// The end of the tag `rest` starts, quote-aware: a `>` inside an attribute
+/// value does not end the tag.
+fn tag_end(rest: &str) -> Option<usize> {
+    let mut quote = None;
+    for (idx, ch) in rest.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                } else if ch == '>' {
+                    return Some(idx);
+                }
             }
         }
-        rest = &rest[i + element.len()..];
+    }
+    None
+}
+
+/// Every start tag in `xml`, skipping comments, CDATA sections, processing
+/// instructions, declarations and end tags. Bounded: each iteration consumes
+/// at least one byte, and no allocation happens per tag beyond the output vector.
+fn start_tags(xml: &str) -> Vec<StartTag<'_>> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find('<') {
+        rest = &rest[i..];
+        if rest.starts_with("<![CDATA[") {
+            // Character data is content, not markup: an element-looking
+            // string in here must not read as a loss.
+            match rest.find("]]>") {
+                Some(e) => rest = &rest[e + 3..],
+                None => break,
+            }
+            continue;
+        }
+        if rest.starts_with("<!--") {
+            match rest.find("-->") {
+                Some(e) => rest = &rest[e + 3..],
+                None => break,
+            }
+            continue;
+        }
+        if rest.starts_with("<?") {
+            match rest.find("?>") {
+                Some(e) => rest = &rest[e + 2..],
+                None => break,
+            }
+            continue;
+        }
+        if rest.starts_with("<!") {
+            match tag_end(rest) {
+                Some(e) => rest = &rest[e + 1..],
+                None => break,
+            }
+            continue;
+        }
+        let end = match tag_end(rest) {
+            Some(e) => e,
+            None => break,
+        };
+        let mut inner = rest[1..end].trim();
+        rest = &rest[end + 1..];
+        if inner.starts_with('/') {
+            continue;
+        }
+        if inner.ends_with('/') {
+            inner = inner[..inner.len() - 1].trim_end();
+        }
+        let split = inner.find(|c: char| c.is_whitespace()).unwrap_or(inner.len());
+        let qualified = &inner[..split];
+        if qualified.is_empty() {
+            continue;
+        }
+        out.push(StartTag { qualified, local: local_of(qualified), attrs: inner[split..].trim_start() });
     }
     out
 }
 
+/// The value of the attribute named `want` (by local name, so `xlink:href`
+/// is `href` whatever prefix the writer chose), accepting both quote styles
+/// and spacing around `=`. Valueless attributes are skipped, not misread.
+fn attr_value<'a>(attrs: &'a str, want: &str) -> Option<&'a str> {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' && bytes[i] != b'/' {
+            i += 1;
+        }
+        if start == i {
+            // A stray delimiter (never valid XML, often a truncated tag):
+            // skip it rather than abandoning the attributes after it.
+            i += 1;
+            continue;
+        }
+        let name = &attrs[start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let value;
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            let value_start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            value = &attrs[value_start..i.min(bytes.len())];
+            i += 1;
+        } else {
+            let value_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            value = &attrs[value_start..i];
+        }
+        if local_of(name) == want {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// The targets of the relationships in `rels` whose type ends with
 /// `type_suffix`, leaving out external ones (a linked picture is a URL,
-/// not a part).
+/// not a part). Relationship elements and their attributes match by local
+/// name: the prefix is the writer's choice, and values accept both quotes.
 fn internal_targets(rels: &str, type_suffix: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = rels;
-    while let Some(i) = rest.find("<Relationship ") {
-        let tag = &rest[i..];
-        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
-        let get = |k: &str| attr_values(tag, "<Relationship", k).first().map(|s| s.to_string());
-        let external = get("TargetMode").is_some_and(|m| m == "External");
-        if !external && get("Type").is_some_and(|t| t.ends_with(type_suffix)) {
-            if let Some(t) = get("Target") {
-                out.push(t);
+    for tag in start_tags(rels) {
+        if tag.local != "Relationship" {
+            continue;
+        }
+        if attr_value(tag.attrs, "TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("external")) {
+            continue;
+        }
+        let matches = attr_value(tag.attrs, "Type").is_some_and(|t| t.ends_with(type_suffix));
+        if matches {
+            if let Some(target) = attr_value(tag.attrs, "Target") {
+                out.push(target.to_string());
             }
         }
-        rest = &rest[i + 1..];
     }
     out
 }
@@ -497,6 +762,225 @@ mod tests {
              <draw:frame><draw:object xlink:href=\"./Object 1\"/></draw:frame></office:document-content>",
         )]);
         assert!(content_a_save_drops(p.to_str().unwrap()).features.is_empty());
+    }
+
+    #[test]
+    fn loss_matrix_names_slide_and_target() {
+        // DCK-001: every finding names the affected slide/object/part and
+        // the reason, so the dialog can offer a copy/cancel/repair choice
+        // for that content instead of a bare feature label.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("matrix.pptx");
+        package(&p, &[
+            ("ppt/comments/comment1.xml", "<p:cmLst/>"),
+            (
+                "ppt/slides/slide2.xml",
+                "<p:sld><a:videoFile r:link=\"rId3\"/><p:oleObj/><p:cTn presetClass=\"emph\"/></p:sld>",
+            ),
+            (
+                "ppt/slides/_rels/slide2.xml.rels",
+                "<Relationships>\
+                 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/gone.png\"/>\
+                 </Relationships>",
+            ),
+        ]);
+        let r = content_a_save_drops(p.to_str().unwrap());
+        let at = |id: &str| {
+            r.features.iter().filter(|f| f.id == id).map(|f| f.location.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(at("comments"), ["ppt/comments"]);
+        for id in ["media", "embedded-objects", "animations", "missing-pictures"] {
+            assert_eq!(at(id), ["ppt/slides/slide2.xml"], "{id} must name its slide");
+        }
+        let missing = r.features.iter().find(|f| f.id == "missing-pictures").unwrap();
+        assert!(missing.detail.contains("../media/gone.png"), "{}", missing.detail);
+        assert!(r.requires_confirmation());
+        assert!(r.validate_save(false).is_err() && r.validate_save(true).is_ok());
+    }
+
+    #[test]
+    fn namespace_aliases_do_not_bypass_loss_detection() {
+        // DCK-001: prefixes are the writer's choice. The same content under
+        // unfamiliar aliases, single quotes and spaced attributes must warn
+        // exactly like the canonical serialization.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("aliased.pptx");
+        package(&p, &[
+            (
+                "ppt/slides/slide1.xml",
+                "<q:sld xmlns:q=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\
+                 <d:videoFile xmlns:d=\"http://schemas.openxmlformats.org/drawingml/2006/main\"/>\
+                 <q:oleObj/>\
+                 <q:cTn  w:presetClass = 'emph' xmlns:w=\"urn:x\"/>\
+                 </q:sld>",
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                "<pkg:Relationships xmlns:pkg=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 <pkg:Relationship Id='rId1' Type = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target = '../media/gone.png'/>\
+                 </pkg:Relationships>",
+            ),
+        ]);
+        let r = content_a_save_drops(p.to_str().unwrap());
+        assert_eq!(ids(&r), ["animations", "embedded-objects", "media", "missing-pictures"]);
+        let o = dir.path().join("aliased.odp");
+        package(&o, &[(
+            "content.xml",
+            "<office:document-content><draw:page>\
+             <x:annotation xmlns:x=\"urn:oasis:names:tc:opendocument:xmlns:office\"/>\
+             <y:plugin xmlns:y=\"urn:oasis:names:tc:opendocument:xmlns:drawing\"/>\
+             <y:object-ole/>\
+             <anim:par z:preset-class='motion-path' xmlns:z=\"urn:oasis:names:tc:opendocument:xmlns:presentation\"/>\
+             </draw:page></office:document-content>",
+        )]);
+        assert_eq!(ids(&content_a_save_drops(o.to_str().unwrap())), ["animations", "comments", "embedded-objects", "media"]);
+    }
+
+    #[test]
+    fn markup_that_is_not_markup_is_not_a_loss() {
+        // Comments, CDATA and quoted attribute values that merely mention an
+        // unsupported element must not warn: the scanner reads tags, not text.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("quoted.pptx");
+        package(&p, &[(
+            "ppt/slides/slide1.xml",
+            "<p:sld><!-- <p:oleObj/> --><![CDATA[<a:videoFile/>]]>\
+             <p:sp><a:t>&lt;p:oleObj&gt; and presetClass=\"emph\" as text</a:t></p:sp></p:sld>",
+        )]);
+        assert!(content_a_save_drops(p.to_str().unwrap()).features.is_empty());
+    }
+
+    #[test]
+    fn incomplete_analysis_never_authorizes_save() {
+        // DCK-001: a report the scanner could not finish is a block, however
+        // the user answers. `validate_save(true)` overrides warnings, never
+        // a failed inspection.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("truncated.pptx");
+        // Stored, so the slide bytes sit verbatim in the archive and flipping
+        // one breaks the part's CRC while leaving the archive readable.
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("ppt/comments/comment1.xml", stored).unwrap();
+        writer.write_all(b"<p:cmLst/>").unwrap();
+        writer.start_file("ppt/slides/slide1.xml", stored).unwrap();
+        writer.write_all(b"<p:sld><p:oleObj/>").unwrap();
+        writer.finish().unwrap();
+        // Corrupt the slide part in place so its CRC fails: the scanner must
+        // report a hard error, not an empty finding list.
+        let mut bytes = std::fs::read(&p).unwrap();
+        let needle = b"<p:oleObj/>";
+        let offset = bytes.windows(needle.len()).position(|s| s == needle).unwrap();
+        bytes[offset] ^= 1;
+        std::fs::write(&p, bytes).unwrap();
+        let r = content_a_save_drops(p.to_str().unwrap());
+        assert!(r.has_hard_errors());
+        assert!(r.validate_save(false).is_err());
+        assert!(r.validate_save(true).is_err(), "confirmation must not override a failed inspection");
+    }
+
+    #[test]
+    fn two_missing_pictures_on_one_slide_are_two_findings() {
+        // One slide can lose two pictures; the dialog must be able to name
+        // both, so per-target findings must not collapse onto each other.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("two-gone.pptx");
+        package(&p, &[
+            ("ppt/slides/slide1.xml", "<p:sld/>"),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                "<Relationships>\
+                 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/a.png\"/>\
+                 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/b.png\"/>\
+                 </Relationships>",
+            ),
+        ]);
+        let r = content_a_save_drops(p.to_str().unwrap());
+        let mut details: Vec<&str> =
+            r.features.iter().filter(|f| f.id == "missing-pictures").map(|f| f.detail.as_str()).collect();
+        details.sort();
+        assert_eq!(details, ["../media/a.png is not in the file", "../media/b.png is not in the file"]);
+    }
+
+    #[test]
+    fn multi_series_charts_warn_in_both_formats() {
+        // The readers keep the first series only (`parse_chart_space`,
+        // `parse_odf_chart`); a second series is an explicit loss with the
+        // chart part as its location. One series stays silent.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("series.pptx");
+        package(&p, &[
+            ("ppt/slides/slide1.xml", "<p:sld/>"),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                "<Relationships>\
+                 <Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"../charts/chart1.xml\"/>\
+                 <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"../charts/chart2.xml\"/>\
+                 </Relationships>",
+            ),
+            (
+                "ppt/charts/chart1.xml",
+                "<c:chartSpace><c:chart><c:plotArea><c:barChart>\
+                 <c:ser><c:idx val=\"0\"/></c:ser><c:ser><c:idx val=\"1\"/></c:ser>\
+                 </c:barChart></c:plotArea></c:chart></c:chartSpace>",
+            ),
+            (
+                "ppt/charts/chart2.xml",
+                "<c:chartSpace><c:chart><c:plotArea><c:barChart>\
+                 <c:ser><c:idx val=\"0\"/></c:ser>\
+                 </c:barChart></c:plotArea></c:chart></c:chartSpace>",
+            ),
+        ]);
+        let r = content_a_save_drops(p.to_str().unwrap());
+        let charts: Vec<&UnsupportedFeature> = r.features.iter().filter(|f| f.id == "multi-series-charts").collect();
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].location, "ppt/charts/chart1.xml");
+        let o = dir.path().join("series.odp");
+        package(&o, &[
+            (
+                "content.xml",
+                "<office:document-content><draw:page>\
+                 <draw:frame><draw:object xlink:href=\"./Object 1\"/></draw:frame>\
+                 <draw:frame><draw:object xlink:href=\"./Object 2\"/></draw:frame>\
+                 </draw:page></office:document-content>",
+            ),
+            (
+                "Object 1/content.xml",
+                "<office:document-content><chart:chart><chart:series/><chart:series/></chart:chart>\
+                 <table:table/></office:document-content>",
+            ),
+            (
+                "Object 2/content.xml",
+                "<office:document-content><chart:chart><chart:series/></chart:chart>\
+                 <table:table/></office:document-content>",
+            ),
+        ]);
+        let r = content_a_save_drops(o.to_str().unwrap());
+        let charts: Vec<&UnsupportedFeature> = r.features.iter().filter(|f| f.id == "multi-series-charts").collect();
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].location, "Object 1/content.xml");
+    }
+
+    #[test]
+    fn odp_master_artwork_in_styles_xml_is_inspected() {
+        // Referenced master/layout artwork belongs to the loss boundary
+        // (PR #1550's preflight): a movie or dangling picture styles.xml
+        // names must warn like content.xml's do.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("master.odp");
+        package(&p, &[
+            ("content.xml", "<office:document-content><draw:page/></office:document-content>"),
+            (
+                "styles.xml",
+                "<office:document-styles><draw:page>\
+                 <draw:plugin xlink:href=\"reel.mp4\"/>\
+                 <draw:frame><draw:image xlink:href=\"Pictures/gone.png\"/></draw:frame>\
+                 </draw:page></office:document-styles>",
+            ),
+        ]);
+        let r = content_a_save_drops(p.to_str().unwrap());
+        assert_eq!(ids(&r), ["media", "missing-pictures"]);
+        assert!(r.features.iter().all(|f| f.location == "styles.xml"));
     }
 
     #[test]

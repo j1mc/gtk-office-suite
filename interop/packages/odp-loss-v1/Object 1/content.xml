@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:version="1.2">
+ <office:body><office:chart><chart:chart chart:class="chart:bar">
+  <chart:series chart:values-cell-range-address="local-table.$B$2:.$B$3"/>
+  <chart:series chart:values-cell-range-address="local-table.$C$2:.$C$3"/>
+ </chart:chart></office:chart></office:body>
+</office:document-content>

@@ -55,23 +55,39 @@ pub(crate) fn save_after_asking(window: &adw::ApplicationWindow, source: Option<
         }
         return;
     }
+    // One line per finding, not one label per feature: the choice needs the
+    // affected slide/object/part and the reason (stable ids in
+    // `decks_core::loss`), so a repair — a copy, a cancelled save, a fixed
+    // source — can target that content. Planning never edits the deck and
+    // never records history; it only reads the source file.
     let dropped: Vec<String> = report
         .as_ref()
         .map(|r| {
-            let mut labels: Vec<String> = Vec::new();
+            let mut lines: Vec<String> = Vec::new();
             for f in r.destructive_features() {
-                let label = format!("\u{2022} {}", suite_common::i18n(&f.label));
-                if !labels.contains(&label) {
-                    labels.push(label);
+                let line = format!("\u{2022} {}: {} \u{2014} {}", suite_common::i18n(&f.label), f.location, f.detail);
+                if !lines.contains(&line) {
+                    lines.push(line);
                 }
             }
-            labels
+            lines
         })
         .unwrap_or_default();
     if dropped.is_empty() {
         save();
         return;
     }
+    // Consent is scoped to this source revision, target and feature set: the
+    // source is re-inspected when the user confirms, and anything else —
+    // a failed inspection, a changed finding list — blocks the save instead
+    // of reusing consent given for a different report. Cancelling writes
+    // nothing and keeps dirty edits, source bytes and recovery state.
+    let consented: Vec<(String, String, String)> = report
+        .as_ref()
+        .map(|r| {
+            r.destructive_features().iter().map(|f| (f.id.clone(), f.location.clone(), f.detail.clone())).collect()
+        })
+        .unwrap_or_default();
     let source = source.unwrap_or_default();
     let name = |p: &str| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let outcome = if source == target {
@@ -91,11 +107,38 @@ pub(crate) fn save_after_asking(window: &adw::ApplicationWindow, source: Option<
     dialog.set_response_appearance("save", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
-    dialog.choose(Some(window), None::<&gio::Cancellable>, move |response| {
+    let (source_path, window) = (source.to_string(), window.clone());
+    let window_for_save = window.clone();
+    dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
         if response == "save" {
-            save();
+            let fresh = decks_core::loss::content_a_save_drops(&source_path);
+            if fresh.has_hard_errors() {
+                let details = fresh.features.iter()
+                    .filter(|f| f.disposition == suite_common::interop::FeatureDisposition::HardError)
+                    .map(|f| f.detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                show_inspection_failure(&window_for_save, &details);
+            } else {
+                let now: Vec<(String, String, String)> = fresh.destructive_features().iter()
+                    .map(|f| (f.id.clone(), f.location.clone(), f.detail.clone())).collect();
+                if now == consented {
+                    save();
+                } else {
+                    show_source_changed(&window_for_save);
+                }
+            }
         }
     });
+}
+
+fn show_source_changed(window: &adw::ApplicationWindow) {
+    let body = suite_common::i18n("The original file changed while the question was open, so the listed content may no longer match. Nothing was saved. Try saving again to review what changed.");
+    let dialog = adw::AlertDialog::new(Some(&suite_common::i18n("Source Changed")), Some(&body));
+    dialog.add_response("ok", &suite_common::i18n("_OK"));
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+    dialog.present(Some(window));
 }
 
 fn show_inspection_failure(window: &adw::ApplicationWindow, details: &str) {
