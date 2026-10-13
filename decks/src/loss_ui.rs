@@ -189,9 +189,11 @@ pub(crate) fn save_after_asking_with_context(
     let revision = controller.revision();
     let overwrites =
         source.is_some_and(|s| s == target) || controller.provenance_source_matches(target);
-    // A missing or replaced source never authorizes overwriting the
-    // original: an unverified copy to a fresh destination, or nothing.
-    if matches!(state, SourceState::Missing | SourceState::Replaced) && overwrites {
+    // A missing or replaced source never authorizes an ordinary save: any
+    // write is an unverified copy to a fresh destination, or nothing. The
+    // copy flow re-checks destination freshness live, so overwriting and
+    // fresh-target saves both route through it.
+    if matches!(state, SourceState::Missing | SourceState::Replaced) {
         return save_or_block_unverified_copy(
             window,
             &controller,
