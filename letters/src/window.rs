@@ -765,7 +765,13 @@ impl LettersWindow {
         }
         apply_page_setup_from_buffer(&container, &buf);
         let td = TabData::new();
-        td.0.borrow_mut().file = Some(std::path::PathBuf::from(path));
+        {
+            let mut session = td.0.borrow_mut();
+            session.file = Some(std::path::PathBuf::from(path));
+            // Pin carried parts + loss findings to the revision just loaded;
+            // the save path reuses this instead of re-reading the live file (LET-001).
+            session.set_import_context(crate::bridge::import_context_for(path));
+        }
         tab_data_set(&container, td);
         let page = self.tab_view.append(&container);
         let name = std::path::Path::new(path)
@@ -819,6 +825,15 @@ impl LettersWindow {
 
             let td = TabData::new();
             td.0.borrow_mut().file = meta.original_path.clone();
+            // A recovered tab's content comes from the snapshot, but its
+            // unmodelled parts, if any are still recoverable, live in the original
+            // path as it reads now — pin to that, so a save neither warns about
+            // bytes from before the crash nor carries them silently (LET-001).
+            if let Some(original) = meta.original_path.as_ref() {
+                td.0.borrow_mut().set_import_context(crate::bridge::import_context_for(
+                    &original.to_string_lossy(),
+                ));
+            }
             // See AutosaveSlot::adopt_recovered for why this precedes the
             // clear. It mattered most here: Letters shipped with its autosave
             // timer switched off, so "the next tick will re-snapshot it" was
@@ -929,7 +944,13 @@ impl LettersWindow {
                             }
                             apply_page_setup_from_buffer(&container, &buf);
                             let td = TabData::new();
-                            td.0.borrow_mut().file = Some(path);
+                            {
+                                let mut session = td.0.borrow_mut();
+                                session.set_import_context(crate::bridge::import_context_for(
+                                    &path.to_string_lossy(),
+                                ));
+                                session.file = Some(path);
+                            }
                             tab_data_set(&container, td);
                             let page = tv.append(&container);
                             page.set_title(&name);
