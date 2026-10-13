@@ -108,6 +108,7 @@ pub(crate) fn save_after_asking(window: &adw::ApplicationWindow, source: Option<
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
     let (source_path, window) = (source.to_string(), window.clone());
+    let window_for_save = window.clone();
     dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
         if response == "save" {
             let fresh = decks_core::loss::content_a_save_drops(&source_path);
@@ -117,14 +118,14 @@ pub(crate) fn save_after_asking(window: &adw::ApplicationWindow, source: Option<
                     .map(|f| f.detail.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                show_inspection_failure(&window, &details);
+                show_inspection_failure(&window_for_save, &details);
             } else {
                 let now: Vec<(String, String, String)> = fresh.destructive_features().iter()
                     .map(|f| (f.id.clone(), f.location.clone(), f.detail.clone())).collect();
                 if now == consented {
                     save();
                 } else {
-                    show_source_changed(&window);
+                    show_source_changed(&window_for_save);
                 }
             }
         }
