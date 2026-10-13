@@ -5407,6 +5407,63 @@ class DecksMagicMovePreviewSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "decks crashed previewing Magic Move")
 
 
+class DecksMissingMediaPreflightSmoke(BaseGUITestCase):
+    """A real inserted image disappears before presenting: no show window
+    opens without explicit consent. Only file selection uses the existing
+    test picker; the warning and its responses are exercised through AT-SPI."""
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-missing-media-")
+        directory = self.temp_dir(prefix="decks-missing-media-")
+        self._picture = os.path.join(directory, "missing-artwork.png")
+        picker = os.path.join(directory, "pick")
+        from PIL import Image
+        Image.new("RGB", (40, 20), (200, 40, 40)).save(self._picture, "PNG")
+        with open(picker, "w") as f:
+            f.write(self._picture)
+        self.launch_env = {**getattr(self, "launch_env", {}),
+                           "GTK_OFFICE_TEST_MODE": "1", "GTK_OFFICE_TEST_PICK": picker}
+        super().setUp()
+        self.gapplication_action(self.AID, "new-document")
+        self.gapplication_action(self.AID, "add-image")
+        self.wait_until(
+            lambda: self.trigger_snapshot(self.AID)["slides"][0]["objects"],
+            lambda objects: len(objects) == 1 and objects[0]["kind"] == "Image"
+            and "picture:missing" not in objects[0]["detail"],
+            description="the real image to be inserted before its file disappears")
+        os.unlink(self._picture)
+
+    def _texts(self):
+        return [n.name for n in self.app.findChildren(lambda n: n.roleName == "label")]
+
+    def _frames(self):
+        return [n.name for n in self.app.findChildren(lambda n: n.roleName == "frame")]
+
+    def test_cancel_keeps_show_closed_and_continue_opens_it(self):
+        for attempt in range(2):
+            self.gapplication_action(self.AID, "present")
+            self.wait_until(self._texts,
+                            lambda texts: any("Slide 1: " + self._picture in (t or "") for t in texts),
+                            description="the missing image warning with its slide and path")
+            self.assertNotIn("Slide Show", self._frames(), "audience opened before consent")
+            if attempt == 0:
+                self.app.child(name="Cancel", roleName="push button").do_action(0)
+                self.wait_until(self._texts,
+                                lambda texts: not any(self._picture in (t or "") for t in texts),
+                                description="Cancel to dismiss the preflight")
+                self.assertNotIn("Slide Show", self._frames(), "Cancel opened the audience")
+                self.assertEqual(self.trigger_snapshot(self.AID)["slides"][0]["objects"][0]["kind"], "Image",
+                                 "Cancel must not remove the missing image from the document")
+            else:
+                self.app.child(name="Continue Anyway", roleName="push button").do_action(0)
+                self.wait_until(self._frames, lambda frames: "Slide Show" in frames,
+                                description="explicit consent to open the audience")
+        self.assertIsNone(self.process.poll(), "decks crashed during missing-image preflight")
+
+
 class DecksPresenterDisplaySmoke(BaseGUITestCase):
     """The presenter display (DESIGN-UI.md, "Presenter display"): rehearsing
     a two-slide deck opens it on the one monitor the test display has, with
@@ -6101,6 +6158,166 @@ class DecksUnsupportedContentSmoke(BaseGUITestCase):
         self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
         self.assertIsNotNone(self.wait_for_process_exit(), "Save Anyway saved and closed")
         self.assertNotEqual(self._bytes(), self._original, "Save Anyway wrote the file")
+
+
+class DecksSourceInspectionSmoke(BaseGUITestCase):
+    """Failed source inspection must not silently authorize destructive saves.
+
+    Save and close-guard Save preserve source bytes and dirty edits; Save As
+    can recover the edits to a fresh file only with explicit unverified-copy
+    consent, including when the original is permanently missing.
+    """
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix="decks-source-inspection-")
+        self.isolate_snapshot(prefix="decks-source-inspection-snap-")
+        self.isolate_autosave_state()
+        self._doc = os.path.join(self._dir, "source.pptx")
+        self._original = minimal_pptx_bytes("keep my work")
+        with open(self._doc, "wb") as f:
+            f.write(self._original)
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _objects(self):
+        return self.trigger_snapshot(self.AID)["slides"][0]["objects"]
+
+    def _source_bytes(self):
+        if not os.path.exists(self._doc):
+            return None
+        with open(self._doc, "rb") as f:
+            return f.read()
+
+    def _exercise_blocked_save(self, entry):
+        self.wait_for_node(name="Slide canvas")
+        original_count = len(self._objects())
+        self.gapplication_action(self.AID, "add-shape")
+        edited = self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                                 description="the unsaved shape")
+        for missing in (False, True):
+            with self.subTest(missing=missing, entry=entry):
+                if missing:
+                    os.unlink(self._doc)
+                    expected = None
+                else:
+                    expected = b"damaged source: do not overwrite"
+                    with open(self._doc, "wb") as f:
+                        f.write(expected)
+                if entry == "close":
+                    self.app.child(name="Close", roleName="push button").do_action(0)
+                    self.wait_for_node(name="Save", roleName="push button").do_action(0)
+                else:
+                    self.gapplication_action(self.AID, "save-file")
+                self.wait_for_node(name="Could Not Save File")
+                self.wait_until(
+                    lambda: self.app.findChild(
+                        lambda n: n.showing and "Decks could not check the original file" in n.name,
+                        retry=False, requireResult=False),
+                    lambda n: n is not None, description="the source inspection failure explanation")
+                self.assertIsNone(self.app.findChild(
+                    lambda n: n.name == "Save Anyway" and n.showing, retry=False, requireResult=False),
+                    "an incomplete inspection must not offer a destructive override")
+                self.assertEqual(self._source_bytes(), expected, "the blocked save changed the source")
+                self.wait_for_node(name="OK", roleName="push button").do_action(0)
+                self.wait_until(
+                    lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                                retry=False, requireResult=False),
+                    lambda n: n is None, description="the error dialog to close")
+                self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+                assert_close_guard_asks(self)
+        with open(self._doc, "wb") as f:
+            f.write(self._original)
+        self.gapplication_action(self.AID, "save-file")
+        saved = self.wait_until(self._source_bytes, lambda data: data != self._original,
+                                description="the retained edit to save after source restoration")
+        self.assertEqual(DecksUnsupportedContentSmoke._shape_count(saved),
+                         DecksUnsupportedContentSmoke._shape_count(self._original) + 1)
+
+    def test_save_blocks_an_uninspectable_source(self):
+        self._exercise_blocked_save("save")
+
+    def _save_as(self, path):
+        from dogtail import tree
+        self.gapplication_action(self.AID, "save-file-as")
+        name = self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text",
+                                        retry=False, requireResult=False),
+            lambda n: n is not None, description="the Save As filename")
+        name.text = path
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+    def _recover_unverified_copy(self, missing):
+        self.wait_for_node(name="Slide canvas")
+        original_count = len(self._objects())
+        self.gapplication_action(self.AID, "add-shape")
+        edited = self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                                 description="the edit to recover")
+        if missing:
+            os.unlink(self._doc)
+            expected = None
+        else:
+            expected = b"damaged source: keep unchanged"
+            with open(self._doc, "wb") as f:
+                f.write(expected)
+        copy = os.path.join(self._dir, "recovered.pptx")
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Copy" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the recovery question to close")
+        self.assertFalse(os.path.exists(copy), "Cancel created an unverified copy")
+        self.assertEqual(self._source_bytes(), expected)
+        self.assertEqual(self._objects(), edited)
+        assert_close_guard_asks(self)
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy) and os.path.getsize(copy) > 0, bool,
+                        description="the explicitly approved recovery copy")
+        self.assertEqual(self._source_bytes(), expected, "recovery changed the original")
+        with open(copy, "rb") as f:
+            self.assertEqual(DecksUnsupportedContentSmoke._shape_count(f.read()),
+                             DecksUnsupportedContentSmoke._shape_count(self._original) + 1)
+        self.relaunch_app(launch_args=[copy])
+        self.wait_for_node(name="Slide canvas")
+        self.wait_until(self._objects, lambda objects: len(objects) == len(edited),
+                        description="the recovered edits to reopen")
+
+    def test_save_as_recovers_missing_source_only_with_consent(self):
+        self._recover_unverified_copy(missing=True)
+
+    def test_save_as_recovers_corrupt_source_without_replacing_it(self):
+        self._recover_unverified_copy(missing=False)
+
+    def test_recovery_rechecks_destination_after_confirmation(self):
+        self.wait_for_node(name="Slide canvas")
+        self.gapplication_action(self.AID, "add-shape")
+        os.unlink(self._doc)
+        copy = os.path.join(self._dir, "claimed.pptx")
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        claimed = b"another file appeared while confirmation was open"
+        with open(copy, "wb") as f:
+            f.write(claimed)
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
+        self.wait_for_node(name="Could Not Save File")
+        with open(copy, "rb") as f:
+            self.assertEqual(f.read(), claimed, "recovery overwrote a newly existing destination")
+        self.assertIsNone(self._source_bytes(), "recovery recreated the original")
+        self.wait_for_node(name="OK", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the error dialog to close")
+        assert_close_guard_asks(self)
+
+    def test_close_guard_save_blocks_an_uninspectable_source(self):
+        self._exercise_blocked_save("close")
 
 
 class DecksExportSmoke(BaseGUITestCase):

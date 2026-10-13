@@ -7,7 +7,8 @@
 //! emphasis and motion-path animations, and pictures the file names but
 //! does not contain. decks-readiness.md asks that such content be
 //! "preserved or blocked/warned by #374 before save"; this finds it, as a
-//! `CompatibilityReport` of `WarnOnLoss` features, so the window can ask
+//! `CompatibilityReport` of `WarnOnLoss` features (or `HardError` when
+//! inspection fails), so the window can ask
 //! before writing (`decks/src/loss_ui.rs`), as Letters does for a format
 //! that can't hold what a document has.
 //!
@@ -34,27 +35,78 @@ fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location:
 }
 
 /// The content of the presentation at `path` that a save of the deck read
-/// from it would lose. Empty for a file Decks wrote, a file that isn't
-/// there, and anything that isn't a pptx or odp package.
+/// from it would lose. A source that cannot be inspected blocks ordinary
+/// saving: missing is not a new document, whose caller has no source.
+/// A separately confirmed recovery copy does not claim to preserve source
+/// content. This is a bounded lexical scan, not full package/XML validation.
 pub fn content_a_save_drops(path: &str) -> CompatibilityReport {
+    content_a_save_drops_with_budget(path, &mut ZipBudget::default())
+}
+
+/// Whether an explicitly unverified recovery copy has a fresh destination,
+/// distinct from the source. Never replace an existing entry, including a
+/// symlink; canonical parent directories also catch aliases of a missing
+/// source. Call again after confirmation, before writing.
+pub fn can_save_unverified_copy(source: &str, target: &str) -> bool {
+    use std::path::Path;
+    let source = Path::new(source);
+    let target = Path::new(target);
+    if !matches!(std::fs::symlink_metadata(target), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return false;
+    }
+    let location = |path: &Path| {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let name = path.file_name().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        std::fs::canonicalize(parent).map(|parent| parent.join(name))
+    };
+    let Ok(target) = location(target) else { return false };
+    // A dangling source symlink could name the proposed destination.
+    match std::fs::symlink_metadata(source) {
+        Ok(metadata) if metadata.file_type().is_symlink() =>
+            std::fs::canonicalize(source).is_ok_and(|source| source != target),
+        Ok(_) => location(source).is_ok_and(|source| source != target),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match location(source) {
+            Ok(source) => source != target,
+            // The source's parent has disappeared; it cannot be the fresh
+            // target in the existing parent directory established above.
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        },
+        Err(_) => false,
+    }
+}
+
+fn content_a_save_drops_with_budget(path: &str, budget: &mut ZipBudget) -> CompatibilityReport {
     let odp = path.to_lowercase().ends_with(".odp");
     let mut report = CompatibilityReport::new(if odp { "odp" } else { "pptx" });
-    let Ok(file) = std::fs::File::open(path) else { return report };
-    let Ok(mut zip) = zip::ZipArchive::new(file) else { return report };
-    let mut budget = ZipBudget::default();
-    if budget.check_entry_count(zip.len()).is_err() {
-        return report;
-    }
-    let names: BTreeSet<String> = zip.file_names().map(str::to_string).collect();
-    if odp {
-        odp_drops(&mut zip, &names, &mut budget, &mut report);
-    } else {
-        pptx_drops(&mut zip, &names, &mut budget, &mut report);
+    if let Err(detail) = inspect_source(path, odp, budget, &mut report) {
+        report.record(UnsupportedFeature::new(
+            "source-inspection-failed",
+            "Source content could not be checked",
+            path,
+            FeatureDisposition::HardError,
+            detail,
+        ));
     }
     report
 }
 
-fn pptx_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTreeSet<String>, budget: &mut ZipBudget, report: &mut CompatibilityReport) {
+fn inspect_source(path: &str, odp: bool, budget: &mut ZipBudget, report: &mut CompatibilityReport) -> Result<(), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open source: {e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("read source package: {e}"))?;
+    budget.check_entry_count(zip.len())?;
+    let names: BTreeSet<String> = zip.file_names().map(str::to_string).collect();
+    if odp {
+        odp_drops(&mut zip, &names, budget, report)
+    } else {
+        pptx_drops(&mut zip, &names, budget, report)
+    }
+}
+
+fn scan_part<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str, budget: &mut ZipBudget) -> Result<String, String> {
+    zip.part_to_string(name, budget).map_err(|e| format!("inspect {name}: {e}"))
+}
+
+fn pptx_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTreeSet<String>, budget: &mut ZipBudget, report: &mut CompatibilityReport) -> Result<(), String> {
     // Comment parts themselves: PowerPoint writes an authors list
     // (ppt/authors.xml, ppt/commentAuthors.xml) into decks with no comments.
     if names.iter().any(|n| n.starts_with("ppt/comments/") && n.ends_with(".xml")) {
@@ -63,30 +115,35 @@ fn pptx_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTr
     if names.iter().any(|n| n.starts_with("ppt/diagrams/")) {
         record(report, SMARTART, "ppt/diagrams", "SmartArt is not kept");
     }
-    let slides: Vec<String> = names.iter().filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml")).cloned().collect();
-    for slide in slides {
-        let xml = zip.optional_part_to_string(&slide, budget);
+    for slide in names.iter().filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml")) {
+        let xml = scan_part(zip, slide, budget)?;
         if xml.contains("<a:videoFile") || xml.contains("<a:audioFile") || xml.contains("<p14:media") {
-            record(report, MEDIA, &slide, "audio and video are not kept");
+            record(report, MEDIA, slide, "audio and video are not kept");
         }
         if xml.contains("<p:oleObj") {
-            record(report, OLE, &slide, "embedded objects are not kept");
+            record(report, OLE, slide, "embedded objects are not kept");
         }
         if xml.contains("presetClass=\"emph\"") || xml.contains("presetClass=\"path\"") {
-            record(report, ANIMATION, &slide, "only entrance and exit builds are kept");
+            record(report, ANIMATION, slide, "only entrance and exit builds are kept");
         }
         let rels = slide.replacen("ppt/slides/", "ppt/slides/_rels/", 1) + ".rels";
-        let rels_xml = zip.optional_part_to_string(&rels, budget);
+        // A slide need not have relationships. If the part exists, failure
+        // to inspect it is not evidence that all its pictures are present.
+        if !names.contains(&rels) {
+            continue;
+        }
+        let rels_xml = scan_part(zip, &rels, budget)?;
         for target in internal_targets(&rels_xml, "/image") {
             if !names.contains(&resolve("ppt/slides", &target)) {
-                record(report, MISSING, &slide, &format!("{target} is not in the file"));
+                record(report, MISSING, slide, &format!("{target} is not in the file"));
             }
         }
     }
+    Ok(())
 }
 
-fn odp_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTreeSet<String>, budget: &mut ZipBudget, report: &mut CompatibilityReport) {
-    let content = zip.optional_part_to_string("content.xml", budget);
+fn odp_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTreeSet<String>, budget: &mut ZipBudget, report: &mut CompatibilityReport) -> Result<(), String> {
+    let content = scan_part(zip, "content.xml", budget)?;
     if content.contains("<officeooo:annotation") || content.contains("<office:annotation") {
         record(report, COMMENTS, "content.xml", "comments on slides are not kept");
     }
@@ -105,6 +162,7 @@ fn odp_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTre
             record(report, MISSING, "content.xml", &format!("{href} is not in the file"));
         }
     }
+    Ok(())
 }
 
 /// The values of `attr` on every `element` start tag in `xml`.
@@ -187,6 +245,173 @@ mod tests {
         v
     }
 
+    fn assert_inspection_blocked(report: &CompatibilityReport, detail: &str) {
+        let failure = report.features.iter().find(|f| f.id == "source-inspection-failed")
+            .expect("a failed source scan must not claim the save is clean");
+        assert_eq!(failure.disposition, FeatureDisposition::HardError);
+        assert!(failure.detail.contains(detail), "{}", failure.detail);
+        assert!(report.validate_save(false).is_err());
+        assert!(report.validate_save(true).is_err(), "Save Anyway must not override a failed inspection");
+    }
+
+    #[test]
+    fn missing_or_corrupt_sources_block_even_confirmed_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        for ext in ["pptx", "odp"] {
+            let path = dir.path().join(format!("source.{ext}"));
+            assert_inspection_blocked(&content_a_save_drops(path.to_str().unwrap()), "open source");
+            std::fs::write(&path, b"not a ZIP package").unwrap();
+            assert_inspection_blocked(&content_a_save_drops(path.to_str().unwrap()), "read source package");
+        }
+    }
+
+    #[test]
+    fn recovery_copy_requires_a_fresh_distinct_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pptx");
+        let copy = dir.path().join("copy.pptx");
+        let allowed = |target: &std::path::Path| can_save_unverified_copy(source.to_str().unwrap(), target.to_str().unwrap());
+        assert!(!allowed(&source), "a missing source is not a copy destination");
+        assert!(!allowed(&dir.path().join(".").join("source.pptx")));
+        assert!(allowed(&copy), "a missing source can be recovered to a fresh name");
+        std::fs::write(&source, b"corrupt source").unwrap();
+        assert!(allowed(&copy));
+        std::fs::write(&copy, b"existing destination").unwrap();
+        assert!(!allowed(&copy), "recovery must not overwrite another file");
+    }
+
+    #[test]
+    fn recovery_copy_handles_relative_sources_and_deleted_parent_directories() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let source = dir.path().join("source.pptx");
+        let absolute_source = std::fs::canonicalize(dir.path()).unwrap().join("source.pptx");
+        assert!(!can_save_unverified_copy(source.to_str().unwrap(), absolute_source.to_str().unwrap()));
+        let missing_parent_source = dir.path().join("deleted-directory").join("source.pptx");
+        let copy = dir.path().join("copy.pptx");
+        assert!(can_save_unverified_copy(missing_parent_source.to_str().unwrap(), copy.to_str().unwrap()));
+        assert!(!can_save_unverified_copy(source.to_str().unwrap(), missing_parent_source.to_str().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_copy_rejects_symlink_and_hardlink_aliases() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.pptx");
+        let alias_dir = dir.path().join("alias");
+        symlink(dir.path(), &alias_dir).unwrap();
+        assert!(!can_save_unverified_copy(source.to_str().unwrap(), alias_dir.join("source.pptx").to_str().unwrap()));
+        let link = dir.path().join("link.pptx");
+        symlink(&source, &link).unwrap();
+        assert!(!can_save_unverified_copy(source.to_str().unwrap(), link.to_str().unwrap()));
+        assert!(!can_save_unverified_copy(link.to_str().unwrap(), source.to_str().unwrap()));
+        std::fs::write(&source, b"source").unwrap();
+        let hardlink = dir.path().join("hardlink.pptx");
+        std::fs::hard_link(&source, &hardlink).unwrap();
+        assert!(!can_save_unverified_copy(source.to_str().unwrap(), hardlink.to_str().unwrap()));
+    }
+
+    #[test]
+    fn missing_required_odp_content_blocks_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-content.odp");
+        package(&path, &[("mimetype", "application/vnd.oasis.opendocument.presentation")]);
+        assert_inspection_blocked(&content_a_save_drops(path.to_str().unwrap()), "content.xml: missing");
+    }
+
+    #[test]
+    fn absent_optional_slide_relationships_are_not_a_scan_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-relationships.pptx");
+        package(&path, &[("ppt/slides/slide1.xml", "<p:sld/>")]);
+        assert!(content_a_save_drops(path.to_str().unwrap()).validate_save(false).is_ok());
+    }
+
+    #[test]
+    fn corrupt_relevant_parts_block_saving_instead_of_becoming_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        for (ext, part) in [
+            ("odp", "content.xml"),
+            ("pptx", "ppt/slides/slide1.xml"),
+            ("pptx", "ppt/slides/_rels/slide1.xml.rels"),
+        ] {
+            let path = dir.path().join(format!("corrupt.{ext}"));
+            for invalid_utf8 in [false, true] {
+                let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+                let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+                if part.ends_with(".rels") {
+                    writer.start_file("ppt/slides/slide1.xml", options).unwrap();
+                    writer.write_all(b"<p:sld/>").unwrap();
+                }
+                writer.start_file(part, options).unwrap();
+                writer.write_all(if invalid_utf8 { b"\xff" } else { b"corrupt-me" }).unwrap();
+                writer.finish().unwrap();
+                if !invalid_utf8 {
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    let offset = bytes.windows(b"corrupt-me".len()).position(|s| s == b"corrupt-me").unwrap();
+                    bytes[offset] ^= 1; // Leave the stored CRC unchanged.
+                    std::fs::write(&path, bytes).unwrap();
+                }
+                assert_inspection_blocked(&content_a_save_drops(path.to_str().unwrap()), part);
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_relevant_parts_block_saving() {
+        use suite_common_core::zip_guard::ZipLimits;
+        let dir = tempfile::tempdir().unwrap();
+        for (ext, part) in [
+            ("odp", "content.xml"),
+            ("pptx", "ppt/slides/slide1.xml"),
+            ("pptx", "ppt/slides/_rels/slide1.xml.rels"),
+        ] {
+            let path = dir.path().join(format!("oversized.{ext}"));
+            let large = " ".repeat(65);
+            let mut parts = vec![(part, large.as_str())];
+            if part.ends_with(".rels") {
+                parts.push(("ppt/slides/slide1.xml", "<p:sld/>"));
+            }
+            package(&path, &parts);
+            let mut budget = ZipBudget::new(ZipLimits { max_entry_bytes: 64, ..ZipLimits::default() });
+            let report = content_a_save_drops_with_budget(path.to_str().unwrap(), &mut budget);
+            assert_inspection_blocked(&report, part);
+            assert_inspection_blocked(&report, "byte limit");
+        }
+    }
+
+    #[test]
+    fn entry_count_and_total_scan_budgets_block_saving() {
+        use suite_common_core::zip_guard::ZipLimits;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("over-budget.pptx");
+        package(&path, &[
+            ("ppt/slides/slide1.xml", "<p:sld/>"),
+            ("ppt/slides/slide2.xml", "<p:sld/>"),
+        ]);
+        let mut count = ZipBudget::new(ZipLimits { max_entries: 1, ..ZipLimits::default() });
+        assert_inspection_blocked(&content_a_save_drops_with_budget(path.to_str().unwrap(), &mut count), "members");
+        let mut total = ZipBudget::new(ZipLimits { max_total_bytes: 12, ..ZipLimits::default() });
+        assert_inspection_blocked(&content_a_save_drops_with_budget(path.to_str().unwrap(), &mut total), "byte total");
+    }
+
+    #[test]
+    fn scan_failure_does_not_discard_losses_already_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comments-and-broken-slide.pptx");
+        package(&path, &[
+            ("ppt/comments/comment1.xml", "<p:cmLst/>"),
+            ("ppt/slides/slide1.xml", "<p:sld/>"),
+        ]);
+        let mut budget = ZipBudget::new(suite_common_core::zip_guard::ZipLimits {
+            max_entry_bytes: 1,
+            ..Default::default()
+        });
+        let report = content_a_save_drops_with_budget(path.to_str().unwrap(), &mut budget);
+        assert_eq!(ids(&report), ["comments", "source-inspection-failed"]);
+        assert_inspection_blocked(&report, "ppt/slides/slide1.xml");
+    }
+
     #[test]
     fn a_deck_decks_wrote_loses_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -207,7 +432,6 @@ mod tests {
             assert!(r.features.is_empty(), "{ext}: {:?}", r.features);
             assert!(!r.requires_confirmation());
         }
-        assert!(content_a_save_drops(dir.path().join("none.pptx").to_str().unwrap()).features.is_empty());
     }
 
     #[test]
