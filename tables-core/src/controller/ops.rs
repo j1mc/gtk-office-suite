@@ -616,14 +616,15 @@ impl suite_common_core::ops::Op for Op {
     }
 }
 
-/// Apply `op` and return the ops that undo it.
+/// Trusted replay primitive: apply `op` and return its inverse. Does not
+/// authorize user edits; those must enter through `WorkbookController::apply_ops`.
 pub fn apply(state: &mut WorkbookState, op: &Op) -> Result<Vec<Op>, String> {
     suite_common_core::ops::Op::apply(op, state)
 }
 
-/// Apply `ops` in order, all or nothing: if one fails, the ones before it
-/// are undone and the error returned. On success, the ops that undo the
-/// whole group, in the order to apply them.
+/// Trusted replay/recovery primitive, also used by history: apply `ops` in
+/// order, all or nothing, returning their inverse. Protection is deliberately
+/// checked only at `WorkbookController::apply_ops`, never during restoration.
 pub fn apply_all(state: &mut WorkbookState, ops: &[Op]) -> Result<Vec<Op>, String> {
     suite_common_core::ops::apply_all(state, ops)
 }
@@ -655,10 +656,11 @@ pub(super) fn show_changed_sheet(state: &mut WorkbookState, ops: &[Op]) {
 }
 
 impl super::core::WorkbookController {
-    /// Apply `ops` as one undo step named `description`, all or nothing.
-    /// Returns false (and records nothing) when the group doesn't apply.
+    /// Authorize a user operation against the pre-operation protection state,
+    /// then apply it as one undo step. A rejected group changes neither model,
+    /// engine, active sheet, dirty flag nor history (including redo).
     pub fn apply_ops(&mut self, description: impl Into<String>, ops: Vec<Op>) -> bool {
-        if ops.is_empty() {
+        if ops.is_empty() || !self.authorize_ops(&ops) {
             return false;
         }
         let applied = {
@@ -672,6 +674,18 @@ impl super::core::WorkbookController {
         let Ok(inverses) = applied else { return false };
         self.record(description.into(), inverses);
         true
+    }
+
+    /// Authorize a resize gesture before the view changes any preview size.
+    /// `record_resize` checks again at commit and restores the old size if
+    /// protection changed while dragging.
+    pub fn begin_resize(&mut self) -> bool {
+        if self.sheet_is_protected() {
+            self.protection_rejections = self.protection_rejections.wrapping_add(1);
+            false
+        } else {
+            true
+        }
     }
 
     /// Record a row or column resize the user has already dragged to

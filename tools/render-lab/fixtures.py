@@ -562,6 +562,23 @@ def tables():
     save(wb, "values", "A 5x4 block of integers, right-aligned in their cells")
 
     wb, ws = book()
+    pivot_rows = [
+        ("Region", "Apparel - Sum of Sales", "Electronics - Sum of Sales"),
+        ("North", 50, 100),
+        ("South", 0, 200),
+    ]
+    for row_index, row in enumerate(pivot_rows, start=1):
+        for col_index, value in enumerate(row, start=1):
+            ws.cell(row_index, col_index, value)
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 27
+    save(
+        wb,
+        "pivot-crosstab",
+        "A column-field pivot output: North and South sales by Apparel and Electronics",
+    )
+
+    wb, ws = book()
     # Name the face and size, as Excel and Calc always do. openpyxl's bare
     # Font(bold=True) writes a <font> with no name, which Calc draws in its
     # own serif fallback: that measured the fallback, not the style.
@@ -614,6 +631,14 @@ def tables():
     ws["A1"].alignment = Alignment(wrap_text=True)
     ws.column_dimensions["A"].width = 12
     save(wb, "wrap-text", "A1 text wraps onto several lines; row 1 grows")
+
+    wb, ws = book()
+    ws["A1"] = "A merged cell with wrapped text needs the combined width of its columns to fit its row."
+    ws.merge_cells("A1:B1")
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 12
+    save(wb, "wrap-merged", "Wrapped text across merged columns; row height follows the combined column width")
 
     wb, ws = book()
     ws.column_dimensions["B"].width = 40

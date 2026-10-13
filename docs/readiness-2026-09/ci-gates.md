@@ -43,26 +43,16 @@ Reuse this issue for validator-test wiring, coordinated with #241 (GTK execution
       reasons now are too, and collecting them could not be done the
       obvious way. See [below](#the-skips-a-junit-report-cannot-show).
 - [ ] Wire corpus validation, parity validation, validator self-tests and
-      release contract into required checks — three of the four run on
-      every pull request; whether they are *required* is a
-      branch-protection setting, which the repository cannot read — but a
-      failed run can. A `Screenshots` dispatch on `955f628` tried to push
-      its refresh to `main` and was refused:
-
-      ```
-      remote: error: GH006: Protected branch update failed for refs/heads/main.
-      remote: - Required status check "test" is expected.
-      ```
-
-      So `test` **is** required, observed rather than assumed, and the
-      setting announces itself to anything that tries to bypass it. The
-      other three are still unknown by the same argument, and nothing here
-      tries to push to `main` to find out. (The deadlock that run hit — a
-      `[skip ci]` commit needing the check it forbade — is fixed
-      separately; this entry is only about what it proved.) The
-      release contract is the exception and it is worse than unrequired:
-      `release-gate.yml` triggers only on a path list, so ordinary pull
-      requests never run it.
+      release contract into required checks — the required-check configuration
+      was directly inspected through GitHub's branch-protection API on
+      2026-10-13: only `test` is required; `required_pull_request_reviews` is
+      null and `enforce_admins` is false. `Python validators and their tests`,
+      `interop-corpus`, and `RustSec advisory gate` run but are not required.
+      `release-gate.yml` still has a PR path filter, so its contract check is
+      absent from ordinary PRs. No settings were changed: making the failing
+      RustSec gate required would intentionally block non-admin merges until
+      #1549 is resolved. The existing `test` requirement was also observed
+      directly, not inferred from the repository's YAML.
       That list used to omit the very files the gate polices. It enforces
       per-module line ceilings — `letters/src/window.rs`,
       `tables/src/window.rs`, `decks/src/window.rs`,

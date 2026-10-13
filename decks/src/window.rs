@@ -1071,7 +1071,7 @@ impl DecksWindow {
             controller: &controller,
             refresh_hud: &refresh_hud,
             transition: &transition,
-        });
+        }, &canvas_overlay);
 
         // Pointer interaction on the canvas lives in canvas_input.rs.
         crate::canvas_input::register_canvas_pointer_input(

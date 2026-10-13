@@ -218,6 +218,15 @@ impl WorkbookController {
     pub fn sort_column(&mut self, col: usize, direction: SortDirection) {
         use SortDirection::Ascending;
 
+        let (sheet, start, rows, cols) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            (sheet.sheet_id, sheet.frozen_rows.min(sheet.rows), sheet.rows, sheet.cols)
+        };
+        if !self.authorize_cells(sheet, (start..rows).flat_map(|r| (0..cols).map(move |c| (r, c)))) {
+            return;
+        }
+
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
         let before_sheet = state.sheet().clone();

@@ -77,7 +77,9 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
         let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
         b.connect_clicked(move |_| {
             popover.popdown();
-            ctl.borrow_mut().sort_column(col, direction);
+            if !crate::sheet_actions::apply(&ctl, &grid, |c| c.sort_column(col, direction)) {
+                return;
+            }
             refresh();
             grid.queue_draw();
         });
@@ -105,6 +107,7 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
             check.set_active(v.shown);
             check.update_property(&[gtk::accessible::Property::Label(&shown_as)]);
             let (ctl, grid, refresh, hidden, text) = (ctl.clone(), grid.clone(), refresh.clone(), hidden.clone(), v.text.clone());
+            let popover = popover.clone();
             check.connect_toggled(move |c| {
                 {
                     let mut h = hidden.borrow_mut();
@@ -114,7 +117,11 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
                         h.insert(text.clone());
                     }
                 }
-                ctl.borrow_mut().filter_column_values(col, &hidden.borrow());
+                if !crate::sheet_actions::apply(&ctl, &grid, |c| c.filter_column_values(col, &hidden.borrow())) {
+                    // Reopening rebuilds the checklist from the unchanged model.
+                    popover.popdown();
+                    return;
+                }
                 refresh();
                 grid.queue_draw();
             });
@@ -131,7 +138,7 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
         let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
         clear.connect_clicked(move |_| {
             popover.popdown();
-            ctl.borrow_mut().clear_filter();
+            crate::sheet_actions::apply(&ctl, &grid, |c| c.clear_filter());
             refresh();
             grid.queue_draw();
         });

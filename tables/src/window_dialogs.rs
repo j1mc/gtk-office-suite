@@ -91,14 +91,14 @@ pub(crate) fn show_format_cells_dialog(
                 5 => NumberFormatKind::Scientific(dp),
                 _ => NumberFormatKind::General,
             };
-            ctl.borrow_mut().mutate_sheet("Format Cells", move |sh| {
+            crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Format Cells", move |sh| {
                 let (r0, c0, r1, c1) = sh.selection_rect();
                 for r in r0..=r1 {
                     for c in c0..=c1 {
                         sh.formats[r][c] = NumberFormat::new(kind.clone());
                     }
                 }
-            });
+            }));
             refresh();
             da.queue_draw();
             dialog.close();
@@ -172,7 +172,7 @@ pub(crate) fn show_conditional_format_dialog(
                 (rgba.green() * 255.0) as u8,
                 (rgba.blue() * 255.0) as u8
             );
-            ctl.borrow_mut().mutate_sheet("Conditional Formatting", move |sheet| {
+            crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Conditional Formatting", move |sheet| {
                 let (r0, c0, r1, c1) = sheet.selection_rect();
                 sheet.cond_rules.push(CondRule {
                     range: (r0, c0, r1, c1),
@@ -181,7 +181,7 @@ pub(crate) fn show_conditional_format_dialog(
                     value2,
                     fill,
                 });
-            });
+            }));
             da.queue_draw();
             dlg.close();
         });
@@ -253,13 +253,15 @@ pub(crate) fn show_define_name_dialog(
 /// a dialog with no title and no Cancel, and one margin for all four sides.
 pub(crate) fn show_page_setup_dialog(
     controller: &Rc<RefCell<WorkbookController>>,
+    grid: &gtk4::DrawingArea,
     parent: Option<&adw::ApplicationWindow>,
 ) {
     let Some(parent) = parent else { return };
     let current = controller.borrow().state.borrow().sheet().page_setup.clone();
     let ctl = controller.clone();
+    let grid = grid.clone();
     suite_common::page_setup::show(parent, page_of(&current), move |page| {
-        ctl.borrow_mut().set_page_setup(setup_of(&page, current.scale));
+        crate::sheet_actions::apply(&ctl, &grid, |c| c.set_page_setup(setup_of(&page, current.scale)));
     });
 }
 
@@ -326,7 +328,7 @@ pub(crate) fn show_filter_dialog(
     let (ctl, da) = (controller.clone(), da.clone());
     prompt.present(parent, move |needle| {
         if let Some(needle) = needle {
-            ctl.borrow_mut().filter_by_value(col, &needle);
+            crate::sheet_actions::apply(&ctl, &da, |c| c.filter_by_value(col, &needle));
             da.queue_draw();
         }
     });

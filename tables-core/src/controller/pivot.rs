@@ -37,73 +37,100 @@ impl WorkbookController {
 
     pub fn evaluate_pivot_table(&self, pivot: &crate::sheet::PivotTableSpec) -> Vec<Vec<String>> {
         use crate::sheet::PivotAggFunc;
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
 
         let state = self.state.borrow();
         let sheet = state.sheet();
-        let (r0, c0, r1, c1) = pivot.source_range;
+        let (r0, _c0, r1, _c1) = pivot.source_range;
 
-        if r0 >= r1 || c0 > c1 {
+        if r0 >= r1 || pivot.data_fields.is_empty() || r0 >= sheet.data.len() {
             return vec![vec!["[Empty Pivot]".into()]];
         }
 
-        // Group rows by row_fields
-        let mut groups: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
-        for r in (r0 + 1)..=r1 {
-            let key: Vec<String> = pivot
-                .row_fields
-                .iter()
-                .map(|f| sheet.data[r].get(f.col_index).cloned().unwrap_or_default())
-                .collect();
-            groups.entry(key).or_default().push(r);
-        }
-
-        let mut grid = Vec::new();
-
-        // Header row
-        let mut header = Vec::new();
-        for f in &pivot.row_fields {
-            header.push(f.name.clone());
-        }
-        for d in &pivot.data_fields {
-            header.push(format!("{:?} of {}", d.func, d.name));
-        }
-        grid.push(header);
-
-        // Group summary rows
-        for (row_key, row_indices) in groups {
-            let mut line = row_key;
-            for df in &pivot.data_fields {
-                let values: Vec<f64> = row_indices
+        // Keep row and column categories ordered and aggregate each intersection
+        // from the source rows. `source_range` is inclusive; its first row is
+        // the header row and is not part of the data.
+        let mut groups: BTreeMap<Vec<String>, BTreeMap<Vec<String>, Vec<usize>>> = BTreeMap::new();
+        let mut column_keys = BTreeSet::new();
+        for r in (r0 + 1)..=r1.min(sheet.data.len() - 1) {
+            let key_for = |fields: &[crate::sheet::PivotField]| {
+                fields
                     .iter()
-                    .filter_map(|&r| {
+                    .map(|field| {
                         sheet.data[r]
-                            .get(df.col_index)
-                            .and_then(|v| v.parse::<f64>().ok())
+                            .get(field.col_index)
+                            .cloned()
+                            .unwrap_or_default()
                     })
-                    .collect();
+                    .collect::<Vec<_>>()
+            };
+            let row_key = key_for(&pivot.row_fields);
+            let column_key = key_for(&pivot.col_fields);
+            column_keys.insert(column_key.clone());
+            groups
+                .entry(row_key)
+                .or_default()
+                .entry(column_key)
+                .or_default()
+                .push(r);
+        }
 
-                let res = match df.func {
-                    PivotAggFunc::Sum => values.iter().sum::<f64>(),
-                    PivotAggFunc::Count => values.len() as f64,
-                    PivotAggFunc::Average => {
-                        if values.is_empty() {
-                            0.0
-                        } else {
+        // Without column fields, retain the traditional one-summary-column
+        // layout. With column fields, each category gets one column per value
+        // field, yielding a cross-tab rather than silently ignoring the fields.
+        if pivot.col_fields.is_empty() {
+            column_keys.insert(Vec::new());
+        }
+        let mut header: Vec<String> = pivot
+            .row_fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
+        for column_key in &column_keys {
+            for data_field in &pivot.data_fields {
+                let label = format!("{:?} of {}", data_field.func, data_field.name);
+                header.push(if column_key.is_empty() {
+                    label
+                } else {
+                    format!("{} - {}", column_key.join(" / "), label)
+                });
+            }
+        }
+        let mut grid = vec![header];
+
+        for (row_key, column_groups) in groups {
+            let mut line = row_key;
+            for column_key in &column_keys {
+                let row_indices = column_groups.get(column_key);
+                for data_field in &pivot.data_fields {
+                    let values: Vec<f64> = row_indices
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|&r| {
+                            sheet.data[r]
+                                .get(data_field.col_index)
+                                .and_then(|value| value.parse::<f64>().ok())
+                        })
+                        .collect();
+
+                    let result = match data_field.func {
+                        PivotAggFunc::Sum => values.iter().sum::<f64>(),
+                        PivotAggFunc::Count => values.len() as f64,
+                        PivotAggFunc::Average if !values.is_empty() => {
                             values.iter().sum::<f64>() / values.len() as f64
                         }
-                    }
-                    PivotAggFunc::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
-                    PivotAggFunc::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                };
-                let val_str = if res.is_infinite() {
-                    "0".into()
-                } else if res.fract() == 0.0 {
-                    (res as i64).to_string()
-                } else {
-                    format!("{:.2}", res)
-                };
-                line.push(val_str);
+                        PivotAggFunc::Average => 0.0,
+                        PivotAggFunc::Min => values.iter().copied().reduce(f64::min).unwrap_or(0.0),
+                        PivotAggFunc::Max => values.iter().copied().reduce(f64::max).unwrap_or(0.0),
+                    };
+                    line.push(if result == 0.0 {
+                        "0".into()
+                    } else if result.fract() == 0.0 {
+                        format!("{result:.0}")
+                    } else {
+                        format!("{result:.2}")
+                    });
+                }
             }
             grid.push(line);
         }

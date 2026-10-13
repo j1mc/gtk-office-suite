@@ -23,6 +23,72 @@
   ],
   "features": [
     {
+      "id": "tables.protection.compound-edit",
+      "app": "tables",
+      "issue": 1277,
+      "title": "Protected compound edits reject atomically with native feedback",
+      "scope": "Protected range paste, clear, sort and row/column edits preserve content and history; unprotect restores editing. Does not certify XLSX protection-permission persistence or workbook structure protection.",
+      "status": "verified",
+      "revision": "af1ef767c5cc8cc39ef13989f732073c1b41c38f",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::TablesSheetStructureSmoke::test_protected_range_paste_is_atomic_and_unprotect_restores_editing",
+          "tests/gui/test_smoke.py::TablesSheetStructureSmoke::test_protected_clear_sort_and_structural_actions_leave_no_history"
+        ]
+      }
+    },
+    {
+      "id": "decks.save.source-inspection",
+      "app": "decks",
+      "issue": 374,
+      "title": "Uninspectable sources block overwrite but permit explicit recovery copies",
+      "scope": "Missing/corrupt imported source: ordinary and close-guard saves blocked; fresh-path recovery requires consent and retains edits on reopen. Rechecks destination after consent; not atomic concurrent-writer exclusion or complete package preservation.",
+      "status": "verified",
+      "revision": "bfdf50d51cb80b21d594b3bbe57c275b69b3008b",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_blocks_an_uninspectable_source",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_close_guard_save_blocks_an_uninspectable_source",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_as_recovers_missing_source_only_with_consent",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_as_recovers_corrupt_source_without_replacing_it",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_recovery_rechecks_destination_after_confirmation"
+        ]
+      }
+    },
+    {
+      "id": "decks.present.missing-image-preflight",
+      "app": "decks",
+      "issue": 374,
+      "title": "Missing-image presentation warning allows cancel or explicit continuation",
+      "scope": "Removing an inserted image triggers native warning before audience window creation. Cancel retains document and keeps show closed; Continue Anyway opens show. Does not certify image decoding or monitor privacy.",
+      "status": "verified",
+      "revision": "bfdf50d51cb80b21d594b3bbe57c275b69b3008b",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksMissingMediaPreflightSmoke::test_cancel_keeps_show_closed_and_continue_opens_it"
+        ]
+      }
+    },
+    {
+      "id": "decks.text.inline-edit",
+      "app": "decks",
+      "issue": 1551,
+      "title": "Double-click text editing commits multiline text with undo and cancel",
+      "scope": "Accessible plain-text editor; Ctrl+Return commits, Escape discards; undo/redo restores text. Edited title survives PPTX save and reopen. Does not claim rich-text selection formatting.",
+      "status": "verified",
+      "revision": "fd7f33b73e640547943208c41381130fa563b597",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksInlineTextSmoke::test_multiline_commit_undo_and_cancel",
+          "tests/gui/test_edit_render.py::DecksEditRenderJourney::test_text_box_and_shape_save_and_reopen"
+        ]
+      }
+    },
+    {
       "id": "letters.tables.insert",
       "app": "letters",
       "title": "Insert Table places one table at the cursor",

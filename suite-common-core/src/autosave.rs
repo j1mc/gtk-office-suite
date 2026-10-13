@@ -8,10 +8,10 @@
 // bytes (already serialized by the app's own `*-core` write path) and get
 // opaque bytes back.
 //
-// There is deliberately no pidfile or lock file. A snapshot's mere presence
-// at launch, before this session has written anything, IS the crash signal:
-// a clean save or an explicit discard always clears its slot, so anything
-// still there was orphaned by a save that never happened.
+// There is no pidfile: each live window holds an advisory lock for its slot.
+// A leftover snapshot is recoverable only when no live owner holds that
+// lock. The kernel releases it on process death, so recovery needs no
+// cleanup path to decide whether a snapshot is orphaned.
 
 use crate::atomic_save::atomic_write_bytes;
 use std::fs;
@@ -794,6 +794,43 @@ mod tests {
     use super::*;
 
     use crate::atomic_save::fault;
+
+    /// Recovery depends on the slot exposing either the old complete
+    /// checkpoint or the new one, never bytes paired with stale identity.
+    /// Exercise the public slot operation, not only the lower-level writer.
+    #[cfg(unix)]
+    #[test]
+    fn injected_snapshot_write_failures_preserve_a_coherent_checkpoint() {
+        let old_meta = SnapshotMeta {
+            original_path: Some(PathBuf::from("/tmp/old.md")),
+            kind: "md".into(),
+        };
+        let new_meta = SnapshotMeta {
+            original_path: Some(PathBuf::from("/tmp/new.odt")),
+            kind: "odt".into(),
+        };
+
+        for boundary in fault::ALL {
+            let dir = tempfile::tempdir().unwrap();
+            let slot = AutosaveSlot::new(dir.path(), "doc-1");
+            slot.write(b"old checkpoint", &old_meta).unwrap();
+
+            let result = {
+                let _armed = fault::arm(boundary);
+                slot.write(b"new checkpoint", &new_meta)
+            };
+            assert!(result.is_err(), "{boundary:?} must report the injected failure");
+
+            let (bytes, meta) = slot.read().expect("a complete checkpoint must remain");
+            if boundary == fault::Boundary::SyncDir {
+                assert_eq!(bytes, b"new checkpoint");
+                assert_eq!(meta, new_meta);
+            } else {
+                assert_eq!(bytes, b"old checkpoint", "{boundary:?}");
+                assert_eq!(meta, old_meta, "{boundary:?}");
+            }
+        }
+    }
 
     /// The assumption the whole ownership design rests on: flock is per
     /// open file description, so a second descriptor conflicts even inside

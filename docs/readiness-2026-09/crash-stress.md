@@ -48,10 +48,11 @@ Controller state machines generate valid commands and assert invariants after ev
       crates with `STATEFUL_SEED_COUNT=400`, and `STATEFUL_SEED_BASE` derived from the run number — so each
       night covers a *different* 400 seeds rather than re-running the same ones, and the GUI campaign
       itself (`tests/gui/stress.py`) derives its ordering seed from the clock and records it.
-      **Still open, and the real remaining work: the release candidate.** Nothing runs a larger soak or the
-      complete display matrix at a tag, and nothing refuses to certify a release that lacks one —
-      `release-revision.yml` enforces that kind of rule for the LibreOffice oracle already, so the
-      precedent and the mechanism both exist; the stress campaign is simply not wired into it.
+      **Still open, and the real remaining work: the release candidate.** The scheduled `display-matrix` job now runs
+      separately in `gui-stress.yml`; its first green nightly was run 38236918898 on 2026-10-12 (image, matrix and
+      campaign all succeeded). That is one run, not the stated 20 consecutive nights. No larger soak or complete matrix
+      runs at a release tag, and release certification does not require them: `release-revision.yml` checks the
+      LibreOffice oracle but the stress campaign is not wired into it.
       Also open but not for want of mechanism: the GUI campaign has **no fixed regression seeds**, because
       no GUI campaign failure has been recorded to pin. Adding an arbitrary fixed seed to the pull-request
       gate would cost minutes per revision to re-run journeys in a shuffled order that never found
@@ -89,6 +90,7 @@ Controller state machines generate valid commands and assert invariants after ev
       in that attribute took the app down rather than losing its conditional formatting. Seed
       1015848, minimized to a 197-byte package in `tables-core/tests/crashes/`, which reproduces it
       in 0.98s where the campaign needed 19s.
+      At the slot layer, `injected_snapshot_write_failures_preserve_a_coherent_checkpoint` exercises `AutosaveSlot::write` at all six boundaries: pre-rename failures retain the old bytes and metadata, while a post-rename directory-sync error exposes the complete new checkpoint.
 - [x] Always retain stderr/backtrace, core dump where supported, screenshot, AT-SPI tree, last snapshot, action trace
       and saved output fixtures on failure. The harness captured six of these, and captured **none of them for the one
       class of failure where they matter most**: unittest skips `tearDown` when `setUp` raises, the app is launched *in*

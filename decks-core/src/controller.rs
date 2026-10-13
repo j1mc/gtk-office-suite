@@ -315,9 +315,35 @@ impl DecksController {
         });
     }
 
+    /// Replace the changed span, keeping the surrounding run and paragraph
+    /// styles. The canonical object, not the caller's old text, owns undo.
     pub fn change_text(&self, slide_idx: usize, index: usize, _old_text: String, new_text: String) {
         self.edit_objects(slide_idx, |o| {
-            if let Some(SlideObject::TextBox { text, .. }) = o.get_mut(index) {
+            if let Some(SlideObject::TextBox { text, runs, body, .. }) = o.get_mut(index) {
+                if *text == new_text {
+                    return;
+                }
+                let start: usize = text.chars().zip(new_text.chars())
+                    .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+                let suffix: usize = text[start..].chars().rev().zip(new_text[start..].chars().rev())
+                    .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+                let end = text.len() - suffix;
+                let replacement = &new_text[start..new_text.len() - suffix];
+                if !runs.is_empty() {
+                    replace_run_text(runs, start, end, replacement);
+                }
+                let first_para = text[..start].bytes().filter(|b| *b == b'\n').count();
+                let removed_breaks = text[start..end].bytes().filter(|b| *b == b'\n').count();
+                let added_breaks = replacement.bytes().filter(|b| *b == b'\n').count();
+                if !body.paras.is_empty() && (removed_breaks != 0 || added_breaks != 0) {
+                    let mut paras: Vec<_> = (0..text.split('\n').count()).map(|i| body.para(i)).collect();
+                    let inherited = paras[first_para].clone();
+                    paras.splice(
+                        first_para + 1..first_para + removed_breaks + 1,
+                        std::iter::repeat_n(inherited, added_breaks),
+                    );
+                    body.paras = paras;
+                }
                 *text = new_text;
             }
         });
@@ -630,6 +656,66 @@ impl DecksController {
 
 
 
+/// Byte offsets are Unicode scalar boundaries from the common prefix and
+/// suffix. Like Letters' `style_at`, insertion inherits the run to its right,
+/// or the last run at the end; replacement inherits before deleting anything.
+fn replace_run_text(runs: &mut Vec<letters_core::model::Run>, start: usize, end: usize, replacement: &str) {
+    use letters_core::model::Run;
+    let mut pos = 0;
+    let inherited = runs.iter().find(|run| {
+        pos += run.text.len();
+        start < pos
+    }).or_else(|| runs.last()).map(|run| run.style.clone()).unwrap_or_default();
+    let mut edited = Vec::with_capacity(runs.len() + 2);
+    let mut inserted = false;
+    pos = 0;
+    for mut run in runs.drain(..) {
+        let len = run.text.len();
+        let prefix = start.saturating_sub(pos).min(len);
+        let suffix = end.saturating_sub(pos).min(len);
+        pos += len;
+        if prefix == len {
+            append_text_run(&mut edited, run);
+            continue;
+        }
+        if suffix == 0 {
+            if !inserted {
+                append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
+                inserted = true;
+            }
+            append_text_run(&mut edited, run);
+            continue;
+        }
+        let tail = run.text.split_off(suffix);
+        run.text.truncate(prefix);
+        let style = run.style.clone();
+        append_text_run(&mut edited, run);
+        if !inserted {
+            append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
+            inserted = true;
+        }
+        append_text_run(&mut edited, Run { text: tail, style });
+    }
+    if !inserted {
+        append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
+    }
+    // Keep the typing style when the box is emptied.
+    if edited.is_empty() {
+        edited.push(Run { text: String::new(), style: inherited });
+    }
+    *runs = edited;
+}
+
+fn append_text_run(runs: &mut Vec<letters_core::model::Run>, run: letters_core::model::Run) {
+    if run.text.is_empty() {
+        return;
+    }
+    match runs.last_mut() {
+        Some(last) if last.style == run.style => last.text.push_str(&run.text),
+        _ => runs.push(run),
+    }
+}
+
 /// Whether `new` is `old` with one letter or digit typed into it.
 fn one_word_char_added(old: &str, new: &str) -> bool {
     let (a, b): (Vec<char>, Vec<char>) = (old.chars().collect(), new.chars().collect());
@@ -731,6 +817,152 @@ mod tests {
             SlideObject::TextBox { text, .. } => assert_eq!(text, "old"),
             _ => panic!("expected TextBox"),
         }
+    }
+
+    fn styled_text_controller(runs: Vec<letters_core::model::Run>, body: crate::engine::TextBody) -> DecksController {
+        let mut s = slide("Styled");
+        s.objects.push(SlideObject::TextBox {
+            text: runs.iter().map(|r| r.text.as_str()).collect(),
+            x: 12.0, y: 34.0, w: 240.0, h: 120.0, rotation: 15.0, runs, body,
+        });
+        DecksController::new(vec![s], vec![])
+    }
+
+    fn text_state(c: &DecksController) -> (String, Vec<letters_core::model::Run>, crate::engine::TextBody) {
+        match &c.slides.borrow()[0].objects[0] {
+            SlideObject::TextBox { text, runs, body, .. } => (text.clone(), runs.clone(), body.clone()),
+            _ => panic!("expected TextBox"),
+        }
+    }
+
+    #[test]
+    fn change_text_preserves_styled_spans_and_exact_undo_redo() {
+        use letters_core::model::{Run, RunStyle};
+        let bold = RunStyle { bold: true, ..Default::default() };
+        let italic = RunStyle { italic: true, ..Default::default() };
+        let c = styled_text_controller(vec![
+            Run::plain("Keep "),
+            Run { text: "ca".into(), style: bold.clone() },
+            Run { text: "fé".into(), style: bold.clone() },
+            Run { text: " 東京😀".into(), style: italic.clone() },
+        ], Default::default());
+        let before = format!("{:?}", c.slides.borrow()[0].objects[0]);
+        // A stale caller snapshot must not become the source of style offsets or undo.
+        c.change_text(0, 0, "stale".into(), "Keep cañon 東京😀".into());
+        let (text, runs, _) = text_state(&c);
+        assert_eq!(text, "Keep cañon 東京😀");
+        assert_eq!(runs, vec![
+            Run::plain("Keep "),
+            Run { text: "cañon".into(), style: bold },
+            Run { text: " 東京😀".into(), style: italic },
+        ]);
+        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), text);
+        let after = format!("{:?}", c.slides.borrow()[0].objects[0]);
+        assert!(c.undo());
+        assert_eq!(format!("{:?}", c.slides.borrow()[0].objects[0]), before);
+        assert!(!c.can_undo());
+        assert!(c.redo());
+        assert_eq!(format!("{:?}", c.slides.borrow()[0].objects[0]), after);
+    }
+
+    #[test]
+    fn change_text_unicode_insert_delete_and_replace_across_run_boundaries() {
+        use letters_core::model::{Run, RunStyle};
+        let bold = RunStyle { bold: true, ..Default::default() };
+        let italic = RunStyle { italic: true, ..Default::default() };
+        let original = vec![
+            Run { text: "é😀".into(), style: bold.clone() },
+            Run { text: "東京".into(), style: italic.clone() },
+            Run::plain("e\u{301}!"),
+        ];
+        let cases = [
+            ("前é😀東京e\u{301}!", vec![
+                Run { text: "前é😀".into(), style: bold.clone() }, original[1].clone(), original[2].clone(),
+            ]),
+            ("é😀東京e\u{301}!後", vec![
+                original[0].clone(), original[1].clone(), Run::plain("e\u{301}!後"),
+            ]),
+            ("Replacement", vec![Run { text: "Replacement".into(), style: bold.clone() }]),
+            ("é😀界東京e\u{301}!", vec![
+                original[0].clone(), Run { text: "界東京".into(), style: italic.clone() }, original[2].clone(),
+            ]),
+            ("é京e\u{301}!", vec![
+                Run { text: "é".into(), style: bold.clone() },
+                Run { text: "京".into(), style: italic.clone() }, original[2].clone(),
+            ]),
+            ("é🦀京e\u{301}!", vec![
+                Run { text: "é🦀".into(), style: bold.clone() },
+                Run { text: "京".into(), style: italic.clone() }, original[2].clone(),
+            ]),
+            ("ê😀東京e\u{301}!", vec![
+                Run { text: "ê😀".into(), style: bold.clone() }, original[1].clone(), original[2].clone(),
+            ]),
+            ("é😀東京e\u{302}!", vec![
+                original[0].clone(), original[1].clone(), Run::plain("e\u{302}!"),
+            ]),
+        ];
+        for (new_text, expected) in cases {
+            let c = styled_text_controller(original.clone(), Default::default());
+            let before = text_state(&c);
+            c.change_text(0, 0, before.0.clone(), new_text.into());
+            assert_eq!(text_state(&c).1, expected, "{new_text}");
+            assert_eq!(text_state(&c).0, new_text);
+            assert!(c.undo());
+            assert_eq!(text_state(&c), before);
+            assert!(c.redo());
+            assert_eq!(text_state(&c).1, expected);
+        }
+    }
+
+    #[test]
+    fn change_text_empty_box_keeps_typing_style_and_noop_keeps_history() {
+        use letters_core::model::{Run, RunStyle};
+        let style = RunStyle { bold: true, font_size_hp: Some(48), ..Default::default() };
+        let c = styled_text_controller(vec![Run { text: "Hi".into(), style: style.clone() }], Default::default());
+        let before = text_state(&c);
+        c.change_text(0, 0, "Hi".into(), "Hi".into());
+        assert!(!c.dirty.get());
+        assert!(!c.can_undo());
+        c.change_text(0, 0, "Hi".into(), String::new());
+        assert_eq!(text_state(&c).1, vec![Run { text: String::new(), style: style.clone() }]);
+        c.change_text(0, 0, String::new(), "😀".into());
+        assert_eq!(text_state(&c).1, vec![Run { text: "😀".into(), style }]);
+        assert!(c.undo());
+        assert!(text_state(&c).0.is_empty());
+        assert!(c.undo());
+        assert_eq!(text_state(&c), before);
+        c.change_text(0, 0, "Hi".into(), "Hi".into());
+        assert!(c.can_redo(), "no-op must not discard redo");
+        assert!(c.redo());
+        assert!(c.redo());
+        assert_eq!(text_state(&c).0, "😀");
+    }
+
+    #[test]
+    fn change_text_remaps_paragraph_styles_with_newlines_and_undo() {
+        use crate::engine::text_body::{Anchor, ParaStyle, TextBody};
+        use letters_core::model::Run;
+        let first = ParaStyle { margin_left: 10.0, ..Default::default() };
+        let second = ParaStyle { margin_left: 20.0, ..Default::default() };
+        let third = ParaStyle { margin_left: 30.0, ..Default::default() };
+        let c = styled_text_controller(vec![Run::plain("one\ntwo\n三")], TextBody {
+            paras: vec![first.clone(), second.clone(), third.clone()],
+            anchor: Anchor::Middle, ..Default::default()
+        });
+        let before = text_state(&c);
+        c.change_text(0, 0, before.0.clone(), "one\nnew\ntwo\n三".into());
+        let inserted = text_state(&c);
+        assert_eq!(inserted.1.iter().map(|r| r.text.as_str()).collect::<String>(), inserted.0);
+        assert_eq!(inserted.2.paras, vec![first.clone(), second.clone(), second.clone(), third.clone()]);
+        assert_eq!(inserted.2.anchor, Anchor::Middle);
+        c.change_text(0, 0, inserted.0.clone(), "one\nnewtwo\n三".into());
+        assert_eq!(text_state(&c).2.paras, vec![first, second, third]);
+        assert!(c.undo());
+        assert_eq!(text_state(&c), inserted);
+        assert!(c.undo());
+        assert_eq!(text_state(&c), before);
+        assert!(c.redo());
+        assert_eq!(text_state(&c), inserted);
     }
 
     #[test]

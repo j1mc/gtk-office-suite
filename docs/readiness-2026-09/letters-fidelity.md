@@ -1,12 +1,206 @@
 # [P1] Letters: preserve complete document state through editing, layout, and every save path
 
-Audited on `e7e4df6`. Follow-up to closed #109–#111; existing models are foundations, not proof of GUI fidelity.
+Original audit: `e7e4df6`; follow-up to closed #109–#111. The dated assessment below supersedes historical current-state language, not the recorded regressions and fixes.
 
-## Evidence
-`letters/src/bridge.rs::capture_from_buffer` constructs a Document with `header: None, footer: None, page: None`. `StructuredEditor` operations recapture and rerender the buffer. The review workflow contract in `docs/LETTERS-REVIEW-WORKFLOWS.md` admits comments/revisions with warn-until-mapped semantics. Core round-trips alone cannot prove those states survive editing or export.
+## Direction assessment — 2026-10-13
 
-## Architecture
-A per-tab session owns the complete Document, review state, imported-package context, selection and save revision. GTK's buffer is an editing adapter: operations use explicit character offsets and preserve non-buffer state. Keep the established StructuredEditor and engines; first establish lossless capture/render adapters, then migrate commands incrementally. Do not create another unsynchronized document copy.
+**[INFERENCE] A usable GNOME-native word processor is a viable direction on the
+current Rust/GTK/libadwaita architecture; general Word or Pages replacement is
+not yet evidenced.** Keep the native shell, live model and shared layout rather
+than restarting the editor. The largest blockers are preserving imported
+semantics, paragraph/table geometry on mixed real documents, and release-level
+editing/accessibility evidence—not the choice of GTK. This is a source,
+committed-baseline and issue/PR review, not a new test run or a hands-on Word/Pages
+comparison. Upstream capability claims are not Letters capabilities.
+
+### What exists, and what that proves
+
+- **One edit authority now exists.** `letters/src/live.rs::LiveModel` owns the
+  `Document` and `edit::History`; content edits are model operations and the
+  `GtkTextBuffer` is a projection. `foreign_edits` counts writes outside that
+  projection. `bridge::document_of`, save and page layout read the model;
+  `capture_from_buffer` is test-only. The old capture-on-every-edit description
+  below, and buffer-as-authority comments in `doc_tab.rs`/`page_view.rs`, are
+  historical, not the current implementation. [#1202's stage-3
+  record](https://github.com/tuna-os/gtk-office-suite/issues/1202#issuecomment-5965274243)
+  agrees; the issue remains open because the projection buffer is not removed.
+  Removing that read-side adapter is not a prerequisite to having one authority.
+- **Screen and ordinary PDF/print share layout, not four independent engines.**
+  `letters-core/src/layout/mod.rs` produces the `RenderTree`; `layout/pango.rs`
+  shapes and draws it. `doc_tab.rs::typeset_for`, `page_view.rs`, `printing.rs`
+  and headless PDF export use `Typeset`. Hit testing, selection and caret use
+  the same positioned text. `letters-core/tests/pagination.rs` checks PDF page
+  count and page text, not full Word-compatible geometry. The separately
+  labelled Typst export is an alternative conversion, not WYSIWYG evidence.
+- **DOCX and ODT are implemented, but are model projections.** `docx.rs` maps
+  rdocx into Letters' model and supplements it with `docx_fields.rs` and other
+  XML adapters; `odt.rs` is a separate reader/writer. `model.rs::Document` has
+  one page geometry, plain-text note/header/footer bodies, header/footer
+  pictures and alignment, heading looks, review marks, and flat paragraphs
+  carrying table membership plus widths/heights/spans/fills. It is not an
+  arbitrary section tree, general style-definition graph, rich note-body
+  model or nested-table tree. `ParaStyle` has a named-style reference, not a
+  complete reusable style definition. Representable fields surviving is not
+  equivalent to preserving everything an imported package contains.
+- **Safety foundations exist; preservation is not complete.**
+  `window/saving.rs::save_page_to_path` commits through
+  `DocumentSession::save_to` before clearing dirty state, and
+  `save_asking_about_loss` asks before known destructive saves.
+  `letters-core/src/loss.rs` detects macros, embedded objects, DOCX charts/
+  SmartArt and nested tables; safe opaque parts are carried separately.
+  That finite scan is not an exhaustive loss detector. Both it and opaque
+  capture read the source path at save time, not a complete immutable import
+  context owned by `DocumentSession`. Source replacement/removal while editing
+  therefore needs an explicit contract and evidence. The package-format
+  no-loss branch in `save.rs::compatibility_report` describes the model,
+  not all source-file semantics.
+- **Real-document evidence is substantially weaker than isolated features.**
+  The committed `tools/render-lab/baseline-real.json` contains 30 Letters
+  documents: Tier A **4 green / 25 amber / 1 red**, Tier B **3 green / 27 amber /
+  0 red**. These are stored ratchet verdicts, not a rerun or latest-CI totals.
+  The corpus manifest records hashes/licences for GOV.UK DOCX/ODT publications
+  of at most eight pages; it is not a broad long-document or multilingual
+  workflow sample. A is GTK render-node output; B is a Broadway browser
+  screenshot, not shipped GNOME/Wayland. Current [#1456](https://github.com/tuna-os/gtk-office-suite/issues/1456)
+  still reports the SMA email template amber in B despite 98% words found:
+  text presence alone does not establish a convincing page.
+
+Recent fixes support incremental repair: merged [#1525](https://github.com/tuna-os/gtk-office-suite/pull/1525)
+resolved inherited ODT paragraph text styling, [#1522](https://github.com/tuna-os/gtk-office-suite/pull/1522)
+added header/footer pictures and alignment, and [#1532](https://github.com/tuna-os/gtk-office-suite/pull/1532)
+kept footer text-box text once. Do not count open work as shipped:
+[#1533](https://github.com/tuna-os/gtk-office-suite/pull/1533) supplies table
+padding missing from the current constant-padding layout;
+[#1546](https://github.com/tuna-os/gtk-office-suite/pull/1546) addresses
+[#1545](https://github.com/tuna-os/gtk-office-suite/issues/1545)'s unbounded
+non-XML DOCX members; [#1531](https://github.com/tuna-os/gtk-office-suite/pull/1531)
+proposes making shipped-Flatpak Tier C gating. All three were open at review.
+
+### Ordered gates to an everyday Word alternative
+
+These are release requirements, not a claim that all work is missing. Preserve
+the completed tests below and extend them at each boundary; safety and loss
+disclosure precede broader fidelity claims.
+
+1. **Data safety and import provenance.** Retain the existing failed/cancelled
+   Save, Save As, close-all and recovery regressions. Close the DOCX binary
+   budget gap, and prove hostile media/XML rejection without losing the open
+   document. Bind carried parts and loss findings to the imported revision;
+   exercise source deletion/replacement, Save As across formats, remote-upload
+   failure and crash recovery. Unknown or unmodelled source content must be
+   preserved safely, explicitly disclosed before overwrite, or refused—not
+   treated as kept because DOCX/ODT themselves can represent it. Exit: original
+   bytes and dirty/recovery state survive cancellation/failure; successful
+   reopen matches every admitted semantic field and the approved loss report.
+2. **Canonical document, commands and history.** Keep `LiveModel` the only
+   content authority; `DocumentSession` currently owns identity/recovery, not a
+   second content model. Preserve the zero-`foreign_edits` invariant for typing,
+   IME, formatting, paste, find/replace, review and structural commands. Define
+   import-context and save-revision ownership alongside it. Expand the current
+   seeded tests to new model fields and mixed tables/objects; one undo history
+   must restore edited and untouched content, review anchors and selection.
+   Buffer retirement must simplify adapters, not reintroduce a competing model.
+3. **Screen/export agreement.** All ordinary screen, thumbnails, print,
+   preview and PDF paths must derive geometry from the same document revision
+   and `Typeset`; keep Typst clearly separate. Extend pagination tests to
+   image/footnote/table-heavy pages and compare every page after edits, at
+   multiple zooms and scales, with explicit missing-font reporting. Exit:
+   matching page count, breaks, object bounds and text between screen and PDF,
+   plus independently reviewed reference differences; self-agreement alone
+   can consistently reproduce the wrong layout.
+4. **Paragraph and page typography.** Ratchet real cases for style inheritance,
+   fonts/fallback, exact versus proportional line spacing, before/after space,
+   indents, tabs/leaders, numbering, keep-with-next, widow/orphan placement,
+   footnotes and headers/footers. Current layout already handles many of these;
+   global widow/orphan defaults and one `PageGeometry` do not represent
+   per-paragraph controls or mixed sections. Add model/I/O/layout support
+   together where the corpus requires it. Explicit bidi direction is still
+   unavailable (`LETTERS-REVIEW-WORKFLOWS.md`); text retention is not bidi
+   editing parity. Cover CJK, combining sequences and RTL cursor movement.
+5. **Styles, tables and images as editable content.** Preserve reusable style
+   definitions and inheritance, not only an imported effective appearance.
+   Extend existing table widths/heights/spans/fills with measured padding,
+   border and pagination semantics; require edits in multi-paragraph/merged
+   cells to round-trip without losing neighbours. Nested tables currently
+   flatten with a warning, not structural fidelity. Test image anchor/size/alt
+   text, wrapping expectations and persistence across save/recovery; floating
+   image coordinates alone are not Pages-like page-layout support. Each added
+   capability needs model + command/undo + DOCX/ODT + screen/export coverage,
+   or an honest unsupported/loss disposition.
+6. **GNOME keyboard and accessibility workflows.** Extend existing
+   `LettersKeyboardOnlySmoke` and `LettersAccessibleGeometrySmoke` beyond
+   edit/undo/save and text-box bounds: navigate headings/tables, select and
+   format text, insert a link/image, review comments, find/replace and recover
+   a document without a pointer. `page_view.rs::AccessibleTextImpl` exposes
+   content/caret/selection but returns empty attribute lists; geometry tests
+   do not prove formatting, heading/table semantics or Orca usability.
+   Require real GNOME/Wayland + Orca/IME journeys, focus and selection continuity
+   after zoom/reflow, and per-character bounds on the supported GTK version.
+7. **Release evidence on actual documents.** Reduce each meaningful amber/red
+   real-document defect to an authored, licensed regression; retain the full
+   document as an integration case. Require open → edit → undo/redo → save a
+   copy → reopen → export/print with semantic and visual assertions, including
+   long reports, forms, letters/CVs and mixed-language documents, not only
+   launch renders. Gate the shipped Flatpak in GNOME (Tier C), publish the
+   exact revision, fonts, references, budgets, missing cases and residual
+   losses, and make the advertised “usable for” set no broader than those
+   passing journeys. The current 30-document baseline cannot justify a blanket
+   Word/Pages replacement claim.
+
+### Reuse and observation, without another competing engine
+
+- **Start with the implementation already present.** `letters-core/Cargo.toml`
+  and `Cargo.lock` select rdocx **0.14.0**. Its [published manifest](https://docs.rs/crate/rdocx/0.14.0/source/Cargo.toml)
+  declares `MIT OR Apache-2.0` and already includes layout dependencies.
+  [Upstream](https://github.com/tensorbee/rdocx) now advertises a broader native
+  document/layout stack; neither that README nor an upgrade proves Letters'
+  narrower adapter keeps those features. Inventory usable pinned-version APIs
+  before writing more positional XML patches; upstream missing accessors and
+  parser fixes where possible. Use a small corpus comparison to decide whether
+  a specific upstream component beats the current adapter. Do not silently add
+  rdocx PDF pagination beside Pango screen pagination: adopting layout would
+  require one end-to-end geometry, editing/hit-test and export contract,
+  including ODT. The earlier indent/column fixes below illustrate missed API
+  reuse, not evidence for replacing the entire application.
+- **LibreOffice Writer is the strongest existing independent oracle and
+  format/layout prior art.** Keep `soffice_oracle.rs`, `lo_parity.rs` and the
+  render lab. `lo_parity.rs` generates authored HTML scenarios through Writer;
+  it does not import the entire Writer test corpus. Study its OOXML/ODF test
+  taxonomy and reduce observed failures to own fixtures. For copied code/data,
+  check the exact file and third-party notices: [LibreOffice's licensing
+  statement](https://www.libreoffice.org/licenses/) describes MPL-2.0 and mixed
+  dependencies, not a blanket permission to relabel everything GPL. Embedding
+  its engine would be a different, substantial integration decision, not a
+  prerequisite established by this review.
+- **Keep Pango/Cairo for shaping and drawing; Typst for its labelled use.**
+  [Typst](https://github.com/typst/typst) is Apache-2.0 typesetting prior art,
+  not proof of DOCX/ODT interactive fidelity. Reuse existing incremental
+  shaping/layout and the shared renderer; avoid another source-to-document
+  conversion or independently authoritative engine merely to improve PDFs.
+- **Observe workflows rather than reconstruct proprietary implementations.**
+  Use [Microsoft's public format documentation](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-docx/)
+  with OOXML/ODF standards, and the [Pages user guide](https://support.apple.com/guide/pages/welcome/mac)
+  for explicit workflow expectations. Pages distinguishes flowing
+  word-processing from free page-layout documents; Letters should not imply
+  that its word-processing model implements both. Observe licensed Word/Pages
+  on authored documents for style edits, page breaks, table growth, image
+  placement, review and keyboard behaviour; record app versions, fonts, actions
+  and resulting files/PDFs. No such proprietary-app exercise was performed in
+  this assessment. [#1534](https://github.com/tuna-os/gtk-office-suite/issues/1534)
+  proposes revision-matched publisher/Office PDFs as a second reference, and
+  is still an idea rather than an installed Office oracle. Optional
+  [REA](https://github.com/morluto/rea) can help organize CLI/MCP investigation
+  evidence; it supplies no Office document engine and is not a release
+  dependency. Prefer public specs, maintained OSS and behavioral evidence;
+  proprietary binary decompilation is neither needed nor proposed.
+
+## Historical implementation record
+
+## Original audit evidence
+At `e7e4df6`, `letters/src/bridge.rs::capture_from_buffer` constructed a Document with `header: None, footer: None, page: None`, and `StructuredEditor` operations recaptured and rerendered the buffer. The review workflow contract then admitted comments/revisions with warn-until-mapped semantics. The following slices record the subsequent fixes; their checkmarks cover the cited tests, not arbitrary imported-document fidelity.
+
+## Architecture target and implemented direction
+A per-tab live model owns the complete represented Document and edit history; session identity/recovery and imported-package provenance must have explicit ownership alongside it. GTK's buffer is an editing/accessibility projection, not content authority. Keep the established structured operations and shared layout engine, extending their field contracts rather than creating another unsynchronized document copy. The 2026-10-13 assessment identifies the remaining import-context and fidelity boundaries.
 
 ## Dependency-ordered slices
 - [x] Record and test a field-by-field Document ↔ buffer/sidecar mapping, including tables, lists, run styles, images, footnotes, headers/footers and page geometry.
@@ -30,7 +224,7 @@ A per-tab session owns the complete Document, review state, imported-package con
       (`heading_looks_survive_writer_in_odt`), and `tracked_changes_survive_lo_passes` compares a deletion of a pending
       insertion in all four directions (#1297). It and `comments_survive_lo_passes` had converted each same-format file
       onto itself, which Writer won't do, so those passes read our own file back; they now convert into a directory of
-      their own. No gap is left in the map.
+      their own. That audit closed its field-map gaps; it did not establish full DOCX/ODT semantics or coverage of future model fields.
 - [x] Preserve fields across unrelated edits and structured commands; distinguish user text from rendered list markers.
       `unrelated_edits_and_commands_leave_every_other_field_alone` (`letters/src/live/tests.rs`, #1278) loads a document
       with every model field set into a live editing session. It then runs 60 seeded sequences of typing (multi-byte

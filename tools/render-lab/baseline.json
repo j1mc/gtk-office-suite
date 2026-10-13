@@ -286,10 +286,18 @@
     "B": "amber",
     "C": "amber"
   },
+  "tables/pivot-crosstab": {
+    "A": "green",
+    "B": "green"
+  },
   "tables/values": {
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "tables/wrap-merged": {
+    "A": "amber",
+    "B": "amber"
   },
   "tables/wrap-text": {
     "A": "amber",

@@ -35,7 +35,7 @@ JOURNEYS = {
     "tables": ("TablesEditRenderJourney", "xlsx",
                "Item/Amount header in bold over two rows (Paper 12, Ink 30), as entered and saved by Tables"),
     "decks": ("DecksEditRenderJourney", "pptx",
-              "One slide with an added text box and an added shape, as saved by Decks"),
+              "One slide with a double-click-edited title and an added shape, as saved and reopened by Decks"),
 }
 
 

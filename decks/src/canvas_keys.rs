@@ -33,8 +33,9 @@ pub(crate) struct EditorHandles<'a> {
 
 /// Cross-app copy and paste (DESIGN-UI), in place text editing on a
 /// double-click, and the editor's keys: navigation, delete, undo and redo.
-pub(crate) fn register(h: EditorHandles) {
+pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
     let EditorHandles { window, canvas, slide_list, slides, masters, current_slide, selected_object, controller, refresh_hud, transition } = h;
+    let text_editing = register_text_editor(h, editor_host);
     // ── Cross-app clipboard (DESIGN-UI): Ctrl+C copies the selected
     // text box as a styled fragment; Ctrl+V pastes a fragment as a
     // new text box. Window-level capture, skipped while an entry or
@@ -47,6 +48,7 @@ pub(crate) fn register(h: EditorHandles) {
         let controller2 = controller.clone();
         let refresh = refresh_hud.clone();
         let win = window.clone();
+        let text_editing = text_editing.clone();
         let key = gtk::EventControllerKey::new();
         key.set_propagation_phase(gtk::PropagationPhase::Capture);
         key.connect_key_pressed(move |_, keyval, _code, mods| {
@@ -55,7 +57,7 @@ pub(crate) fn register(h: EditorHandles) {
                 return glib::Propagation::Proceed;
             }
             // Text widgets keep their own clipboard behavior.
-            if gtk::prelude::GtkWindowExt::focus(&win)
+            if text_editing.get() || gtk::prelude::GtkWindowExt::focus(&win)
                 .map(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>() || w.is::<gtk::Entry>())
                 .unwrap_or(false)
             {
@@ -110,79 +112,6 @@ pub(crate) fn register(h: EditorHandles) {
         window.add_controller(key);
     }
 
-    // ── Double-click: inline text edit on TextBox ───────────────────
-    {
-        let ss = slides.clone();
-        let cs = canvas.clone();
-        let cs_ref = current_slide.clone();
-        let _so = selected_object.clone();
-        let controller = controller.clone();
-        let dbl = gtk::GestureClick::new();
-        dbl.set_button(1);
-        let cs2 = cs.clone();
-        dbl.connect_pressed(move |_g, n, x, y| {
-            if n < 2 { return; }
-            let idx = cs_ref.get();
-            let slides = ss.borrow();
-            if idx >= slides.len() { return; }
-            let (hx, hy) =
-                canvas_to_slide(x, y, cs2.width() as f64, cs2.height() as f64);
-            if let Some(oi) = hit_test_object(&slides[idx].objects, hx, hy) {
-                let obj = slides[idx].objects[oi].clone();
-                if let SlideObject::TextBox { text, x: ox, y: oy, w: ow, h: oh, .. } = obj {
-                    let old_text = text.clone();
-                    drop(slides);
-                    let text_view = gtk::TextView::new();
-                    text_view.buffer().set_text(&old_text);
-                    text_view.set_wrap_mode(gtk::WrapMode::Word);
-                    text_view.set_size_request((ow / 960.0 * 800.0) as i32, (oh / 540.0 * 450.0) as i32);
-                    let overlay = gtk::Fixed::new();
-                    let (cvx, cvy) = crate::canvas::slide_to_canvas(ox, oy, 800.0, 450.0);
-                    overlay.put(&text_view, cvx, cvy);
-                    // Add overlay to window via a stack or popover — put on Fixed overlay
-                    // For now, add as child of the canvas parent scrolled window area
-                    if let Some(p) = cs2.parent() {
-                        if let Ok(fixed) = p.downcast::<gtk::Fixed>() {
-                            fixed.put(&overlay, 0.0, 0.0);
-                        }
-                    }
-                    text_view.grab_focus();
-                    // Commit on Enter via EventControllerKey
-                    let key_ctrl = gtk::EventControllerKey::new();
-                    let _ss2 = ss.clone();
-                    let cs3 = cs.clone();
-                    let controller2 = controller.clone();
-                    let tv2 = text_view.clone();
-                    let ov2 = overlay.clone();
-                    let cs_ref2 = cs_ref.clone();
-                    key_ctrl.connect_key_pressed(move |_, key, _code, _mod| {
-                        if key == gtk::gdk::Key::Return || key == gtk::gdk::Key::KP_Enter {
-                            let buf = tv2.buffer();
-                            let new_text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
-                            if new_text != old_text {
-                                controller2.change_text(cs_ref2.get(), oi, old_text.clone(), new_text);
-                            }
-                            ov2.unparent();
-                            cs3.queue_draw();
-                            glib::Propagation::Stop
-                        } else {
-                            glib::Propagation::Proceed
-                        }
-                    });
-                    text_view.add_controller(key_ctrl);
-                    // Commit on focus loss
-                    let fc = gtk::EventControllerFocus::new();
-                    let tv3 = text_view.clone();
-                    let _ov3 = overlay.clone();
-                    fc.connect_leave(move |_| {
-                        if let Some(p) = tv3.parent() { p.unparent(); }
-                    });
-                    text_view.add_controller(fc);
-                }
-            }
-        });
-        canvas.add_controller(dbl);
-    }
 
     // ── Keyboard: navigation, delete, undo/redo ─────────────────────
     {
@@ -197,7 +126,13 @@ pub(crate) fn register(h: EditorHandles) {
         let m = masters.clone();
         let refresh = refresh_hud.clone();
         let key = gtk::EventControllerKey::new();
+        let text_editing = text_editing.clone();
         key.connect_key_pressed(move |_, keyval, _code, mods| {
+            // Canvas commands stay suspended throughout the text session,
+            // including while focus moves to the editor's buttons.
+            if text_editing.get() {
+                return glib::Propagation::Proceed;
+            }
             // Ctrl+Z: undo
             if mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::z {
                 if controller.undo() {
@@ -318,6 +253,218 @@ pub(crate) fn register(h: EditorHandles) {
         });
         canvas.add_controller(key);
     }
+}
+
+struct TextEdit {
+    slide_id: u64,
+    object_id: u64,
+    master: Option<usize>,
+    original: String,
+    bounds: (f64, f64, f64, f64),
+}
+
+/// A native multiline editor anchored to the actual canvas. Its host must
+/// be outside CanvasArea: that widget exposes only virtual slide objects
+/// as accessible children, hiding real child widgets from assistive tools.
+/// Keep the popover alive across sessions (suite-common's surface-lifetime
+/// rule); moving focus inside it is not a commit.
+fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell<bool>> {
+    let popover = suite_common::popover::reused(editor_host, "slide-text-editor");
+    popover.set_position(gtk::PositionType::Bottom);
+    popover.set_autohide(true);
+    let text_view = gtk::TextView::new();
+    text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    text_view.set_left_margin(8);
+    text_view.set_right_margin(8);
+    text_view.set_top_margin(8);
+    text_view.set_bottom_margin(8);
+    text_view.update_property(&[
+        gtk::accessible::Property::Label("Slide text editor"),
+        gtk::accessible::Property::Description("Enter inserts a new line. Control+Enter applies changes. Escape cancels."),
+    ]);
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(&text_view));
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.append(&scrolled);
+    let hint = gtk::Label::new(Some(&suite_common::i18n("Enter: new line · Ctrl+Enter: apply · Escape: cancel")));
+    hint.add_css_class("dim-label");
+    hint.add_css_class("caption");
+    hint.set_wrap(true);
+    body.append(&hint);
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label(&suite_common::i18n("Cancel"));
+    let apply = gtk::Button::with_label(&suite_common::i18n("Apply"));
+    apply.add_css_class("suggested-action");
+    buttons.append(&cancel);
+    buttons.append(&apply);
+    body.append(&buttons);
+    popover.set_child(Some(&body));
+
+    let session: Rc<RefCell<Option<TextEdit>>> = Rc::default();
+    let editing = Rc::new(Cell::new(false));
+    let cancelled = Rc::new(Cell::new(false));
+    let restore_focus = Rc::new(Cell::new(false));
+    for (button, discard) in [(cancel, true), (apply, false)] {
+        let popover = popover.downgrade();
+        let cancelled = cancelled.clone();
+        let restore_focus = restore_focus.clone();
+        button.connect_clicked(move |_| {
+            cancelled.set(discard);
+            restore_focus.set(true);
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
+    }
+    {
+        let weak_popover = popover.downgrade();
+        let cancelled = cancelled.clone();
+        let restore_focus = restore_focus.clone();
+        let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
+        key.connect_key_pressed(move |_, keyval, _, mods| {
+            let cancel = keyval == gtk::gdk::Key::Escape;
+            let apply = matches!(keyval, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
+                && mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if !cancel && !apply {
+                return glib::Propagation::Proceed;
+            }
+            cancelled.set(cancel);
+            restore_focus.set(true);
+            if let Some(popover) = weak_popover.upgrade() {
+                popover.popdown();
+            }
+            glib::Propagation::Stop
+        });
+        popover.add_controller(key);
+    }
+    {
+        let session = session.clone();
+        let editing = editing.clone();
+        let controller = h.controller.clone();
+        let canvas = h.canvas.downgrade();
+        let refresh = h.refresh_hud.clone();
+        let buffer = text_view.buffer();
+        popover.connect_closed(move |_| {
+            editing.set(false);
+            let edit = session.borrow_mut().take();
+            let discard = cancelled.replace(false);
+            if let Some(edit) = edit.filter(|_| !discard) {
+                let new_text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+                if new_text != edit.original && controller.editing_master() == edit.master {
+                    // Navigation, reordering and deletion can happen while a
+                    // popover closes. Resolve the captured identities, never
+                    // the current slide or stale object index.
+                    let target = {
+                        let slides = controller.slides.borrow();
+                        slides.iter().position(|s| s.ids.slide == edit.slide_id).and_then(|si| {
+                            let slide = &slides[si];
+                            let oi = slide.ids.objects.iter().position(|id| *id == edit.object_id)?;
+                            match slide.objects.get(oi)? {
+                                SlideObject::TextBox { text, .. } if *text == edit.original => Some((si, oi)),
+                                _ => None,
+                            }
+                        })
+                    };
+                    if let Some((si, oi)) = target {
+                        controller.change_text(si, oi, edit.original, new_text);
+                        refresh();
+                    }
+                }
+            }
+            if let Some(canvas) = canvas.upgrade() {
+                canvas.queue_draw();
+                if restore_focus.replace(false) {
+                    canvas.grab_focus();
+                }
+            }
+        });
+    }
+    {
+        let session = session.clone();
+        let popover = popover.downgrade();
+        let scrolled = scrolled.clone();
+        h.canvas.connect_resize(move |canvas, _, _| {
+            if let (Some(edit), Some(popover)) = (session.borrow().as_ref(), popover.upgrade()) {
+                position_text_editor(canvas, &popover, &scrolled, edit.bounds);
+            }
+        });
+    }
+    {
+        let slides = h.slides.clone();
+        let current = h.current_slide.clone();
+        let selected = h.selected_object.clone();
+        let controller = h.controller.clone();
+        let refresh = h.refresh_hud.clone();
+        let canvas = h.canvas.downgrade();
+        let editing = editing.clone();
+        let dbl = gtk::GestureClick::new();
+        dbl.set_button(1);
+        dbl.connect_pressed(move |gesture, n, x, y| {
+            if n != 2 || editing.get() {
+                return;
+            }
+            let Some(canvas) = canvas.upgrade() else { return };
+            let (hx, hy) = canvas_to_slide(x, y, canvas.width() as f64, canvas.height() as f64);
+            let mut slides = slides.borrow_mut();
+            decks_core::ops::ensure_ids(&mut slides);
+            let Some(slide) = slides.get(current.get()) else { return };
+            let Some(oi) = hit_test_object(&slide.objects, hx, hy) else { return };
+            let SlideObject::TextBox { text, x, y, w, h, .. } = &slide.objects[oi] else { return };
+            let edit = TextEdit {
+                slide_id: slide.ids.slide,
+                object_id: slide.ids.objects[oi],
+                master: controller.editing_master(),
+                original: text.clone(),
+                bounds: (*x, *y, *w, *h),
+            };
+            drop(slides);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            selected.set(Some(oi));
+            refresh();
+            canvas.queue_draw();
+            let buffer = text_view.buffer();
+            buffer.set_enable_undo(false);
+            buffer.set_text(&edit.original);
+            buffer.set_enable_undo(true);
+            position_text_editor(&canvas, &popover, &scrolled, edit.bounds);
+            *session.borrow_mut() = Some(edit);
+            editing.set(true);
+            popover.popup();
+            text_view.grab_focus();
+        });
+        h.canvas.add_controller(dbl);
+    }
+    editing
+}
+
+fn position_text_editor(
+    canvas: &gtk::DrawingArea,
+    popover: &gtk::Popover,
+    scrolled: &gtk::ScrolledWindow,
+    (x, y, w, h): (f64, f64, f64, f64),
+) {
+    let width = canvas.width() as f64;
+    let height = canvas.height() as f64;
+    let (left, top) = crate::canvas::slide_to_canvas(x, y, width, height);
+    let (right, bottom) = crate::canvas::slide_to_canvas(x + w, y + h, width, height);
+    // The host is the surrounding overlay, not the canvas. Translate
+    // through the scrolled viewport so zoom/scroll offsets are respected.
+    let Some(host) = popover.parent() else { return };
+    let Some(origin) = canvas.compute_point(&host, &gtk::graphene::Point::new(0.0, 0.0)) else { return };
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        (left + f64::from(origin.x())).round() as i32,
+        (top + f64::from(origin.y())).round() as i32,
+        (right - left).round().max(1.0) as i32,
+        (bottom - top).round().max(1.0) as i32,
+    )));
+    // Tiny boxes still need usable controls; large boxes scroll rather than
+    // forcing the native popup past the viewport.
+    scrolled.set_size_request(
+        (right - left).clamp(240.0, (width - 32.0).max(240.0)) as i32,
+        (bottom - top).clamp(120.0, (height * 0.6).max(120.0)) as i32,
+    );
 }
 
 /// The object Tab (or, `back`, Shift+Tab) selects next among `count`,
