@@ -36,10 +36,17 @@ Work in this order; unchecked gates remain requirements, not claims:
      restriction, not document encryption.
    - [ ] Exercise these cases on later worksheets, through undo/redo and after
      crash recovery, then reopen with an independent reader.
-   - [ ] Verify protection at the user-operation boundary for paste, fill,
+   - [x] Verify protection at the user-operation boundary for paste, fill,
      clear, sort, structural edits and pivot output, not just single-cell
-     typing. Rejected compound edits must leave values, metadata and history
-     unchanged; internal undo/recovery must still restore authorized state.
+     typing. Rejected compound edits leave values, metadata and history
+     unchanged; internal undo/recovery can restore authorized state.
+     Verified at `af1ef767`: core `controller::protection_tests` covers mixed
+     locked/unlocked ranges, later sheets, pivot registration/output and
+     modeled formatting/row permissions; the
+     [GUI run](https://github.com/tuna-os/gtk-office-suite/actions/runs/38426268309)
+     exercises rejected paste, clear, sort and structural actions, native
+     feedback, history integrity and successful editing after unprotect.
+     This does not certify XLSX persistence of individual protection flags.
 2. **One calculation authority with a tested editing contract.**
    - [ ] Audit every formula-affecting operation against IronCalc's existing
      APIs before adding local reference-rewriting, fill or calculation logic.

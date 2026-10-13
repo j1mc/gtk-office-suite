@@ -23,6 +23,22 @@
   ],
   "features": [
     {
+      "id": "tables.protection.compound-edit",
+      "app": "tables",
+      "issue": 1277,
+      "title": "Protected compound edits reject atomically with native feedback",
+      "scope": "Protected range paste, clear, sort and row/column edits preserve content and history; unprotect restores editing. Does not certify XLSX protection-permission persistence or workbook structure protection.",
+      "status": "verified",
+      "revision": "af1ef767c5cc8cc39ef13989f732073c1b41c38f",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::TablesSheetStructureSmoke::test_protected_range_paste_is_atomic_and_unprotect_restores_editing",
+          "tests/gui/test_smoke.py::TablesSheetStructureSmoke::test_protected_clear_sort_and_structural_actions_leave_no_history"
+        ]
+      }
+    },
+    {
       "id": "decks.save.source-inspection",
       "app": "decks",
       "issue": 374,
