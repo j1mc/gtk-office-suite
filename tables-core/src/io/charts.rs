@@ -1228,7 +1228,7 @@ mod chart_tests {
         let cached = r#"<chartSpace xmlns:c="c"><chart><plotArea><barChart><ser><val><numLit><ptCount val="2"/><pt idx="0"><v>1</v></pt></numLit></val></ser></barChart></plotArea></chart></chartSpace>"#;
         let named_ref = bar_chart(
             "Named",
-            &r#"<ser><tx><strRef><f>Alpha!$A$1</f></strRef></tx><cat><strRef><f>Alpha!$A$1:$A$2</f></strRef></cat><val><numRef><f>Alpha!$B$1:$B$2</f></numRef></val></ser>"#,
+            r#"<ser><tx><strRef><f>Alpha!$A$1</f></strRef></tx><cat><strRef><f>Alpha!$A$1:$A$2</f></strRef></cat><val><numRef><f>Alpha!$B$1:$B$2</f></numRef></val></ser>"#,
         );
         let drawing_a = format!(
             r#"<wsDr xmlns:xdr="x" xmlns:r="r">{}{}{}{}{}{}</wsDr>"#,
@@ -1278,8 +1278,6 @@ mod chart_tests {
             Some(path.to_str().unwrap()),
             &[SheetModel::new("Alpha", 4, 4, 1)],
         );
-        for id in ["unsupported-charts"] {
-            assert!(gate.features.iter().any(|f| f.id == id), "'{id}' must warn: {:?}", gate.features);
-        }
+        assert!(gate.features.iter().any(|f| f.id == "unsupported-charts"), "unknown kinds and the absolute anchor must warn: {:?}", gate.features);
     }
 }
