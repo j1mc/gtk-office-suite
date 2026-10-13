@@ -33,9 +33,9 @@ pub(crate) struct EditorHandles<'a> {
 
 /// Cross-app copy and paste (DESIGN-UI), in place text editing on a
 /// double-click, and the editor's keys: navigation, delete, undo and redo.
-pub(crate) fn register(h: EditorHandles) {
+pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
     let EditorHandles { window, canvas, slide_list, slides, masters, current_slide, selected_object, controller, refresh_hud, transition } = h;
-    let text_editing = register_text_editor(h);
+    let text_editing = register_text_editor(h, editor_host);
     // ── Cross-app clipboard (DESIGN-UI): Ctrl+C copies the selected
     // text box as a styled fragment; Ctrl+V pastes a fragment as a
     // new text box. Window-level capture, skipped while an entry or
@@ -128,8 +128,8 @@ pub(crate) fn register(h: EditorHandles) {
         let key = gtk::EventControllerKey::new();
         let text_editing = text_editing.clone();
         key.connect_key_pressed(move |_, keyval, _code, mods| {
-            // The popover is parented to the canvas, so unhandled editor
-            // keys bubble here too. They must never navigate or delete.
+            // Canvas commands stay suspended throughout the text session,
+            // including while focus moves to the editor's buttons.
             if text_editing.get() {
                 return glib::Propagation::Proceed;
             }
@@ -263,11 +263,13 @@ struct TextEdit {
     bounds: (f64, f64, f64, f64),
 }
 
-/// A native multiline editor anchored to the actual canvas, not an assumed
-/// Fixed parent. Keep the popover alive across sessions (suite-common's
-/// surface-lifetime rule); moving focus inside it is not a commit.
-fn register_text_editor(h: EditorHandles) -> Rc<Cell<bool>> {
-    let popover = suite_common::popover::reused(h.canvas, "slide-text-editor");
+/// A native multiline editor anchored to the actual canvas. Its host must
+/// be outside CanvasArea: that widget exposes only virtual slide objects
+/// as accessible children, hiding real child widgets from assistive tools.
+/// Keep the popover alive across sessions (suite-common's surface-lifetime
+/// rule); moving focus inside it is not a commit.
+fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell<bool>> {
+    let popover = suite_common::popover::reused(editor_host, "slide-text-editor");
     popover.set_position(gtk::PositionType::Bottom);
     popover.set_autohide(true);
     let text_view = gtk::TextView::new();
@@ -447,8 +449,13 @@ fn position_text_editor(
     let height = canvas.height() as f64;
     let (left, top) = crate::canvas::slide_to_canvas(x, y, width, height);
     let (right, bottom) = crate::canvas::slide_to_canvas(x + w, y + h, width, height);
+    // The host is the surrounding overlay, not the canvas. Translate
+    // through the scrolled viewport so zoom/scroll offsets are respected.
+    let Some(host) = popover.parent() else { return };
+    let Some(origin) = canvas.compute_point(&host, &gtk::graphene::Point::new(0.0, 0.0)) else { return };
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-        left.round() as i32, top.round() as i32,
+        (left + f64::from(origin.x())).round() as i32,
+        (top + f64::from(origin.y())).round() as i32,
         (right - left).round().max(1.0) as i32,
         (bottom - top).round().max(1.0) as i32,
     )));
