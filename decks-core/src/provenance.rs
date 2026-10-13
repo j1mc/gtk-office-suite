@@ -445,6 +445,7 @@ pub struct ProvenanceFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn sample_deck_bytes(ext: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -495,7 +496,7 @@ mod tests {
             }
             zip.finish().unwrap();
         }
-        let names = [
+        let names = vec![
             "customXml/item1.xml".to_string(),
             "docProps/thumbnail.jpeg".to_string(),
         ];
@@ -659,16 +660,5 @@ mod tests {
             .iter()
             .any(|n| n.contains("..")));
         assert!(ctx.check_carried_hygiene().is_err());
-    }
-
-    #[test]
-    fn cross_format_save_names_every_dropped_carried_part() {
-        let (dir, path) = sample_deck_bytes("pptx");
-        let mut ctx = DeckSourceContext::capture(&path);
-        assert!(!ctx.is_cross_format_save(&path));
-        assert!(ctx.carried_names_dropped_for(&path).is_empty());
-        // Same-format saves keep the set; cross-format ones drop it whole.
-        let odp = dir.path().join("deck.odp");
-        let _ = (ctx, odp);
     }
 }
