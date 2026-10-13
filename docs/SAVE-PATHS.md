@@ -38,11 +38,10 @@ Building the trace found one path writing around the boundary: **the Decks close
 | letters | The writer, inside the save transaction | `letters/src/window/saving.rs` | `save_buffer_to_file` | 1 | helper | `tests/gui/test_smoke.py::LettersSaveFormatSmoke` |
 | tables | The writer, behind every save | `tables/src/persistence.rs` | `save_sheets_to_xlsx_with_engine` | 1 | helper | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
 | tables | Export as PDF | `tables/src/window.rs` | `to_pdf_with_setup` | 1 | export | `tables-core/src/export.rs::to_pdf_with_setup` |
-| tables | Close guard's Save, file already has a path | `tables/src/window.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
-| tables | Close guard's Save, never saved (asks for a name) | `tables/src/window.rs` | `save_engine_to_xlsx` | 2 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
+| tables | Save (Ctrl+S) through the shared save contract (`request_save`: one loss question, one writer call) | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
+| tables | Save As through the shared save contract | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesXlsSaveSmoke` |
+| tables | Close guard's Save through the shared save contract | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
 | tables | Open… dialog | `tables/src/window.rs` | `load_workbook` | 1 | read | `tests/gui/test_smoke.py::TablesOpenDialogSmoke` |
-| tables | Save As | `tables/src/window.rs` | `save_engine_to_xlsx` | 3 | asks | `tests/gui/test_smoke.py::TablesFormatSafeSaveMixin` |
-| tables | Save (Ctrl+S) | `tables/src/window.rs` | `save_engine_to_xlsx` | 4 | asks | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
 | tables | Autosave now (the action) | `tables/src/window.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::TablesAutosaveSmoke` |
 | tables | Autosave timer | `tables/src/window.rs` | `slot.write` | 2 | snapshot | `tests/gui/test_smoke.py::TablesUnattendedAutosaveSmoke` |
 | tables | Open from the command line, a file manager or a drop (`GApplication::open`), and recovery | `tables/src/window.rs` | `load_workbook` | 2 | read | `tests/gui/test_smoke.py::TablesDropGuardSmoke` |
