@@ -752,6 +752,7 @@ fn seeded_table_and_object_edits_share_one_history() {
     gtk_test(|| {
         use letters_core::{Comment, ParaStyle, Run, RunStyle};
         use letters_core::chips::{Chip, ChipKind};
+        let mut original = Document::from_plain_text("top\nEDIT ZONE\nbottom");
         let table = original.insert_table_at(1, 2, 2);
         original.footnotes = vec!["The footnote.".into()];
         original.table_spans.insert(table, vec![letters_core::model::CellSpan { row: 0, col: 0, rows: 1, cols: 2 }]);
