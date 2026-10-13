@@ -1178,7 +1178,7 @@ mod chart_tests {
         let bytes = std::fs::read(&path).unwrap();
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
         let names: Vec<String> = zip.file_names().map(str::to_string).collect();
-        let read = |want: &str| {
+        let mut read = |want: &str| {
             use std::io::Read;
             let name = names.iter().find(|n| n.contains(want)).unwrap_or_else(|| panic!("no part like {want}"));
             let mut s = String::new();
