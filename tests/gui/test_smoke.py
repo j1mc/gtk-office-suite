@@ -5019,9 +5019,13 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         notice = lambda: self.app.findChild(
             lambda n: n.name == message and n.showing,
             retry=False, requireResult=False)
-        self.wait_until(notice, bool, description="the protected operation's native refusal")
-        # A later operation must produce its own notice, not pass on this one.
-        self.wait_until(notice, lambda n: not n, description="the refusal notice to expire")
+        label = self.wait_until(notice, bool, description="the protected operation's native refusal")
+        # Explicitly dismiss: libadwaita pauses expiry while the toast has focus.
+        # The next operation must produce its own notice, not reuse this one.
+        label.parent.parent.findChild(
+            lambda n: n.roleName == "push button" and n.showing,
+            retry=False).do_action(0)
+        self.wait_until(notice, lambda n: not n, description="the refusal notice to close")
 
     def test_protected_range_paste_is_atomic_and_unprotect_restores_editing(self):
         from dogtail import rawinput
