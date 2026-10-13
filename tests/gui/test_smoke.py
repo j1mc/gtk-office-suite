@@ -6471,6 +6471,62 @@ class DecksCanvasGeometry:
         return lambda sx, sy: (cx + ox + sx * scale, cy + oy + sy * scale)
 
 
+class DecksInlineTextSmoke(DecksCanvasGeometry, BaseGUITestCase):
+    """Double-click editing commits multiline text as one undoable operation."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-inline-text-")
+        super().setUp()
+
+    def _object(self):
+        return self.trigger_snapshot("org.tunaos.decks")["slides"][0]["objects"][0]
+
+    def _open_editor(self):
+        from dogtail import rawinput
+
+        obj = self._object()
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2,
+                                       obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        return self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Slide text editor",
+                                       retry=False, requireResult=False),
+            lambda n: n is not None and n.showing,
+            description="the double-click slide text editor",
+        )
+
+    def test_multiline_commit_undo_and_cancel(self):
+        from dogtail import rawinput
+
+        aid = "org.tunaos.decks"
+        self.gapplication_action(aid, "new-document")
+        self.gapplication_action(aid, "add-text-box")
+        before = self._object()["text"]
+        self._open_editor()
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("First line")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("Second line")
+        rawinput.keyCombo("<Control>Return")
+        expected = "First line\nSecond line"
+        self.wait_until(lambda: self._object()["text"], lambda t: t == expected,
+                        description="multiline text committed to the slide")
+        self.gapplication_action(aid, "undo")
+        self.wait_until(lambda: self._object()["text"], lambda t: t == before,
+                        description="one undo restoring the original text")
+        self.gapplication_action(aid, "redo")
+        self.wait_until(lambda: self._object()["text"], lambda t: t == expected,
+                        description="redo restoring the complete edit")
+        self._open_editor()
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Discard this draft")
+        rawinput.keyCombo("Escape")
+        self.assertEqual(self._object()["text"], expected)
+        self.assertIsNone(self.process.poll(), "decks crashed editing slide text")
+
+
 class DecksCanvasDragSmoke(DecksCanvasGeometry, BaseGUITestCase):
     """Dragging an object on the canvas moves it in the model.
 
