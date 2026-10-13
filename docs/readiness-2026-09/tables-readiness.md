@@ -70,6 +70,12 @@ WorkbookController remains the sole mutation gateway. Stable sheet identities bi
       `GridArea` while it was still parented. Both apps now link children with `set_accessible_parent(parent, sibling)`,
       which writes the same ATContext fields without the stray unref.
 - [ ] Treat advanced analysis per the accepted ADR: prove supported pivots/charts/protection through the live controller and formats; explicitly surface upstream-dependent array limits.
+      Branch `work/roadmap-checkpoint-readiness` adds controller-level cross-tab pivots: `col_fields` now form
+      deterministic pivot columns; `pivot_and_protection_tests` verifies cell placement, XLSX result-value round-trip,
+      and a compatibility warning that the pivot definition is not retained. Two `SEQUENCE` engine regressions verify
+      visible spill values and `#SPILL!` when occupied cells block output. Targeted local tests pass; CI is pending.
+      This remains open: pivot controls are not exposed in the GUI, chart/protection format coverage is incomplete, and
+      the upstream-dependent dynamic-array function limits are not yet enumerated.
 
 Dependencies: P0 save durability, #354, #374, #400. Exit: passing XLSX create/edit/save/reopen journeys and honest import/export capabilities for every offered extension; no unsupported format is silently overwritten.
 

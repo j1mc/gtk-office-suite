@@ -48,10 +48,11 @@ Controller state machines generate valid commands and assert invariants after ev
       crates with `STATEFUL_SEED_COUNT=400`, and `STATEFUL_SEED_BASE` derived from the run number — so each
       night covers a *different* 400 seeds rather than re-running the same ones, and the GUI campaign
       itself (`tests/gui/stress.py`) derives its ordering seed from the clock and records it.
-      **Still open, and the real remaining work: the release candidate.** Nothing runs a larger soak or the
-      complete display matrix at a tag, and nothing refuses to certify a release that lacks one —
-      `release-revision.yml` enforces that kind of rule for the LibreOffice oracle already, so the
-      precedent and the mechanism both exist; the stress campaign is simply not wired into it.
+      **Still open, and the real remaining work: the release candidate.** The scheduled `display-matrix` job now runs
+      separately in `gui-stress.yml`; its first green nightly was run 38236918898 on 2026-10-12 (image, matrix and
+      campaign all succeeded). That is one run, not the stated 20 consecutive nights. No larger soak or complete matrix
+      runs at a release tag, and release certification does not require them: `release-revision.yml` checks the
+      LibreOffice oracle but the stress campaign is not wired into it.
       Also open but not for want of mechanism: the GUI campaign has **no fixed regression seeds**, because
       no GUI campaign failure has been recorded to pin. Adding an arbitrary fixed seed to the pull-request
       gate would cost minutes per revision to re-run journeys in a shuffled order that never found

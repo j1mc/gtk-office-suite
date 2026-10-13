@@ -50,6 +50,6 @@ Depends on #436–#441, #354, #1217 (recovery), #1206 (interoperability), #313/#
       Measured first locally: two clean release builds of Letters in different target directories, same sha256
       (`ee61d9de…`).
 - [ ] Publish machine-readable capability matrix, JUnit, independent-reader results, visual/a11y evidence and performance measurements with the release.
-- [ ] Resolve concrete security/dependency blockers using #268/#269/#225/#347 and verify fixes; no duplicate strategic security project required.
+- [ ] Resolve concrete security/dependency blockers using #268/#269/#225/#347/#1549 and verify fixes; no duplicate strategic security project required.
 
 Publishing packages or submitting to Flathub is a separate rollout action after these checks. This issue is done only with downloadable evidence for an installed release candidate.

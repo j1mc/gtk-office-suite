@@ -97,7 +97,8 @@ the detailed acceptance state is the execution ledger above, not those historica
   failures (product crash / assertion / timeout / infrastructure), reports the first-attempt failure rate, and never retries.
   The #516 name-box and #520 fill-handle regressions are fixed (#518, #526, #1067); the scheduled display matrix now runs
   in its own nightly job. Controller stateful and malformed-input campaigns also run nightly. Remaining #442 work includes
-  multi-window close/save races, recovery-checkpoint fault injection, and release-candidate soak/evidence.
+  multi-window close/save races and release-candidate soak/evidence. Recovery-checkpoint fault injection is now covered by
+  `recovery.md`; wiring that result into release-candidate certification remains open.
 - Dependency-free Python tests and CI wiring cover validators, duplicate collection and stress orchestration. GUI failure artifacts are uploaded even when smoke fails.
 
 Run after building current binaries and installing Xvfb, Matchbox, xdotool and the documented GUI dependencies:
