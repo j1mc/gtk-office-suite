@@ -393,7 +393,7 @@ fn start_tags(xml: &str) -> Vec<StartTag<'_>> {
 /// The value of the attribute named `want` (by local name, so `xlink:href`
 /// is `href` whatever prefix the writer chose), accepting both quote styles
 /// and spacing around `=`. Valueless attributes are skipped, not misread.
-fn attr_value(attrs: &str, want: &str) -> Option<&str> {
+fn attr_value<'a>(attrs: &'a str, want: &str) -> Option<&'a str> {
     let bytes = attrs.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
