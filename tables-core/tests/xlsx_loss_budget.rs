@@ -378,31 +378,36 @@ fn the_saved_package_reports_what_the_model_cannot_carry() {
 /// no filter to clear).
 #[test]
 fn saved_xml_carries_what_both_readers_keep() {
-    use std::io::Read;
     let (engine, sheets) = workbook();
     let bytes = save_sheets_to_xlsx_bytes(&sheets, Some(&engine)).expect("save");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("zip");
     let names: Vec<String> = zip.file_names().map(str::to_string).collect();
-    let mut read = |want: &str| -> String {
-        let name = names.iter().find(|n| n.contains(want)).unwrap_or_else(|| panic!("no part like {want}"));
-        let mut s = String::new();
-        zip.by_name(name).expect("open").read_to_string(&mut s).expect("read");
-        s
-    };
     let chart: String = {
-        let name = names.iter().find(|n| n.starts_with("xl/charts/")).expect("a chart part").clone();
-        let mut s = String::new();
-        zip.by_name(&name).expect("open").read_to_string(&mut s).expect("read");
-        s
+        let mut found = None;
+        for name in names.iter().filter(|n| n.starts_with("xl/charts/")) {
+            let s = read_part(&mut zip, &names, name);
+            if s.contains("Sales by region") {
+                found = Some(s);
+                break;
+            }
+        }
+        found.expect("a chart part carrying the first sheet's chart")
     };
-    assert!(chart.contains("Sales by region"), "the title is written for every reader");
     assert!(chart.contains("Revenue"), "the axis title is written for every reader");
     assert_eq!(chart.matches("<c:ser").count(), 2, "both series are written for independent readers");
-    assert!(read("xl/workbook.xml").contains("Total"), "the defined name is written");
-    assert!(read("xl/worksheets/sheet1.xml").contains("sheetProtection"), "protection is written");
+    assert!(read_part(&mut zip, &names, "xl/workbook.xml").contains("Total"), "the defined name is written");
+    assert!(read_part(&mut zip, &names, "xl/worksheets/sheet1.xml").contains("sheetProtection"), "protection is written");
     for n in names.iter().filter(|n| n.starts_with("xl/worksheets/")) {
-        let s = read(n);
+        let s = read_part(&mut zip, &names, n);
         assert!(!s.contains("autoFilter"), "{n} must not claim a filter Tables cannot restore");
     }
-    assert!(read("sheet2").contains("conditionalFormatting"), "the later sheet's rules are written to the file");
+    assert!(read_part(&mut zip, &names, "sheet2").contains("conditionalFormatting"), "the later sheet's rules are written to the file");
+}
+
+fn read_part(zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>, names: &[String], want: &str) -> String {
+    use std::io::Read;
+    let name = names.iter().find(|n| n.contains(want)).unwrap_or_else(|| panic!("no part like {want}"));
+    let mut s = String::new();
+    zip.by_name(name).expect("open").read_to_string(&mut s).expect("read");
+    s
 }
