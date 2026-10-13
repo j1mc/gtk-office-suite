@@ -128,7 +128,7 @@ fn save_asking_about_loss(
                     SourceState::NoContext => {
                         let live = session.file.clone();
                         (
-                            live.as_ref().map(letters_core::loss::content_a_save_drops),
+                            live.as_ref().map(|p| letters_core::loss::content_a_save_drops(p)),
                             live.as_ref()
                                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                             live.as_deref() == Some(path),
