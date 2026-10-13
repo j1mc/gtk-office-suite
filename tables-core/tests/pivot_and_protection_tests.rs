@@ -54,6 +54,65 @@ fn test_pivot_table_evaluation_and_placement() {
 }
 
 #[test]
+fn test_pivot_column_fields_create_cross_tab_intersections() {
+    let mut controller = WorkbookController::new(20, 10).unwrap();
+    for (row, values) in [
+        ["Region", "Category", "Sales"],
+        ["North", "Electronics", "100"],
+        ["North", "Apparel", "50"],
+        ["South", "Electronics", "200"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (column, value) in values.iter().enumerate() {
+            controller.edit_cell(row, column, *value);
+        }
+    }
+
+    let pivot = PivotTableSpec {
+        name: "CrossTab".into(),
+        source_range: (0, 0, 3, 2),
+        target_cell: (6, 0),
+        row_fields: vec![PivotField {
+            col_index: 0,
+            name: "Region".into(),
+        }],
+        col_fields: vec![PivotField {
+            col_index: 1,
+            name: "Category".into(),
+        }],
+        data_fields: vec![PivotDataField {
+            col_index: 2,
+            name: "Sales".into(),
+            func: PivotAggFunc::Sum,
+        }],
+    };
+    let result = controller.evaluate_pivot_table(&pivot);
+    controller.add_pivot_table(pivot);
+    {
+        let state = controller.state.borrow();
+        let sheet = state.sheet();
+        assert_eq!(sheet.data[6][0], "Region");
+        assert_eq!(sheet.data[7][1], "50");
+        assert_eq!(sheet.data[8][2], "200");
+    }
+
+    assert_eq!(
+        result,
+        vec![
+            vec![
+                "Region".to_string(),
+                "Apparel - Sum of Sales".to_string(),
+                "Electronics - Sum of Sales".to_string(),
+            ],
+            vec!["North".into(), "50".into(), "100".into()],
+            vec!["South".into(), "0".into(), "200".into()],
+        ]
+    );
+}
+
+#[test]
 fn test_sheet_protection_enforcement() {
     let mut controller = WorkbookController::new(10, 10).unwrap();
 

@@ -130,6 +130,9 @@ Without a screenshot of their own:
 - **Opening without overwriting**: CSV, TSV, ODS and XLS open, but Ctrl+S
   never writes over them. Tables says it cannot save in that format and
   offers Save As with the same name as `.xlsx`.
+- **Dynamic arrays**: the formula engine evaluates `SEQUENCE` and projects
+  spilled values into the visible grid; a blocked spill reports `#SPILL!`.
+  This is not a claim of full Excel dynamic-array function compatibility.
 - **Crash recovery**: unsaved work is snapshotted and offered back after a
   crash.
 

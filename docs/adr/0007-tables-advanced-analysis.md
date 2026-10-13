@@ -19,8 +19,9 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
 ### 1. IronCalc Engine Strategy & Dynamic Arrays
 
 - **Engine Boundary:** All formula evaluation, dependency tracking, and calculation logic belong strictly to the underlying calculation engine (`ironcalc_base::Model` via `TablesEngine`). `tables-core` and the GTK GUI shell MUST NOT re-implement expression evaluation or array spilling locally.
-- **Capability Check:** `TablesEngine` queries IronCalc capabilities at runtime. For dynamic array formulas (e.g. `FILTER`, `UNIQUE`, `SORT`, `SEQUENCE`) and advanced functions, formula evaluation delegates directly to IronCalc.
-- **Spill & Array Formula Strategy:** When IronCalc introduces array spilling, `TablesEngine` captures spilled output ranges and projects them into `SheetModel`. If an array formula attempts to spill over non-empty cells, a `#SPILL!` error is surfaced.
+- **Engine behavior:** The pinned IronCalc engine supports dynamic array formulas, including `SEQUENCE`.
+- **Observed array behavior:** `TablesEngine` obtains calculated values for spill cells through its normal grid projection, limited to its configured row and column bounds. A non-empty destination blocks the spill and yields `#SPILL!`. Function-by-function compatibility is not implied; confirm engine behavior with a regression test before documenting a function as supported.
+- **Capability accounting:** Track supported formula behavior through executable engine tests and the function catalog; do not claim a runtime capability query unless the engine exposes one.
 
 ### 2. Rich Charts Model & Persistence
 
@@ -43,7 +44,7 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `col_fields`: Vector of column indices for column grouping.
   - `data_fields`: Vector of `(col_index, AggregationFunc)` (Sum, Count, Average, Min, Max).
   - `filter_fields`: Vector of column indices for filtering.
-- **Fixtures & Interoperability:** Model proven against golden fixture tests in `tables-core/tests/pivot_tests.rs` prior to full GUI layout builder integration.
+- **Fixtures & Interoperability:** `tables-core/tests/pivot_and_protection_tests.rs` verifies row aggregation, column-field cross-tab output, and placement. This does not establish GUI availability or XLSX pivot-definition round-tripping.
 
 ### 4. Sheet and Cell Protection Model
 
@@ -64,4 +65,4 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
 ## Consequences
 
 - Clean architectural split preserved: calculation stays inside `ironcalc_base`, presentation in `tables` GTK shell.
-- Full structural compatibility for extended charts, pivot tables, and sheet protection in XLSX I/O.
+- Current implementation has scoped but incomplete interoperability: pivot output is written as ordinary cells and does not round-trip as an OOXML pivot definition; chart and protection coverage remains limited to implemented formats and tested cases.

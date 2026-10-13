@@ -469,6 +469,30 @@ mod tests {
     }
 
     #[test]
+    fn sequence_formula_spills_values_into_the_rendered_grid() {
+        let mut engine = TablesEngine::new(4, 2).unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(3)");
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "1");
+        assert_eq!(grid[1][0], "2");
+        assert_eq!(grid[2][0], "3");
+        assert!(engine.has_formula(0, 0));
+        assert!(!engine.has_formula(1, 0));
+    }
+
+    #[test]
+    fn sequence_formula_surfaces_spill_blocked_by_existing_cell() {
+        let mut engine = TablesEngine::new(4, 4).unwrap();
+        engine.set_cell_text(1, 1, "blocked");
+        engine.set_cell_text(0, 0, "=SEQUENCE(2,2)");
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "#SPILL!");
+        assert_eq!(grid[1][1], "blocked");
+    }
+
+    #[test]
     fn test_formula_concat() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
         engine.set_cell_text(0, 0, "Hello");
