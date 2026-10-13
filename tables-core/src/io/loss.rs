@@ -99,6 +99,13 @@ fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location:
     report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
 }
 
+/// Whether a `<definedName ...>` element names the print-area built-in.
+/// The `name` attribute may use either quote; matching is case-sensitive
+/// per OOXML (`_xlnm.Print_Area`).
+fn is_print_area_name(element: &str) -> bool {
+    element.contains("name=\"_xlnm.Print_Area\"") || element.contains("name='_xlnm.Print_Area'")
+}
+
 /// The save cannot go ahead: the source promises inspectable content (an
 /// xlsx/xlsm/ods package) but it cannot be read. Confirming cannot
 /// override this — an unknown loss is not a consented one.
@@ -354,7 +361,24 @@ fn inspect_package(
     }
     if names.contains("xl/workbook.xml") {
         let xml = read_part(zip, "xl/workbook.xml", budget)?;
-        if xml.contains("localSheetId") {
+        // `_xlnm.Print_Area` is sheet-scoped by OOXML design, but the
+        // reader preserves it into `SheetModel::print_area` (round-trip
+        // test `print_area_hidden_rows_and_page_setup_round_trip_through_load_xlsx_workbook`),
+        // so it must not warn. Any other scoped name downgrades to
+        // workbook-global on read.
+        let mut rest = xml.as_str();
+        let mut scoped_user_name = false;
+        while let Some(start) = rest.find("<definedName") {
+            let tag: &str = &rest[start..];
+            let end = tag.find('>').map(|i| start + i).unwrap_or(xml.len());
+            let element = &xml[start..end];
+            if element.contains("localSheetId") && !is_print_area_name(element) {
+                scoped_user_name = true;
+                break;
+            }
+            rest = &xml[end..];
+        }
+        if scoped_user_name {
             record(report, SCOPED_NAMES, "xl/workbook.xml", "sheet-scoped names are read as workbook-global; a same-named range on another sheet does not come back");
         }
     }
@@ -768,6 +792,21 @@ mod tests {
             width_px: CHART_DEFAULT_SIZE_PX.0, height_px: CHART_DEFAULT_SIZE_PX.1,
         });
         assert!(content_a_save_drops(None, &[kept]).features.is_empty());
+    }
+
+    #[test]
+    fn print_area_scoped_name_does_not_warn() {
+        // `_xlnm.Print_Area` is sheet-scoped by OOXML design, but the
+        // reader preserves it into `print_area` — only user scoped names
+        // warn.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("print-area.xlsx");
+        package(&path, &[
+            ("xl/workbook.xml", "<workbook><definedNames><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\">Data!$A$1:$C$6</definedName></definedNames></workbook>"),
+            ("xl/worksheets/sheet1.xml", "<worksheet><sheetData/></worksheet>"),
+        ]);
+        let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+        assert!(!ids(&report).contains(&"scoped-names"), "print area warns: {:?}", report.features);
     }
 
     #[test]
