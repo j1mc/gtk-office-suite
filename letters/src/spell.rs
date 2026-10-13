@@ -315,7 +315,7 @@ fn is_word_byte(c: u8) -> bool {
 /// The char version of `is_word_byte`: one word definition for buffer and
 /// model iteration alike (ASCII letters and apostrophe, as hunspell sees).
 fn is_word_char(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '\''
+    c.is_ascii() && is_word_byte(c as u8)
 }
 
 
