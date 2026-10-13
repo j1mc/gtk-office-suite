@@ -6612,6 +6612,62 @@ class DecksSourceInspectionSmoke(BaseGUITestCase):
         self._exercise_blocked_save("close")
 
 
+class OpaquePartsSurviveMixin:
+    """A package holding parts the app doesn't model, a custom XML data
+    part and a thumbnail, is opened, edited and saved with Ctrl+S
+    (#1274). The edit is written; the parts are still there, byte for
+    byte; and the saved package's parts, content types and relationships
+    agree. Each app writes its document from its model, so before #1274
+    every save dropped them."""
+
+    corpus = None  # a callable returning the package's bytes
+    file_name = None
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix=f"{self.app_name}-opaque-")
+        self.isolate_autosave_state()
+        self.isolate_snapshot(prefix=f"{self.app_name}-opaque-snap-")
+        source = self.corpus()
+        self._doc = os.path.join(self._dir, self.file_name)
+        with open(self._doc, "wb") as f:
+            f.write(with_opaque_parts(source))
+        with open(self._doc, "rb") as f:
+            self._original = f.read()
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _read(self, name):
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(self._original)) as z:
+            return z.read(name)
+
+    def _assert_parts_survived(self, edited):
+        """Wait for the save to write `edited` into some part, then check
+        the carried parts and the package's consistency."""
+        import zipfile
+
+        def written():
+            try:
+                with open(self._doc, "rb") as f:
+                    if f.read() == self._original:
+                        return False
+                with zipfile.ZipFile(self._doc) as z:
+                    return any(edited.encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
+            except (OSError, zipfile.BadZipFile, KeyError):
+                return False
+        self.wait_until(written, bool, interval=0.25, description=f"the save to write {edited!r}")
+        with zipfile.ZipFile(self._doc) as z:
+            for name in ("customXml/item1.xml", "customXml/itemProps1.xml",
+                         "customXml/_rels/item1.xml.rels", "docProps/thumbnail.jpeg"):
+                self.assertIn(name, z.namelist(), f"the save dropped {name}")
+                self.assertEqual(z.read(name), self._read(name), f"the save changed {name}")
+            self.assertIn("docProps/thumbnail.jpeg", z.read("_rels/.rels").decode(),
+                          "the thumbnail's package relationship")
+        self.assertEqual(ooxml_package_problems(self._doc), [])
+        self.assertIsNone(self.process.poll(), f"{self.app_name} crashed saving")
+
+
 class DecksSourceContextSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
     """Session-owned provenance (DCK-002): the carried parts and the loss
     question belong to the opened revision, not to whatever the source
@@ -9375,62 +9431,6 @@ def ooxml_package_problems(path):
             if resolved not in names:
                 found.append(f"{rels_name} points at {resolved}, which isn't in the package")
     return found
-
-
-class OpaquePartsSurviveMixin:
-    """A package holding parts the app doesn't model, a custom XML data
-    part and a thumbnail, is opened, edited and saved with Ctrl+S
-    (#1274). The edit is written; the parts are still there, byte for
-    byte; and the saved package's parts, content types and relationships
-    agree. Each app writes its document from its model, so before #1274
-    every save dropped them."""
-
-    corpus = None  # a callable returning the package's bytes
-    file_name = None
-
-    def setUp(self):
-        self._dir = self.temp_dir(prefix=f"{self.app_name}-opaque-")
-        self.isolate_autosave_state()
-        self.isolate_snapshot(prefix=f"{self.app_name}-opaque-snap-")
-        source = self.corpus()
-        self._doc = os.path.join(self._dir, self.file_name)
-        with open(self._doc, "wb") as f:
-            f.write(with_opaque_parts(source))
-        with open(self._doc, "rb") as f:
-            self._original = f.read()
-        self.launch_args = [self._doc]
-        super().setUp()
-
-    def _read(self, name):
-        import io
-        import zipfile
-        with zipfile.ZipFile(io.BytesIO(self._original)) as z:
-            return z.read(name)
-
-    def _assert_parts_survived(self, edited):
-        """Wait for the save to write `edited` into some part, then check
-        the carried parts and the package's consistency."""
-        import zipfile
-
-        def written():
-            try:
-                with open(self._doc, "rb") as f:
-                    if f.read() == self._original:
-                        return False
-                with zipfile.ZipFile(self._doc) as z:
-                    return any(edited.encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
-            except (OSError, zipfile.BadZipFile, KeyError):
-                return False
-        self.wait_until(written, bool, interval=0.25, description=f"the save to write {edited!r}")
-        with zipfile.ZipFile(self._doc) as z:
-            for name in ("customXml/item1.xml", "customXml/itemProps1.xml",
-                         "customXml/_rels/item1.xml.rels", "docProps/thumbnail.jpeg"):
-                self.assertIn(name, z.namelist(), f"the save dropped {name}")
-                self.assertEqual(z.read(name), self._read(name), f"the save changed {name}")
-            self.assertIn("docProps/thumbnail.jpeg", z.read("_rels/.rels").decode(),
-                          "the thumbnail's package relationship")
-        self.assertEqual(ooxml_package_problems(self._doc), [])
-        self.assertIsNone(self.process.poll(), f"{self.app_name} crashed saving")
 
 
 class LettersOpaquePartsSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
