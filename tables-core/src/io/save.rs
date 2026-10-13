@@ -345,7 +345,7 @@ pub fn save_sheets_to_xlsx_bytes(
                 if let Some(hex) = s.color.as_deref().filter(|c| is_chart_hex(c)) {
                     series.set_format(
                         rust_xlsxwriter::ChartFormat::new()
-                            .set_solid_fill(&rust_xlsxwriter::ChartSolidFill::new().set_color(hex)),
+                            .set_solid_fill(rust_xlsxwriter::ChartSolidFill::new().set_color(hex)),
                     );
                 }
                 series.set_categories((
