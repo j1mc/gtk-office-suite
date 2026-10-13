@@ -752,11 +752,10 @@ fn seeded_table_and_object_edits_share_one_history() {
     gtk_test(|| {
         use letters_core::{Comment, ParaStyle, Run, RunStyle};
         use letters_core::chips::{Chip, ChipKind};
-        let mut original = Document::from_plain_text("top\nEDIT ZONE\nbottom");
-        original.insert_table_at(1, 2, 2);
+        let table = original.insert_table_at(1, 2, 2);
         original.footnotes = vec!["The footnote.".into()];
-        original.table_spans.insert(1, vec![letters_core::model::CellSpan { row: 0, col: 0, rows: 1, cols: 2 }]);
-        original.table_fills.insert(1, vec![letters_core::model::CellFill { row: 1, col: 1, color: "ff0000".into() }]);
+        original.table_spans.insert(table, vec![letters_core::model::CellSpan { row: 0, col: 0, rows: 1, cols: 2 }]);
+        original.table_fills.insert(table, vec![letters_core::model::CellFill { row: 1, col: 1, color: "ff0000".into() }]);
         original.comments = vec![Comment { id: 7, author: "Ann".into(), date: "2026-10-01T09:00:00Z".into(), text: "Look".into(), resolved: false, parent: None }];
         original.paragraphs[0].runs.push(Run { text: " noted".into(), style: RunStyle { comments: vec![7], ..Default::default() } });
         original.paragraphs[0].runs.push(Run { text: "".into(), style: RunStyle { footnote: Some(0), ..Default::default() } });
@@ -764,10 +763,13 @@ fn seeded_table_and_object_edits_share_one_history() {
         let seeds = [7u64, 12345, 0xdead_beef_cafe_f00d, 99];
         for seed in seeds {
             let (buf, live) = tab(&original);
-            // A table-structure command diffs to block ops only.
+            // A table-structure command diffs to block ops only. The
+            // structured editor works in `Document` char offsets (objects
+            // count their text, not one sequence char), so its cursor is a
+            // `paragraph_offset`, not an edit sequence offset.
             let before = live.borrow().document().clone();
             let mut editor = letters_core::structured::StructuredEditor::new(before.clone());
-            editor.set_cursor(letters_core::edit::paragraph_start(&before, 2));
+            editor.set_cursor(before.paragraph_offset(2));
             assert!(editor.insert_row_at_cursor(true));
             let ops = letters_core::edit::diff(&before, editor.document());
             assert!(!ops.is_empty(), "seed {seed}: the row insert diffed to nothing");
@@ -778,10 +780,19 @@ fn seeded_table_and_object_edits_share_one_history() {
             // One session: structure command, typing, formatting, comment.
             let mut state = seed;
             let mut next = || { state = state.wrapping_mul(0x51_7cc1_b727_220a).wrapping_add(1); (state >> 11) as usize };
+            // Caret into the table's second cell, so the row command lands;
+            // the bridge maps the caret through the same char offsets.
+            let rows_before = live.borrow().document().table_dimensions(table).unwrap().0;
+            let cell_buf = live.borrow_mut().buffer_offset(letters_core::edit::paragraph_start(&before, 2)).unwrap();
+            buf.place_cursor(&buf.iter_at_offset(cell_buf as i32));
             crate::bridge::apply_structured_edit(&buf, |e| {
-                e.set_cursor(letters_core::edit::paragraph_start(&before, 2));
                 e.insert_row_at_cursor(true);
             });
+            assert_eq!(
+                live.borrow().document().table_dimensions(table).unwrap().0,
+                rows_before + 1,
+                "seed {seed}: the row command did not land in the table"
+            );
             let zone = text(&buf).find("EDIT ZONE").map(|i| text(&buf)[..i].chars().count() as i32).unwrap();
             type_at(&buf, zone + (next() % 9) as i32, "typed");
             live.borrow_mut()

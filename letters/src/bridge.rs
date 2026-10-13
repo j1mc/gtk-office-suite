@@ -1311,20 +1311,36 @@ pub fn insert_footnote_marker(buf: &gtk::TextBuffer, insert: &mut gtk::TextIter,
     buf.insert_with_tags_by_name(insert, &format!("[{}]", idx + 1), &[&name]);
 }
 
+/// Buffer offset `off` in `Document` char offsets: the structured editor's
+/// space, where objects count their text rather than one sequence char.
+/// Kept beside `LiveModel::sequence_offset` (the ops' space) deliberately:
+/// the two mappings agree on plain text and differ on objects, and each
+/// consumer needs its own (LET-003). Collapsing them misplaces structured
+/// commands in documents with footnotes or chips before a table.
+fn model_offset(doc: &Document, starts: &[usize], off: usize) -> usize {
+    let (para, offset) = paragraph_offset(doc, starts, off);
+    doc.paragraph_offset(para) + offset
+}
+
+/// Buffer offset of `Document` char offset `off` (the inverse of
+/// `model_offset`, for restoring the caret where a command left it).
+fn buffer_offset_of_model(doc: &Document, starts: &[usize], off: usize) -> usize {
+    let para = doc.paragraph_at(off).min(doc.paragraphs.len().saturating_sub(1));
+    let within = off.saturating_sub(doc.paragraph_offset(para));
+    starts.get(para).map_or(0, |s| buffer_offset(&doc.paragraphs[para], *s, within))
+}
+
 fn structured_edit_on_model<F>(buf: &gtk::TextBuffer, m: &std::rc::Rc<std::cell::RefCell<crate::live::LiveModel>>, edit: F)
 where
     F: FnOnce(&mut letters_core::structured::StructuredEditor),
 {
-    // One offset mapping only (LET-003): the live model's `sequence_offset`
-    // / `buffer_offset`, not a second copy beside them.
-    let doc = m.borrow_mut().snapshot().0;
+    let (doc, starts) = m.borrow_mut().snapshot();
     let mut editor = letters_core::structured::StructuredEditor::new(doc.clone());
-    editor.set_cursor(m.borrow_mut().sequence_offset(buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
+    editor.set_cursor(model_offset(&doc, &starts, buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
     if let Some((start, end)) = buf.selection_bounds() {
-        let mut m = m.borrow_mut();
         editor.select(
-            m.sequence_offset(start.offset().max(0) as usize),
-            m.sequence_offset(end.offset().max(0) as usize),
+            model_offset(&doc, &starts, start.offset().max(0) as usize),
+            model_offset(&doc, &starts, end.offset().max(0) as usize),
         );
     }
     edit(&mut editor);
@@ -1335,10 +1351,9 @@ where
     let mut m = m.borrow_mut();
     if m.apply_user_ops(buf, &ops, false) {
         // The caret where the command left it (the new table's first cell).
-        if let Some(off) = m.buffer_offset(editor.cursor()) {
-            drop(m);
-            buf.place_cursor(&buf.iter_at_offset(off as i32));
-        }
+        let (doc, starts) = m.snapshot();
+        let off = buffer_offset_of_model(&doc, &starts, editor.cursor());
+        buf.place_cursor(&buf.iter_at_offset(off as i32));
     }
 }
 
