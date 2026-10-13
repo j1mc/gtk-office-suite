@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
+use libadwaita as adw;
 use tables_core::sheet::SheetModel;
 
 use crate::window::AppState;
@@ -70,6 +71,61 @@ pub(crate) fn save_engine_to_xlsx(path: &str, source: Option<&str>, state: &AppS
     // A document at a remote location (RFC-0003) is written to its staged
     // copy above and uploaded here; a local path needs nothing.
     suite_common::locations::commit_save(std::path::Path::new(path))
+}
+
+/// One report/serialize/commit contract for every save route (TBL-001).
+/// Ctrl+S, Save As and the close guard's Save share it, so no route can
+/// forget the loss question, the carried parts or the post-commit
+/// bookkeeping. `source` is the file the document came from (scanned for
+/// losses and harvested for carried parts); `target` is where the bytes
+/// go. A commit marks the controller clean and clears the autosave slot,
+/// then runs `on_saved` for window-specific follow-ups (close the window,
+/// adopt the new path, record the recent file). Cancel writes nothing; a
+/// failed write reports in place and commits nothing.
+pub(crate) fn request_save(
+    parent: impl IsA<gtk4::Widget> + Clone + 'static,
+    source: Option<&str>,
+    target: &std::path::Path,
+    state: &Rc<RefCell<AppState>>,
+    controller: &Rc<RefCell<tables_core::controller::WorkbookController>>,
+    slot: &Rc<suite_common::autosave::AutosaveSlot>,
+    on_saved: impl FnOnce() + 'static,
+) {
+    let target_str = target.to_string_lossy().to_string();
+    let source_owned = source.map(str::to_string);
+    let ask_parent = parent.clone();
+    let (state_rc, ctl, slot_rc) = (state.clone(), controller.clone(), slot.clone());
+    // The dialog callback is 'static: it gets owned copies, while the
+    // synchronous report above borrows the locals.
+    let source_for_report = source_owned.clone();
+    let target_for_save = target_str.clone();
+    let for_report = state.borrow();
+    crate::loss_ui::save_after_asking(
+        &ask_parent,
+        source_for_report.as_deref(),
+        &target_str,
+        &for_report,
+        move || {
+            let borrowed = state_rc.borrow();
+            let commit = save_engine_to_xlsx(&target_for_save, source_owned.as_deref(), &borrowed);
+            match commit {
+                Ok(()) => {
+                    ctl.borrow_mut().mark_clean();
+                    slot_rc.clear_or_report();
+                    on_saved();
+                }
+                Err(e) => {
+                    let err = adw::AlertDialog::builder()
+                        .heading(suite_common::i18n("Could Not Save File"))
+                        .body(&e)
+                        .build();
+                    err.add_response("ok", &suite_common::i18n("_OK"));
+                    err.set_default_response(Some("ok"));
+                    err.present(Some(&parent));
+                }
+            }
+        },
+    );
 }
 
 /// The local path for a location a dialog or the desktop handed over:

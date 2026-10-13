@@ -115,3 +115,27 @@ fn an_xlsb_workbook_is_refused_with_the_reason() {
     assert!(error.contains(".xlsb") && error.contains(".xlsx"), "{error}");
     assert!(!is_writable_format("binary.xlsb"));
 }
+
+/// Saving out of a read-only format goes through the loss gate with the
+/// original as the source (TBL-001): a binary .xls original cannot be
+/// enumerated, so Save As warns with its location and consequence instead
+/// of silently dropping what it holds. The offered target is writable.
+#[test]
+fn save_as_from_xls_reports_the_uninspected_original() {
+    use tables_core::io::loss::content_a_save_drops;
+    use tables_core::sheet::SheetModel;
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("budget.xls");
+    std::fs::write(&original, b"a binary OLE workbook stand-in").unwrap();
+    let sheets = vec![SheetModel::new("Sheet1", 4, 4, 1)];
+    let report = content_a_save_drops(Some(original.to_str().unwrap()), &sheets);
+    assert!(report.requires_confirmation(), "an .xls original must ask before Save As");
+    let hit = report.features.iter().find(|f| f.id == "legacy-xls-content").expect("the ledger entry");
+    assert!(!hit.location.is_empty(), "the loss names its location");
+    assert!(!hit.detail.is_empty(), "the loss names its consequence");
+    assert!(report.validate_save(false).is_err(), "cancel blocks the save");
+    assert!(report.validate_save(true).is_ok(), "an explicit choice authorizes it");
+    let target = xlsx_save_as_name(&original.to_string_lossy());
+    assert_eq!(target, "budget.xlsx");
+    assert!(is_writable_format(&target));
+}
