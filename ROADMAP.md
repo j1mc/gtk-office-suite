@@ -53,7 +53,7 @@ gtk-office-suite is the org's flagship **end-user product bet** and a cornerston
 - Ctrl+K command palette; per-app live status surfaces; GUI smoke journeys deterministic (#187).
 - Readiness work is tracked per-item in [docs/readiness-2026-09/](docs/readiness-2026-09/README.md)
   (#443): atomic save (#437), Letters save formats (#436), GUI display/process
-  ownership (#241), deterministic GUI infrastructure (#354, 9/10) and CI
+  ownership (#241), deterministic GUI infrastructure (#354, 10/10) and CI
   self-tests (#313, 7/8).
 - The June planning documents this file replaced (the v1.0 queue, plan and handoff) are in [docs/archive/](docs/archive/README.md); they were wrong about the project and are kept for history only.
 - **GUI-layer God-files** (#168) — still architectural debt before feature

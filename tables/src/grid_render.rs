@@ -303,8 +303,15 @@ pub fn fit_rows_to_content(sheet: &mut SheetModel) {
             if !(style.wrap || style.font_size.is_some()) || sheet.cell(r, c).is_empty() {
                 continue;
             }
+            let width = match sheet.merge_covering(r, c) {
+                Some((mr, mc, 1, cs)) if mr == r && mc == c => {
+                    (mc..mc + cs.max(1)).map(|col| sheet.col_width(col)).sum()
+                }
+                Some(_) => continue, // A multi-row merge shares its height across rows.
+                None => sheet.col_width(c),
+            };
             let text = sheet.formats[r][c].format(sheet.cell(r, c));
-            let layout = cell_layout(&cr, sheet, r, c, &text, sheet.col_width(c));
+            let layout = cell_layout(&cr, sheet, r, c, &text, width);
             need = need.max(layout.pixel_size().1 as f64 + 6.0);
         }
         sheet.row_heights[r] = need;
@@ -784,6 +791,33 @@ mod tests {
         // the baseline there, where an ellipsis would leave only dots.
         let inked_rows = (0..h as usize).filter(|&y| (w as usize - 6..w as usize - 2).any(|x| dark(x, y))).count();
         assert!(inked_rows >= 6, "the text stops short of the edge: {inked_rows} rows inked at the right");
+    }
+
+    #[test]
+    fn wrapped_merged_cells_fit_to_the_merged_width() {
+        suite_common::gtk_test::run(|| {
+            let text = "word ".repeat(48);
+            let mut narrow = SheetModel::new("S", 1, 2, 0);
+            narrow.set_col_width(0, 80.0);
+            *narrow.cell_mut(0, 0) = text.clone();
+            narrow.styles[0][0].wrap = true;
+
+            let mut merged = SheetModel::new("S", 1, 2, 0);
+            merged.set_col_width(0, 80.0);
+            merged.set_col_width(1, 80.0);
+            *merged.cell_mut(0, 0) = text;
+            merged.styles[0][0].wrap = true;
+            merged.merges.push((0, 0, 1, 2));
+
+            fit_rows_to_content(&mut narrow);
+            fit_rows_to_content(&mut merged);
+            assert!(
+                merged.row_height(0) < narrow.row_height(0),
+                "merged cell row should fit the combined width: merged={}, unmerged={}",
+                merged.row_height(0),
+                narrow.row_height(0),
+            );
+        });
     }
 
     fn export_state() -> Rc<RefCell<crate::window::AppState>> {

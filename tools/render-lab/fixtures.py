@@ -616,6 +616,14 @@ def tables():
     save(wb, "wrap-text", "A1 text wraps onto several lines; row 1 grows")
 
     wb, ws = book()
+    ws["A1"] = "A merged cell with wrapped text needs the combined width of its columns to fit its row."
+    ws.merge_cells("A1:B1")
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 12
+    save(wb, "wrap-merged", "Wrapped text across merged columns; row height follows the combined column width")
+
+    wb, ws = book()
     ws.column_dimensions["B"].width = 40
     ws.row_dimensions[3].height = 60
     ws["B3"] = "wide and tall"

@@ -42,7 +42,7 @@ document, never from whether an issue happens to be closed.
 - [x] #437 — durable shared saves — [atomic-save.md](atomic-save.md) 8/8
 - [x] #436 — Letters save transactions — [save-transactions.md](save-transactions.md) 6/6
 - [x] #241 — GTK test thread/display ownership — [gtk-threading.md](gtk-threading.md) 6/6
-- [~] #354 — deterministic GUI infrastructure — [gui-testing.md](gui-testing.md) 9/10
+- [x] #354 — deterministic GUI infrastructure — [gui-testing.md](gui-testing.md) 10/10
 - [~] #313 — CI validator and test gates — [ci-gates.md](ci-gates.md) 7/8
 - [~] #442 — crash and flake campaign — [crash-stress.md](crash-stress.md) 2/8
 - [~] #441 — capability evidence ledger — [capability-evidence.md](capability-evidence.md) 6/7
@@ -83,20 +83,21 @@ Use fixtures spanning empty/large/sparse/image-heavy content, Unicode/RTL, malfo
 
 ## First implementation slice
 
-Opened PRs: [#444 — shared save safety](https://github.com/tuna-os/gtk-office-suite/pull/444)
-and [#445 — GUI crash/flake infrastructure](https://github.com/tuna-os/gtk-office-suite/pull/445).
-The latter is draft pending live GUI verification. Neither closes its broader
-acceptance contract by itself.
+Initial PRs: [#444 — shared save safety](https://github.com/tuna-os/gtk-office-suite/pull/444)
+is merged; [#445 — GUI crash/flake infrastructure](https://github.com/tuna-os/gtk-office-suite/pull/445)
+is closed. #445's major components landed separately (#517, #568, #448, #1053);
+the detailed acceptance state is the execution ledger above, not those historical PR descriptions.
 
 - Shared atomic save: regression tests reproduced stale-temp-symlink overwrite and permission widening. Exclusive temporary files, permissions, owned cleanup and Unix directory sync implemented locally. On updated main: 89 shared-core unit tests plus one parity-conformance test passed. Full format/GUI integration is still pending.
-- GUI harness: private schemas/XDG/display allocation, owned process cleanup, correct snapshot artifact source; duplicate named-range test exposed under a unique class name. The still-skipped #137 reproduction needs live verification.
+- GUI harness: private schemas/XDG/display allocation, owned process cleanup, correct snapshot artifact source, and active
+  far-jump/return regression journeys for the #137 AT-SPI crash, fixed by #514. The direct reproduction and the named-range
+  accessibility walk pass in CI; see `gui-testing.md` and #137's closure evidence.
 - Repeated journey runner: `tests/gui/stress.py` is on main and runs nightly (`.github/workflows/gui-stress.yml`) in the GUI
   container. It records seeds, revision, binary SHA-256, every attempt's order, verdict, log, JUnit and artifacts, classifies
   failures (product crash / assertion / timeout / infrastructure), reports the first-attempt failure rate, and never retries.
-  Its first display-matrix run found #516 (Tables lost the name box below the narrow breakpoint, so `Ctrl+G` had nothing to
-  focus and silently swallowed every keystroke at 400px); that is fixed, and a full matrix pass then turned up further
-  narrow-width gaps (#520), so the nightly stays on the baseline display until those close. It repeats existing journeys; stateful random edits and save-fault injection are next. The corpus and engine
-  work from the same slice is still on PR #445.
+  The #516 name-box and #520 fill-handle regressions are fixed (#518, #526, #1067); the scheduled display matrix now runs
+  in its own nightly job. Controller stateful and malformed-input campaigns also run nightly. Remaining #442 work includes
+  multi-window close/save races, recovery-checkpoint fault injection, and release-candidate soak/evidence.
 - Dependency-free Python tests and CI wiring cover validators, duplicate collection and stress orchestration. GUI failure artifacts are uploaded even when smoke fails.
 
 Run after building current binaries and installing Xvfb, Matchbox, xdotool and the documented GUI dependencies:

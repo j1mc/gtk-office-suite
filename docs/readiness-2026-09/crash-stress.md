@@ -89,6 +89,7 @@ Controller state machines generate valid commands and assert invariants after ev
       in that attribute took the app down rather than losing its conditional formatting. Seed
       1015848, minimized to a 197-byte package in `tables-core/tests/crashes/`, which reproduces it
       in 0.98s where the campaign needed 19s.
+      At the slot layer, `injected_snapshot_write_failures_preserve_a_coherent_checkpoint` exercises `AutosaveSlot::write` at all six boundaries: pre-rename failures retain the old bytes and metadata, while a post-rename directory-sync error exposes the complete new checkpoint.
 - [x] Always retain stderr/backtrace, core dump where supported, screenshot, AT-SPI tree, last snapshot, action trace
       and saved output fixtures on failure. The harness captured six of these, and captured **none of them for the one
       class of failure where they matter most**: unittest skips `tearDown` when `setUp` raises, the app is launched *in*

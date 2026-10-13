@@ -15,6 +15,7 @@ Features added after the v1.0 tag and GitHub release.
 - Data validation: List, WholeNumber, Decimal, TextLength, Regex rules
 - Charts dialog: AdwDialog with Bar/Line/Pie type selector and live preview
 - Undo/Redo: CellEdit, ColResize, Sort, Format, Border, Merge, Freeze commands
+- Wrapped merged cells auto-fit row height to the merged column span.
 
 ### Decks
 - Canvas undo/redo via Command pattern (Ctrl+Z / Ctrl+Shift+Z)
