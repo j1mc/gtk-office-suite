@@ -129,6 +129,37 @@ pub fn snapshot(controller: &DecksController) -> DeckSnapshot {
     DeckSnapshot { slide_count, masters, master_details, editing_master: controller.editing_master(), slides: snapshots, selection: None }
 }
 
+/// What the session's source context holds, for GUI journeys to assert
+/// provenance instead of scraping dialogs (DCK-002). `None` for new
+/// documents and recovered snapshots: no context, no claims. Separate
+/// from [`DeckSnapshot`] so existing consumers never change shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvenanceSnapshot {
+    pub format: String,
+    pub carried_names: Vec<String>,
+    pub opaque_names: Vec<String>,
+    pub opaque_complete: bool,
+    pub edited_slides: Vec<u64>,
+    pub structure_changed: bool,
+    pub masters_touched: bool,
+    pub history_stepped: bool,
+    pub destructive_loss_ids: Vec<String>,
+}
+
+pub fn provenance_snapshot(controller: &DecksController) -> Option<ProvenanceSnapshot> {
+    controller.provenance_facts().map(|f| ProvenanceSnapshot {
+        format: f.format,
+        carried_names: f.carried_names,
+        opaque_names: f.opaque_names,
+        opaque_complete: f.opaque_complete,
+        edited_slides: f.edited_slides,
+        structure_changed: f.structure_changed,
+        masters_touched: f.masters_touched,
+        history_stepped: f.history_stepped,
+        destructive_loss_ids: f.destructive_loss_ids,
+    })
+}
+
 fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {

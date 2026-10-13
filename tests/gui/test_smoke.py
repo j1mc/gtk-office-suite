@@ -6612,6 +6612,125 @@ class DecksSourceInspectionSmoke(BaseGUITestCase):
         self._exercise_blocked_save("close")
 
 
+class DecksSourceContextSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
+    """Session-owned provenance (DCK-002): the carried parts and the loss
+    question belong to the opened revision, not to whatever the source
+    path holds now.
+
+    Deleting or replacing the source while it is open must never silently
+    carry the opened revision's parts into the change, and must never
+    overwrite the original on a plain Save: the save blocks, the edit
+    stays unsaved, and a Save As elsewhere asks about the opened
+    revision's content before writing a model-only copy."""
+
+    app_name = "decks"
+    corpus = staticmethod(lambda: minimal_pptx_bytes("context deck"))
+    file_name = "context.pptx"
+
+    def _objects(self):
+        return self.trigger_snapshot("org.tunaos.decks")["slides"][0]["objects"]
+
+    def _edit(self):
+        aid = "org.tunaos.decks"
+        self.wait_until(lambda: self.app.child(name="Slide canvas"), lambda c: c is not None,
+                        description="the deck to open")
+        original_count = len(self._objects())
+        self.gapplication_action(aid, "add-text-box")
+        return self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                               description="the unsaved text box")
+
+    def _dismiss_error(self):
+        self.wait_for_node(name="OK", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the error dialog to close")
+
+    def _save_as(self, path):
+        from dogtail import tree
+        self.gapplication_action("org.tunaos.decks", "save-file-as")
+        name = self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text",
+                                        retry=False, requireResult=False),
+            lambda n: n is not None, description="the Save As filename")
+        name.text = path
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+    def test_deleted_source_blocks_overwrite_and_keeps_the_edit(self):
+        edited = self._edit()
+        os.unlink(self._doc)
+        self.gapplication_action("org.tunaos.decks", "save-file")
+        self.wait_for_node(name="Could Not Save File")
+        self.assertIsNone(self.app.findChild(
+            lambda n: n.name == "Save Copy" and n.showing, retry=False, requireResult=False),
+            "a missing source must not offer to replace itself")
+        self.assertFalse(os.path.exists(self._doc), "the blocked save recreated the file")
+        self._dismiss_error()
+        self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+        assert_close_guard_asks(self)
+        self.assertIsNone(self.process.poll(), "decks crashed on a blocked save")
+
+    def test_replaced_source_blocks_overwrite_and_leaves_the_replacement(self):
+        edited = self._edit()
+        replacement = minimal_pptx_bytes("entirely different")
+        with open(self._doc, "wb") as f:
+            f.write(replacement)
+        self.gapplication_action("org.tunaos.decks", "save-file")
+        self.wait_for_node(name="Could Not Save File")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the blocked save touched the replacement")
+        self._dismiss_error()
+        self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+        assert_close_guard_asks(self)
+        self.assertIsNone(self.process.poll(), "decks crashed on a blocked save")
+
+    def test_save_as_elsewhere_after_replacement_writes_model_only(self):
+        import zipfile
+        self._edit()
+        with open(self._doc, "wb") as f:
+            f.write(minimal_pptx_bytes("entirely different"))
+        copy = os.path.join(self._dir, "elsewhere.pptx")
+        self._save_as(copy)
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "changed on disk" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the changed-on-disk explanation")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the question to close")
+        self.assertFalse(os.path.exists(copy), "Cancel wrote the copy anyway")
+        self._save_as(copy)
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy) and os.path.getsize(copy) > 0, bool,
+                        description="the approved model-only copy")
+        with zipfile.ZipFile(copy) as z:
+            names = z.namelist()
+            self.assertFalse([n for n in names if n.startswith("customXml/")], names)
+            self.assertTrue(any(b"TextBox 2" in z.read(n) for n in names if n.endswith(".xml")),
+                            "the copy lost the edit")
+        self.assertEqual(ooxml_package_problems(copy), [])
+        self.assertIsNone(self.process.poll(), "decks crashed saving the copy")
+
+    def test_cross_format_save_as_names_the_dropped_parts(self):
+        self._edit()
+        copy = os.path.join(self._dir, "elsewhere.odp")
+        self._save_as(copy)
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "customXml/item1.xml" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the dropped carried part named in the question")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy), lambda exists: not exists,
+                        description="no cross-format copy without consent")
+        self.assertIsNone(self.process.poll(), "decks crashed on a cross-format question")
+
+
 class DecksExportSmoke(BaseGUITestCase):
     """Export (Keynote's File > Export To, Google Slides' Download): Export
     as PDF writes a page per

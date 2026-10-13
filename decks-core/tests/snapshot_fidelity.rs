@@ -1582,3 +1582,61 @@ fn object_builds_survive_a_snapshot() {
         assert_eq!(back.slides[0].builds, builds, "{kind}");
     }
 }
+
+/// The session's provenance is visible to test introspection and follows
+/// the session: installed at open, recording edits, conservative across
+/// undo, and gone after recovery-style adoption (DCK-002).
+#[test]
+fn provenance_snapshot_follows_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prov.pptx");
+    decks_core::write_deck(
+        path.to_str().unwrap(),
+        &deck_of(vec![slide_of(
+            vec![text_box("a", 10.0, 10.0)],
+            "",
+            "#ffffff",
+        )]),
+    )
+    .unwrap();
+    let (deck, context) = decks_core::read_deck_with_context(path.to_str().unwrap()).unwrap();
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    // No context before the open lands: no claims.
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None
+    );
+    controller.install_opened_deck(deck, context);
+    let opened =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context installed at open");
+    assert_eq!(opened.format, "pptx");
+    assert!(opened.opaque_complete);
+    assert!(
+        opened.edited_slides.is_empty() && !opened.structure_changed && !opened.masters_touched
+    );
+    // An edit records its dependency; undo keeps the knowledge.
+    controller.add_slide(1, slide_of(vec![], "", "#ffffff"));
+    let edited =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context survives edits");
+    assert!(
+        edited.structure_changed,
+        "an inserted slide is a structural dependency"
+    );
+    assert!(controller.undo());
+    let undone =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context survives undo");
+    assert!(
+        undone.history_stepped,
+        "undo must not forget what became unsafe"
+    );
+    assert!(
+        undone.structure_changed,
+        "undo must not clear dependencies either"
+    );
+    // Recovery adopts bytes, not provenance.
+    controller.clear_source_context();
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None
+    );
+}
