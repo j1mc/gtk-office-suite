@@ -23,6 +23,40 @@
   ],
   "features": [
     {
+      "id": "decks.save.source-inspection",
+      "app": "decks",
+      "issue": 374,
+      "title": "Uninspectable sources block overwrite but permit explicit recovery copies",
+      "scope": "Missing/corrupt imported source: ordinary and close-guard saves blocked; fresh-path recovery requires consent and retains edits on reopen. Rechecks destination after consent; not atomic concurrent-writer exclusion or complete package preservation.",
+      "status": "verified",
+      "revision": "bfdf50d51cb80b21d594b3bbe57c275b69b3008b",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_blocks_an_uninspectable_source",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_close_guard_save_blocks_an_uninspectable_source",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_as_recovers_missing_source_only_with_consent",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_save_as_recovers_corrupt_source_without_replacing_it",
+          "tests/gui/test_smoke.py::DecksSourceInspectionSmoke::test_recovery_rechecks_destination_after_confirmation"
+        ]
+      }
+    },
+    {
+      "id": "decks.present.missing-image-preflight",
+      "app": "decks",
+      "issue": 374,
+      "title": "Missing-image presentation warning allows cancel or explicit continuation",
+      "scope": "Removing an inserted image triggers native warning before audience window creation. Cancel retains document and keeps show closed; Continue Anyway opens show. Does not certify image decoding or monitor privacy.",
+      "status": "verified",
+      "revision": "bfdf50d51cb80b21d594b3bbe57c275b69b3008b",
+      "requires": ["gui"],
+      "evidence": {
+        "gui": [
+          "tests/gui/test_smoke.py::DecksMissingMediaPreflightSmoke::test_cancel_keeps_show_closed_and_continue_opens_it"
+        ]
+      }
+    },
+    {
       "id": "decks.text.inline-edit",
       "app": "decks",
       "issue": 1551,
