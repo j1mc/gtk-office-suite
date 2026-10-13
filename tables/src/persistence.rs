@@ -115,13 +115,11 @@ pub(crate) fn request_save(
                     on_saved();
                 }
                 Err(e) => {
-                    let err = adw::AlertDialog::builder()
-                        .heading(suite_common::i18n("Could Not Save File"))
-                        .body(&e)
-                        .build();
+                    let err = adw::AlertDialog::new(Some(&suite_common::i18n("Could Not Save File")), Some(&e));
                     err.add_response("ok", &suite_common::i18n("_OK"));
                     err.set_default_response(Some("ok"));
-                    err.present(Some(&parent));
+                    err.set_close_response("ok");
+                    err.choose(Some(&parent), None::<&gtk4::gio::Cancellable>, move |_| {});
                 }
             }
         },

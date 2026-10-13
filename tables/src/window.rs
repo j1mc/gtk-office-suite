@@ -1760,10 +1760,7 @@ impl TablesWindow {
                 // same name under a writable extension.
                 let path_str = path.to_string_lossy().to_string();
                 if !tables_core::io::is_writable_format(&path_str) {
-                    let prompt = adw::AlertDialog::builder()
-                        .heading(suite_common::i18n("Cannot Save in This Format"))
-                        .body(unsupported_save_format_message(&path_str))
-                        .build();
+                    let prompt = adw::AlertDialog::new(Some(&suite_common::i18n("Cannot Save in This Format")), Some(&unsupported_save_format_message(&path_str)));
                     prompt.add_response("cancel", &suite_common::i18n("_Cancel"));
                     prompt.add_response("save-as", &suite_common::i18n("_Save As…"));
                     prompt.set_response_appearance(
@@ -1771,18 +1768,18 @@ impl TablesWindow {
                     prompt.set_default_response(Some("save-as"));
                     prompt.set_close_response("cancel");
                     let app_for_prompt = app_for_save.clone();
-                    prompt.connect_response(None, move |_, response| {
+                    let w_for_prompt = w.clone();
+                    prompt.choose(Some(&w_for_prompt), None::<&gio::Cancellable>, move |response| {
                         if response == "save-as" {
                             app_for_prompt.activate_action("save-file-as", None);
                         }
                     });
-                    prompt.present(Some(&w));
                     return;
                 }
                 // Ask first when the save would drop content the file
                 // holds (#1272); cancelling writes nothing.
                 let target = path_str.clone();
-                crate::persistence::request_save(w, Some(&path_str), std::path::Path::new(&path_str), &s, &ctl, &slot, move || {
+                crate::persistence::request_save(w.clone(), Some(&path_str), std::path::Path::new(&path_str), &s, &ctl, &slot, move || {
                     let settings = gtk4::gio::Settings::new("org.tunaos.tables");
                     suite_common::push_recent_file(&settings, &target);
                 });
