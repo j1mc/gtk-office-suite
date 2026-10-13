@@ -250,7 +250,7 @@ impl DeckSourceContext {
             len,
             hash,
             has_bytes,
-            carried: Carried::capture(source),
+            carried: suite_common_core::carry::capture(source),
             source_loss: crate::loss::content_a_save_drops(&path_str),
             opaque_names,
             opaque_complete,
