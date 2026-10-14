@@ -805,14 +805,45 @@ fn seeded_table_and_object_edits_share_one_history() {
                         .unwrap_or_default()
                 });
             }
-            check(&buf, &live, &format!("seed {seed} mixed table/object edits"));
+            check_with_chips(&buf, &live, &format!("seed {seed} mixed table/object edits"));
             let mut undos = 0;
             while live.borrow().can_undo() && undos < 500 {
                 undo(&buf, false);
                 undos += 1;
             }
             assert_eq!(live.borrow().document(), &original, "seed {seed}: one history did not restore everything");
-            check(&buf, &live, &format!("seed {seed} after undoing everything"));
+            check_with_chips(&buf, &live, &format!("seed {seed} after undoing everything"));
         }
     });
+}
+
+/// `check`, but chip tag ids are normalized first: a chip's tag is
+/// `chip:<id>:<kind>:<value>` where `<id>` comes from a process-wide render
+/// counter, so two exact projections of the same document never spell them
+/// the same. Everything else — text, other tags, starts, zero foreign
+/// edits — is still compared exactly.
+fn check_with_chips(buf: &gtk::TextBuffer, live: &Rc<RefCell<LiveModel>>, what: &str) {
+    let norm = |names: Vec<String>| {
+        names
+            .into_iter()
+            .map(|n| match n.strip_prefix("chip:").and_then(|r| r.split_once(':')) {
+                Some((_, tail)) => format!("chip:<id>:{tail}"),
+                None => n,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (doc, starts) = live.borrow().snapshot();
+    let fresh = gtk::TextBuffer::new(Some(&buf.tag_table()));
+    let want_starts = crate::bridge::render_to_buffer(&doc, &fresh);
+    let (got_text, got_tags) = shown(buf);
+    let (want_text, want_tags) = shown(&fresh);
+    assert_eq!(got_text, want_text, "the buffer's text after {what}");
+    let (got_tags, want_tags): (Vec<Vec<String>>, Vec<Vec<String>>) =
+        (got_tags.into_iter().map(norm).collect(), want_tags.into_iter().map(norm).collect());
+    if let Some(i) = got_tags.iter().zip(&want_tags).position(|(a, b)| a != b) {
+        let around: String = got_text.chars().skip(i.saturating_sub(10)).take(20).collect();
+        panic!("tags at char {i} ({around:?}) after {what}: {:?}, rendering gives {:?}", got_tags[i], want_tags[i]);
+    }
+    assert_eq!(starts, want_starts, "starts after {what}");
+    assert_eq!(live.borrow().foreign_edits, 0, "the buffer was edited behind the model's back by {what}");
 }
