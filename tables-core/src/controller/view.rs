@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::sheet::{col_label, FilterColumn, FilterDef, SortDirection};
+use crate::sheet::{col_label, FilterColumn, FilterDef, SheetModel, SortDirection};
 
 use super::ops::{Op, SheetProp};
 

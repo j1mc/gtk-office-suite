@@ -150,6 +150,14 @@ pub enum SheetProp {
     /// Rows and columns hidden by hand.
     HiddenRows(HashSet<usize>),
     HiddenCols(HashSet<usize>),
+    /// Conditional rules, charts, pivots, protection, print area and page
+    /// setup: each set whole, undo restores the previous list or value.
+    CondRules(Vec<crate::sheet::CondRule>),
+    Charts(Vec<crate::sheet::ChartSpec>),
+    Pivots(Vec<crate::sheet::PivotTableSpec>),
+    Protection(crate::sheet::SheetProtection),
+    PrintArea(Option<(usize, usize, usize, usize)>),
+    PageSetup(suite_common_core::print::PageSetup),
 }
 
 impl SheetProp {
