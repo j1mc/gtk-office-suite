@@ -488,7 +488,6 @@ mod tests {
             let settings = view.settings();
             settings.set_gtk_cursor_blink(true);
             settings.set_gtk_cursor_blink_time(200);
-            view.grab_focus();
             let ctx = glib::MainContext::default();
             let until = |ms: u64| {
                 let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -496,6 +495,8 @@ mod tests {
                     ctx.iteration(false);
                 }
             };
+            view.grab_focus();
+            until(200); // presentation and focus settle before asserting
             buf.place_cursor(&buf.iter_at_offset(2));
             assert!(view.caret_visible(), "a moved caret shows at once");
             assert!(view.is_focus(), "the page view has its window's focus");
