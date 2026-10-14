@@ -419,6 +419,7 @@ mod tests {
         crate::actions::register_formatting_tags(&buf);
         let live = crate::live::LiveModel::attach(&buf, letters_core::Document::from_plain_text(text));
         let view = PageView::new();
+        make_editable(&view, &buf);
         let snap = live.borrow().snapshot();
         view.set_typeset(Typeset::new(snap.doc, Default::default()), snap.starts);
         (view, buf)
