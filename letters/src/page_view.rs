@@ -4,9 +4,9 @@
 // `letters_core::layout::pango::Typeset`: the same render tree and the same
 // `draw_page` that print and PDF use, so what it shows is where the lines
 // and page breaks really are. Edits go to the tab's live model as ops (see
-// page_edit.rs); the buffer hosts the caret, the selection and the IME,
-// mapped onto the laid-out pages, and screen readers read the laid-out
-// revision's sequence text through GtkAccessibleText.
+// page_edit.rs); the buffer is the model's projection, hosting the caret,
+// the selection, the IME and the text screen readers read, mapped onto the
+// laid-out pages.
 //
 // Zoom is physical: 100% is 96/72 px per point, a Letter page is 816 px
 // wide, as in every other word processor and in the render lab's
@@ -76,65 +76,62 @@ mod imp {
         }
     }
 
-    /// The text screen readers see is the laid-out revision's sequence
-    /// text (LET-003), not the buffer's: the buffer holds list markers,
-    /// table pipes and footnote "[n]" that are presentation, not content.
-    /// Offsets throughout this impl are sequence offsets in that text; the
-    /// buffer stays the IME/caret host only.
+    /// The text screen readers see is the buffer's — the model's projection,
+    /// which also hosts the caret, the selection and the IME; offsets are
+    /// the buffer's char offsets. The model stays the sole authority: this
+    /// impl only reads (LET-003).
     impl AccessibleTextImpl for PageView {
         fn contents(&self, start: u32, end: u32) -> Option<glib::Bytes> {
-            let text = self.obj().a11y_text()?;
-            let chars: Vec<char> = text.chars().collect();
-            let (s, e) = ((start as usize).min(chars.len()), (end as usize).min(chars.len()));
-            let (s, e) = (s.min(e), e.max(s));
-            Some(glib::Bytes::from_owned(chars[s..e].iter().collect::<String>().into_bytes()))
+            let buf = self.buffer.borrow().clone()?;
+            let (s, e) = (buf.iter_at_offset(start as i32), buf.iter_at_offset(end.min(i32::MAX as u32) as i32));
+            Some(glib::Bytes::from_owned(buf.text(&s, &e, false).to_string().into_bytes()))
         }
 
         fn contents_at(&self, offset: u32, granularity: gtk::AccessibleTextGranularity) -> Option<(u32, u32, glib::Bytes)> {
-            let view = self.obj();
-            let text = view.a11y_text()?;
-            let chars: Vec<char> = text.chars().collect();
-            let at = (offset as usize).min(chars.len());
-            let (s, e) = match granularity {
-                gtk::AccessibleTextGranularity::Character => (at, (at + 1).min(chars.len())),
-                gtk::AccessibleTextGranularity::Word => word_bounds(&chars, at),
-                gtk::AccessibleTextGranularity::Sentence => sentence_bounds(&chars, at),
-                // A line is a laid-out line on the page, not a paragraph:
-                // through the buffer's line bounds and back.
-                gtk::AccessibleTextGranularity::Line => view
-                    .buffer_of_seq(at)
-                    .and_then(|b| view.line_bounds(b))
-                    .map(|(bls, ble)| {
-                        (view.seq_of_buffer(bls).unwrap_or(at), view.seq_of_buffer(ble).unwrap_or(at))
-                    })
-                    .unwrap_or_else(|| view.a11y_paragraph_bounds(at).unwrap_or((at, at))),
-                _ => view.a11y_paragraph_bounds(at).unwrap_or((at, at)),
-            };
-            let (s, e) = (s.min(e), e.max(s));
-            let bytes = chars[s..e].iter().collect::<String>().into_bytes();
-            Some((s as u32, e as u32, glib::Bytes::from_owned(bytes)))
+            let buf = self.buffer.borrow().clone()?;
+            let at = buf.iter_at_offset(offset as i32);
+            let (mut s, mut e) = (at, at);
+            match granularity {
+                gtk::AccessibleTextGranularity::Character => {
+                    e.forward_char();
+                }
+                gtk::AccessibleTextGranularity::Word => {
+                    if !s.starts_word() {
+                        s.backward_word_start();
+                    }
+                    e.forward_word_end();
+                }
+                gtk::AccessibleTextGranularity::Sentence => {
+                    if !s.starts_sentence() {
+                        s.backward_sentence_start();
+                    }
+                    e.forward_sentence_end();
+                }
+                // A line is a laid-out line on the page, not a paragraph.
+                gtk::AccessibleTextGranularity::Line => {
+                    let (ls, le) = self.obj().line_bounds(offset as usize).unwrap_or((offset as usize, offset as usize));
+                    s = buf.iter_at_offset(ls as i32);
+                    e = buf.iter_at_offset(le as i32);
+                }
+                _ => {
+                    s.set_line_offset(0);
+                    if !e.ends_line() {
+                        e.forward_to_line_end();
+                    }
+                }
+            }
+            let text = buf.text(&s, &e, false).to_string();
+            Some((s.offset() as u32, e.offset() as u32, glib::Bytes::from_owned(text.into_bytes())))
         }
 
         fn caret_position(&self) -> u32 {
-            let view = self.obj();
-            let off = self
-                .buffer
-                .borrow()
-                .as_ref()
-                .map(|b| b.iter_at_mark(&b.get_insert()).offset().max(0) as usize)
-                .unwrap_or(0);
-            view.seq_of_buffer(off).unwrap_or(off) as u32
+            self.buffer.borrow().as_ref().map_or(0, |b| b.iter_at_mark(&b.get_insert()).offset().max(0) as u32)
         }
 
         fn selection(&self) -> Vec<gtk::AccessibleTextRange> {
-            let view = self.obj();
             let Some(buf) = self.buffer.borrow().clone() else { return Vec::new() };
             match buf.selection_bounds() {
-                Some((s, e)) => {
-                    let (sb, eb) = (s.offset().max(0) as usize, e.offset().max(0) as usize);
-                    let (ss, se) = (view.seq_of_buffer(sb).unwrap_or(sb), view.seq_of_buffer(eb).unwrap_or(eb));
-                    vec![gtk::AccessibleTextRange::new(ss, se.saturating_sub(ss))]
-                }
+                Some((s, e)) => vec![gtk::AccessibleTextRange::new(s.offset() as usize, (e.offset() - s.offset()) as usize)],
                 None => Vec::new(),
             }
         }
@@ -146,39 +143,6 @@ mod imp {
         fn default_attributes(&self) -> Vec<(glib::GString, glib::GString)> {
             Vec::new()
         }
-    }
-
-    /// Word bounds around `at`, for assistive-technology word granularity.
-    fn word_bounds(chars: &[char], at: usize) -> (usize, usize) {
-        let at = at.min(chars.len());
-        let is_w = |c: char| c.is_alphanumeric() || c == '\'';
-        let (mut s, mut e) = (at, at);
-        while s > 0 && is_w(chars[s - 1]) {
-            s -= 1;
-        }
-        while e < chars.len() && is_w(chars[e]) {
-            e += 1;
-        }
-        (s, e)
-    }
-
-    /// Sentence bounds around `at` (through `.`, `!`, `?` or a paragraph
-    /// break, terminator included).
-    fn sentence_bounds(chars: &[char], at: usize) -> (usize, usize) {
-        let at = at.min(chars.len());
-        let is_end = |c: char| matches!(c, '.' | '!' | '?' | '\n');
-        let mut s = at;
-        while s > 0 && !is_end(chars[s - 1]) {
-            s -= 1;
-        }
-        let mut e = at;
-        while e < chars.len() && !is_end(chars[e]) {
-            e += 1;
-        }
-        if e < chars.len() {
-            e += 1;
-        }
-        (s, e)
     }
 
     impl WidgetImpl for PageView {
@@ -344,47 +308,6 @@ impl PageView {
         self.emit_by_name::<()>("laid-out", &[]);
     }
 
-    /// The text screen readers see: the laid-out revision's sequence text
-    /// (LET-003). Before the first layout, the buffer's text (read-only).
-    fn a11y_text(&self) -> Option<String> {
-        let typeset = self.imp().typeset.borrow();
-        if let Some(t) = typeset.as_ref() {
-            return Some(letters_core::edit::sequence_text(t.document()));
-        }
-        let buf = self.imp().buffer.borrow().clone()?;
-        Some(buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string())
-    }
-
-    /// Sequence offset of buffer offset `off` in the laid-out revision.
-    /// The buffer's caret and selection live in buffer offsets; everything
-    /// the view reports is in sequence offsets.
-    fn seq_of_buffer(&self, off: usize) -> Option<usize> {
-        let typeset = self.imp().typeset.borrow();
-        let doc = typeset.as_ref()?.document();
-        let starts = self.imp().starts.borrow();
-        let (para, offset) = crate::bridge::paragraph_offset(doc, &starts, off);
-        Some(letters_core::edit::paragraph_start(doc, para) + offset)
-    }
-
-    /// Buffer offset of sequence offset `at` in the laid-out revision.
-    fn buffer_of_seq(&self, at: usize) -> Option<usize> {
-        let typeset = self.imp().typeset.borrow();
-        let doc = typeset.as_ref()?.document();
-        let (para, offset) = letters_core::edit::locate(doc, at)?;
-        let starts = self.imp().starts.borrow();
-        Some(crate::bridge::buffer_offset(&doc.paragraphs[para], *starts.get(para)?, offset))
-    }
-
-    /// Sequence range of the laid-out paragraph holding `at`.
-    fn a11y_paragraph_bounds(&self, at: usize) -> Option<(usize, usize)> {
-        let typeset = self.imp().typeset.borrow();
-        let doc = typeset.as_ref()?.document();
-        let (para, _) = letters_core::edit::locate(doc, at)?;
-        let s = letters_core::edit::paragraph_start(doc, para);
-        Some((s, s + letters_core::edit::seq_len(&doc.paragraphs[para].runs)))
-    }
-
-
     /// Call `f` whenever the pages change.
     pub fn connect_laid_out(&self, f: impl Fn(&Self) + 'static) -> glib::SignalHandlerId {
         self.connect_local("laid-out", false, move |args| {
@@ -444,25 +367,18 @@ impl PageView {
             gtk::accessible::Property::Label(&suite_common::i18n("Print Layout")),
             gtk::accessible::Property::MultiLine(true),
         ]);
-        // Tell assistive technologies what changed, as GtkTextView does —
-        // in sequence offsets, the space `AccessibleTextImpl` reports in.
+        // Tell assistive technologies what changed, as GtkTextView does.
         let v = self.downgrade();
         buf.connect_insert_text(move |_, at, text| {
             if let Some(v) = v.upgrade() {
-                let off = at.offset().max(0) as usize;
-                let start = v.seq_of_buffer(off).unwrap_or(off) as u32;
+                let start = at.offset().max(0) as u32;
                 v.update_contents(gtk::AccessibleTextContentChange::Insert, start, start + text.chars().count() as u32);
             }
         });
         let v = self.downgrade();
         buf.connect_delete_range(move |_, s, e| {
             if let Some(v) = v.upgrade() {
-                let (so, eo) = (s.offset().max(0) as usize, e.offset().max(0) as usize);
-                v.update_contents(
-                    gtk::AccessibleTextContentChange::Remove,
-                    v.seq_of_buffer(so).unwrap_or(so) as u32,
-                    v.seq_of_buffer(eo).unwrap_or(eo) as u32,
-                );
+                v.update_contents(gtk::AccessibleTextContentChange::Remove, s.offset().max(0) as u32, e.offset().max(0) as u32);
             }
         });
         let v = self.downgrade();
