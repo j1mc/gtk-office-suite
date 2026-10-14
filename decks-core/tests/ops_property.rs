@@ -132,9 +132,9 @@ fn direct(slides: &mut Vec<Slide>, e: &Edit) {
     };
     match e {
         Edit::AddObject { slide, at, x } => {
+            let id = fresh(slides);
             if let Some(s) = slides.get_mut(*slide) {
                 if *at <= s.objects.len() {
-                    let id = fresh(slides);
                     s.objects.insert(*at, rect(*x));
                     s.ids.objects.insert(*at, id);
                     s.ids.deleted.retain(|d| *d != id);
