@@ -510,12 +510,13 @@ fn run_lengths(run: &Run) -> (usize, usize) {
 /// list or a table came out shifted by those characters.
 pub fn selection_fragment(buf: &gtk::TextBuffer, start: usize, end: usize) -> letters_core::fragment::Fragment {
     let Some(m) = crate::live::of(buf) else { return letters_core::fragment::Fragment::Text(Vec::new()) };
-    let (doc, starts) = m.borrow_mut().snapshot();
+    let snap = m.borrow_mut().snapshot();
+    let (doc, starts) = (&snap.doc, &snap.starts);
     let seq = |off: usize| {
-        let (para, offset) = paragraph_offset(&doc, &starts, off);
-        letters_core::edit::paragraph_start(&doc, para) + offset
+        let (para, offset) = paragraph_offset(doc, starts, off);
+        letters_core::edit::paragraph_start(doc, para) + offset
     };
-    letters_core::fragment::from_sequence(&doc, seq(start), seq(end))
+    letters_core::fragment::from_sequence(doc, seq(start), seq(end))
 }
 
 /// Buffer offset of char `offset` of paragraph `para`'s layout text, the
@@ -1334,25 +1335,26 @@ fn structured_edit_on_model<F>(buf: &gtk::TextBuffer, m: &std::rc::Rc<std::cell:
 where
     F: FnOnce(&mut letters_core::structured::StructuredEditor),
 {
-    let (doc, starts) = m.borrow_mut().snapshot();
+    let snap = m.borrow_mut().snapshot();
+    let (doc, starts) = (&snap.doc, &snap.starts);
     let mut editor = letters_core::structured::StructuredEditor::new(doc.clone());
-    editor.set_cursor(model_offset(&doc, &starts, buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
+    editor.set_cursor(model_offset(doc, starts, buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
     if let Some((start, end)) = buf.selection_bounds() {
         editor.select(
-            model_offset(&doc, &starts, start.offset().max(0) as usize),
-            model_offset(&doc, &starts, end.offset().max(0) as usize),
+            model_offset(doc, starts, start.offset().max(0) as usize),
+            model_offset(doc, starts, end.offset().max(0) as usize),
         );
     }
     edit(&mut editor);
-    let ops = letters_core::edit::diff(&doc, editor.document());
+    let ops = letters_core::edit::diff(doc, editor.document());
     if ops.is_empty() {
         return;
     }
     let mut m = m.borrow_mut();
     if m.apply_user_ops(buf, &ops, false) {
         // The caret where the command left it (the new table's first cell).
-        let (doc, starts) = m.snapshot();
-        let off = buffer_offset_of_model(&doc, &starts, editor.cursor());
+        let snap = m.snapshot();
+        let off = buffer_offset_of_model(&snap.doc, &snap.starts, editor.cursor());
         buf.place_cursor(&buf.iter_at_offset(off as i32));
     }
 }

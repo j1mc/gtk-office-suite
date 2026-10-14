@@ -143,12 +143,15 @@ pub(crate) fn typeset_for(container: &PageContainer, buf: &gtk::TextBuffer) -> l
 }
 
 /// `typeset_for`, plus where each laid-out paragraph starts in the buffer,
-/// which the page view needs to edit it.
+/// which the page view needs to edit it. The one ordinary layout path: one
+/// `LiveModel::snapshot` plus `layout_options(container)` (LET-004); the
+/// typeset records the snapshot's revision.
 fn typeset_with_starts(container: &PageContainer, buf: &gtk::TextBuffer) -> (letters_core::layout::pango::Typeset, Vec<usize>) {
-    let (doc, starts) = crate::live::of(buf).map(|m| m.borrow().snapshot()).unwrap_or_default();
-    let mut typeset = letters_core::layout::pango::Typeset::new(doc, layout_options(container));
+    let snap = crate::live::of(buf).map(|m| m.borrow().snapshot()).unwrap_or_default();
+    let mut typeset = letters_core::layout::pango::Typeset::new(snap.doc, layout_options(container));
     typeset.set_image_loader(crate::page_view::load_image);
-    (typeset, starts)
+    typeset.set_revision(snap.revision);
+    (typeset, snap.starts)
 }
 
 /// Put the selection on `widget`'s clipboard as the suite fragment, with
@@ -376,8 +379,8 @@ pub(crate) fn make_doc_widget(settings: Option<&gio::Settings>) -> (PageContaine
             let id = glib::idle_add_local(move || {
                 match pc.page_view().filter(|v| v.page_count() > 0) {
                     Some(view) => {
-                        let (doc, starts) = live.borrow_mut().snapshot();
-                        view.update_document(doc, layout_options(&pc), starts);
+                        let snap = live.borrow_mut().snapshot();
+                        view.update_document(snap.doc, layout_options(&pc), snap.starts, snap.revision);
                     }
                     None => refresh_print_layout(&pc, &buf),
                 }

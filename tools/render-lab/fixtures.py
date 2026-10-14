@@ -113,6 +113,17 @@ EXPORT = {
 # "mq4" in ours (pixels equivalent), so word recall is 0.833 < 0.90 with
 # lost_lines 0. Same class as the letters/nested-list amber; covering it
 # keeps every eligible fixture inside the ratchet instead of outside it.
+#
+# NOTE (letters/nested-list #1127, letters/super-subscript #1115: accepted
+# OCR-artifact ambers, same class as render #904). Reduced to a layout/pango
+# cause per LET-004 and none found — the export pixels agree: nested-list
+# SSIM 0.9992 with disp 0.47pt, super-subscript SSIM 1.0000 with disp 0.0pt,
+# ink ~1.0 and lost_lines 0 on both (scorecard-export.json, main). Word
+# recall alone ambers them (0.889 / 0.75): the reference decodes misread a
+# bullet-adjacent "two" and the small raised/lowered "2" glyphs, while 4x
+# crops of ours-vs-LO are pixel-identical (indents, markers, super/subscript
+# shaping). There is no geometry miss to fix, so no thresholds are tuned and
+# no geometry is churned to chase the OCR: the ambers stand as documented.
 
 
 def add(app, feature, path, expect):

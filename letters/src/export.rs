@@ -1,4 +1,7 @@
-// export.rs — Document export: Markdown → Typst, Markdown → PDF (via typst CLI).
+// export.rs — Markdown → Typst → PDF helpers: the explicitly approximate
+// alternative export (ADR 0010), never the page-faithful path. Screen,
+// print, preview and Export as PDF all draw the tab's laid-out pages
+// (printing.rs, `Typeset::draw_page`).
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use pulldown_cmark::{Parser, html};

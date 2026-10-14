@@ -5,11 +5,12 @@
 // layout").
 //
 // Each thumbnail draws its page from the page view's own typeset
-// (`PageView::draw_page_at`), so it shows exactly the laid-out page. They
-// follow the page view's `laid-out` signal, mark the page holding the
-// caret, and activating one scrolls Print Layout to that page. Nothing is
-// drawn while the view is hidden, and with no document open the view says
-// so.
+// (`PageView::draw_page_at`), so it shows exactly the laid-out page at the
+// screen's revision (`PageView::revision`, LET-004): there is no second
+// layout to disagree. They follow the page view's `laid-out` signal, mark
+// the page holding the caret, and activating one scrolls Print Layout to
+// that page. Nothing is drawn while the view is hidden, and with no
+// document open the view says so.
 
 use gtk4::{self as gtk, glib, prelude::*};
 use libadwaita as adw;

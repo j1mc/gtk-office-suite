@@ -8735,7 +8735,9 @@ class LettersPrintLayoutEditingSmoke(BaseGUITestCase):
         self.wait_for_node(name="New Document", roleName="push button").do_action(0)
         page_view = self.wait_for_node(name="Print Layout", roleName="text")
         zoom = lambda: self.trigger_snapshot("org.tunaos.letters")["view"]["zoom"]
+        pages = lambda: self.trigger_snapshot("org.tunaos.letters")["view"]["pages"]
         before = zoom()
+        before_pages = pages()
         (x, y), (w, h) = page_view.position, page_view.size
         # The view's extents are its whole scrolled size, wider than a
         # narrow window: its middle was off the window's right edge at
@@ -8747,6 +8749,9 @@ class LettersPrintLayoutEditingSmoke(BaseGUITestCase):
                         "keydown", "ctrl", "click", "4", "keyup", "ctrl"],
                        capture_output=True, timeout=5)
         self.wait_until(zoom, lambda z: z > before, description=f"the zoom to grow past {before}")
+        # Zoom only scales the display (LET-004): the laid-out pages — and
+        # their breaks — are unchanged.
+        self.assertEqual(pages(), before_pages, "zoom moved the page breaks")
         self.assertIsNone(self.process.poll(), "letters crashed zooming")
 
 

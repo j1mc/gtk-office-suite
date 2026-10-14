@@ -120,7 +120,7 @@ impl LettersWindow {
             ("app.print", &suite_common::i18n("Print…")),
             ("app.print-preview", &suite_common::i18n("Print Preview")),
             ("app.export-pdf", &suite_common::i18n("Export as PDF…")),
-            ("app.export-pdf-typst", &suite_common::i18n("Export as PDF With Typst…")),
+            ("app.export-pdf-typst", &suite_common::i18n("Export as PDF With Typst (Approximate)…")),
             ("app.edit-headers", &suite_common::i18n("Edit Headers and Footers…")),
             ("app.style-p", &suite_common::i18n("Paragraph Style: Normal")),
             ("app.style-h1", &suite_common::i18n("Paragraph Style: Heading 1")),
@@ -471,8 +471,10 @@ impl LettersWindow {
             app.add_action(&a);
             app.set_accels_for_action(&format!("app.{name}"), &[accel]);
         }
-        // Typst stays as an alternative typeset export (ADR 0010); it no
-        // longer defines what a PDF of the document looks like.
+        // Typst stays as an explicitly approximate alternative typeset
+        // export (ADR 0010, engine.rs): it re-typesets plain text, never the
+        // laid-out pages, so it must never satisfy a WYSIWYG claim or stand
+        // in for Export as PDF in any test or document.
         {
             let tv = tab_view.clone();
             let w = win.clone();
@@ -600,6 +602,12 @@ impl LettersWindow {
                     eprintln!("export-pdf: no PageContainer in the active tab");
                     return;
                 };
+                // The current revision, not whatever the view last laid out
+                // (LET-004): an edit since the last idle relayout must reach
+                // the exported PDF.
+                if let Some(buf) = active_buffer(&tv) {
+                    crate::doc_tab::refresh_print_layout(&pc, &buf);
+                }
                 let Some(pv) = pc.page_view() else { return };
                 if let Err(e) = pv.write_pdf(std::path::Path::new(&out)) {
                     eprintln!("export-pdf: {e}");
