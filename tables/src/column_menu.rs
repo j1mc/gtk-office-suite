@@ -159,6 +159,11 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
                 crate::sheet_actions::apply(&ctl, &grid, |c| c.clear_column_filter(col));
                 refresh();
                 grid.queue_draw();
+                // The menu held keyboard focus while open; hand it back to
+                // the grid so grid shortcuts (Ctrl+G and typing) work at
+                // once instead of waiting on whatever focus limbo popdown
+                // leaves behind.
+                grid.grab_focus();
             });
             content.append(&clear_one);
         }
