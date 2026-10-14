@@ -1094,11 +1094,12 @@ impl DecksWindow {
             let masters = masters.clone();
             let w = suite_win.window.clone();
             let dirty = dirty.clone();
+            let ctl_new_doc = controller.clone();
             let act = gtk::gio::SimpleAction::new("new-document", None);
             act.connect_activate(move |_, _| {
                 let (cs, cs_scroll, ss, path_ref, sl, masters, refresh, ctl) = (
                     cs.clone(), cs_scroll.clone(), ss.clone(), path_ref.clone(),
-                    sl.clone(), masters.clone(), refresh.clone(), controller.clone(),
+                    sl.clone(), masters.clone(), refresh.clone(), ctl_new_doc.clone(),
                 );
                 let dirty = dirty.clone();
                 suite_common::confirm_discarding(&w, dirty.get(), "presentation", move || {
