@@ -17,6 +17,9 @@
 //!   its master), and `builds`, whose entries name their object by its
 //!   node, not by its index, so a concurrent insert or move doesn't
 //!   retarget a build;
+//! - an object: `v`, its kind, and one register `f.<field>` per field of
+//!   that kind (`f.x`, `f.text`, `f.style`, ...), so one person moving a box
+//!   while another edits its text keeps both.
 //! A deleted slide or object keeps its node and gets `d` set: a tombstone
 //! that no move clears, so a delete wins over a concurrent move or edit,
 //! as the RFC decides (Loro's own `delete` would lose to a concurrent
