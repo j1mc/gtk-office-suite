@@ -25,6 +25,7 @@ pub mod ops;
 mod odp_text;
 pub mod presenter;
 pub mod provenance;
+pub mod recovery;
 pub mod snapshot;
 pub mod templates;
 pub mod undo;

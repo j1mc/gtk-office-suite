@@ -423,6 +423,86 @@ impl DeckSourceContext {
     }
 }
 
+/// The imported revision's pinned identity and findings, cloned out of a
+/// session for a recovery snapshot (`recovery.rs`). Plain data, no
+/// serialization: the payload owns its encoding, and this stays readable
+/// without it.
+#[derive(Clone, Debug)]
+pub struct PinnedRevision {
+    pub source: PathBuf,
+    pub format: String,
+    pub len: u64,
+    pub hash: u64,
+    pub has_bytes: bool,
+    pub source_loss: CompatibilityReport,
+    pub opaque_names: Vec<String>,
+    pub mutations: MutationSet,
+}
+
+impl DeckSourceContext {
+    /// Clone the pinned revision out for a recovery snapshot.
+    pub fn pinned_revision(&self) -> PinnedRevision {
+        PinnedRevision {
+            source: self.source.clone(),
+            format: self.format.clone(),
+            len: self.len,
+            hash: self.hash,
+            has_bytes: self.has_bytes,
+            source_loss: self.source_loss.clone(),
+            opaque_names: self.opaque_names.clone(),
+            mutations: self.mutations.clone(),
+        }
+    }
+
+    /// Rebuild a context for a recovered session from a stored pin
+    /// (DCK-003). When the live path still resolves to the pinned
+    /// revision — same length and content hash — the carried parts, loss
+    /// scan and opaque inventory are re-captured from it, exactly as open
+    /// would have, and the stored dependency set is kept. Anything else
+    /// (missing, replaced, or never readable) keeps the STORED loss
+    /// report and names, with the inventory marked incomplete: a changed
+    /// file's content is never inferred safe, and the next save asks
+    /// about the stored findings against the live file instead of
+    /// silently carrying another revision's parts.
+    ///
+    /// The stored completeness flag is not taken: the intact path
+    /// re-captures it from identical bytes, and the degraded path cannot
+    /// vouch for another revision's inventory.
+    pub fn recovered(
+        source: PathBuf,
+        format: String,
+        len: u64,
+        hash: u64,
+        has_bytes: bool,
+        source_loss: CompatibilityReport,
+        opaque_names: Vec<String>,
+        mutations: MutationSet,
+    ) -> Self {
+        let intact = has_bytes
+            && std::fs::read(&source).is_ok_and(|bytes| {
+                let (live_len, live_hash) = fingerprint(&bytes);
+                live_len == len && live_hash == hash
+            });
+        if intact {
+            let mut recaptured = DeckSourceContext::capture(&source);
+            recaptured.mutations = mutations;
+            return recaptured;
+        }
+        Self {
+            source,
+            format,
+            len,
+            hash,
+            has_bytes,
+            carried: Carried::default(),
+            source_loss,
+            opaque_names,
+            opaque_complete: false,
+            mutations,
+        }
+    }
+}
+
 /// Test introspection for `snapshot.rs`: the stored facts about the
 /// imported revision, never a live filesystem read. `source_state` is
 /// deliberately absent — snapshots assert what was captured, while the

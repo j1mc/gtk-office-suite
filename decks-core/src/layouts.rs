@@ -19,7 +19,7 @@ use crate::engine::{MasterSlide, Slide, SlideObject, TextBody};
 
 /// What a placeholder holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Placeholder {
     Title,
     Subtitle,
@@ -76,7 +76,7 @@ impl Placeholder {
 }
 
 /// Which standard arrangement a layout is (pptx `p:sldLayout type`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LayoutKind {
     Title,
     TitleAndContent,
@@ -115,7 +115,7 @@ impl LayoutKind {
 }
 
 /// One placeholder's place on a layout, in model units.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutPlaceholder {
     /// Stable identity within its layout (DCK-005): readers assign ids
     /// once at import; 0 means not assigned yet (`ops::ensure_all_ids`).
@@ -128,7 +128,7 @@ pub struct LayoutPlaceholder {
 }
 
 /// One layout of a master.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     /// Stable identity within its master (DCK-005). Slides name their
     /// layout by this id ([`crate::engine::Slide::layout_id`]); readers

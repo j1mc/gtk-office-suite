@@ -35,7 +35,7 @@ use crate::builds::Build;
 use crate::engine::{MasterSlide, Slide, SlideObject, Transition};
 
 /// A slide's and its objects' stable ids.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SlideIds {
     /// 0: not assigned yet.
     pub slide: u64,
