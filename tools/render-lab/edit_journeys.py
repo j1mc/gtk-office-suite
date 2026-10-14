@@ -31,7 +31,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 JOURNEYS = {
     "letters": ("LettersEditRenderJourney", "docx",
-                "A paragraph ending in two bold words, then a bulleted item, as typed and saved by Letters"),
+                "A paragraph ending in two bold words, then a bulleted item, then a table cell entry, as typed and saved by Letters"),
     "tables": ("TablesEditRenderJourney", "xlsx",
                "Item/Amount header in bold over two rows (Paper 12, Ink 30), as entered and saved by Tables"),
     "decks": ("DecksEditRenderJourney", "pptx",

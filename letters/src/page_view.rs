@@ -297,15 +297,24 @@ impl PageView {
     }
 
     /// Lay out an edited version of the document, re-using the shaped
-    /// paragraphs the edit did not touch.
-    pub fn update_document(&self, doc: letters_core::Document, opts: letters_core::layout::LayoutOptions, starts: Vec<usize>) {
+    /// paragraphs the edit did not touch. `revision` is the snapshot's: the
+    /// view draws the revision it was given, and reports it back.
+    pub fn update_document(&self, doc: letters_core::Document, opts: letters_core::layout::LayoutOptions, starts: Vec<usize>, revision: u64) {
         if let Some(t) = self.imp().typeset.borrow_mut().as_mut() {
             t.update(doc, opts);
+            t.set_revision(revision);
         }
         self.imp().starts.replace(starts);
         self.queue_resize();
         self.queue_draw();
         self.emit_by_name::<()>("laid-out", &[]);
+    }
+
+    /// The `LiveModel` revision the laid-out pages were drawn from (0 with
+    /// nothing laid out, or unpinned): print, thumbnails, PDF and headless
+    /// export agree with the screen by sharing this revision.
+    pub fn revision(&self) -> u64 {
+        self.imp().typeset.borrow().as_ref().map_or(0, |t| t.revision())
     }
 
     /// Call `f` whenever the pages change.
@@ -672,6 +681,25 @@ mod tests {
             let data = surface.take_data().unwrap();
             assert!(data.iter().any(|b| *b < 200), "the page's text is drawn");
             assert!(data.iter().filter(|b| **b == 255).count() > data.len() / 2, "on white paper");
+        });
+    }
+
+    /// The view reports the revision it drew (LET-004): `set_typeset`
+    /// carries the snapshot's, and `update_document` re-pins it — a
+    /// thumbnail, print or PDF drawn from this view is the same revision
+    /// as the screen.
+    #[test]
+    fn the_view_reports_the_revision_it_drew() {
+        gtk_test(|| {
+            let v = PageView::new();
+            assert_eq!(v.revision(), 0, "nothing laid out yet");
+            let doc = Document::from_plain_text("one\ntwo");
+            let mut first = Typeset::new(doc.clone(), LayoutOptions::default());
+            first.set_revision(7);
+            v.set_typeset(first, vec![0, 4]);
+            assert_eq!(v.revision(), 7);
+            v.update_document(doc, LayoutOptions::default(), vec![0, 4], 8);
+            assert_eq!(v.revision(), 8, "an edited layout re-pins its snapshot's revision");
         });
     }
 }
