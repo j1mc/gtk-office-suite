@@ -468,37 +468,28 @@ impl DeckSourceContext {
     /// The stored completeness flag is not taken: the intact path
     /// re-captures it from identical bytes, and the degraded path cannot
     /// vouch for another revision's inventory.
-    pub fn recovered(
-        source: PathBuf,
-        format: String,
-        len: u64,
-        hash: u64,
-        has_bytes: bool,
-        source_loss: CompatibilityReport,
-        opaque_names: Vec<String>,
-        mutations: MutationSet,
-    ) -> Self {
-        let intact = has_bytes
-            && std::fs::read(&source).is_ok_and(|bytes| {
+    pub fn recovered(pin: &PinnedRevision) -> Self {
+        let intact = pin.has_bytes
+            && std::fs::read(&pin.source).is_ok_and(|bytes| {
                 let (live_len, live_hash) = fingerprint(&bytes);
-                live_len == len && live_hash == hash
+                live_len == pin.len && live_hash == pin.hash
             });
         if intact {
-            let mut recaptured = DeckSourceContext::capture(&source);
-            recaptured.mutations = mutations;
+            let mut recaptured = DeckSourceContext::capture(&pin.source);
+            recaptured.mutations = pin.mutations.clone();
             return recaptured;
         }
         Self {
-            source,
-            format,
-            len,
-            hash,
-            has_bytes,
+            source: pin.source.clone(),
+            format: pin.format.clone(),
+            len: pin.len,
+            hash: pin.hash,
+            has_bytes: pin.has_bytes,
             carried: Carried::default(),
-            source_loss,
-            opaque_names,
+            source_loss: pin.source_loss.clone(),
+            opaque_names: pin.opaque_names.clone(),
             opaque_complete: false,
-            mutations,
+            mutations: pin.mutations.clone(),
         }
     }
 }

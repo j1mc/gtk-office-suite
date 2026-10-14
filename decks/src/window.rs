@@ -1444,6 +1444,7 @@ impl DecksWindow {
             // orphan for the next launch, as before.
             let unresolved = match decks_core::recovery::decode_snapshot(&bytes) {
                 decks_core::recovery::SnapshotKind::Versioned(session) => {
+                    let session = *session;
                     // Document, context and revision land as one session:
                     // the next save is as safe as the crashed one's was.
                     self.controller.install_recovered_session(session.deck, session.context, session.revision);

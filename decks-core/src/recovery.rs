@@ -187,7 +187,7 @@ pub enum SnapshotKind {
     /// A versioned payload: install deck, context and revision as one
     /// session. Never claims more than the payload holds — see
     /// `RecoveredSession.context`.
-    Versioned(RecoveredSession),
+    Versioned(Box<RecoveredSession>),
     /// Package-shaped bytes: a legacy snapshot, or a newer version's
     /// fallback. Open with the package readers; they carry no context, so
     /// the session makes no source-loss claims about them.
@@ -295,7 +295,7 @@ pub fn decode_snapshot(bytes: &[u8]) -> SnapshotKind {
         }
     };
     debug_assert_eq!(snapshot.v, RECOVERY_VERSION, "the version gate above let a non-v1 body through");
-    SnapshotKind::Versioned(rebuild_session(snapshot))
+    SnapshotKind::Versioned(Box::new(rebuild_session(snapshot)))
 }
 
 /// Split the envelope magic and length off, returning the JSON body.
@@ -328,17 +328,16 @@ fn rebuild_session(mut snapshot: SnapshotV1) -> RecoveredSession {
     let mut unresolved = std::mem::take(&mut snapshot.unresolved);
     restage_assets(&mut snapshot.deck, &snapshot.assets, &mut unresolved);
     let context = snapshot.context.as_ref().and_then(|stored| {
-        let source = stored.source_path()?;
-        Some(DeckSourceContext::recovered(
-            source,
-            stored.format.clone(),
-            stored.source_len,
-            stored.source_hash,
-            stored.has_bytes,
-            stored.source_loss.clone(),
-            stored.opaque_names.clone(),
-            stored.mutations(),
-        ))
+        Some(DeckSourceContext::recovered(&PinnedRevision {
+            source: stored.source_path()?,
+            format: stored.format.clone(),
+            len: stored.source_len,
+            hash: stored.source_hash,
+            has_bytes: stored.has_bytes,
+            source_loss: stored.source_loss.clone(),
+            opaque_names: stored.opaque_names.clone(),
+            mutations: stored.mutations(),
+        }))
     });
     RecoveredSession {
         deck: snapshot.deck,

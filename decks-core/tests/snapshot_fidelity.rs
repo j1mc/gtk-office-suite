@@ -1786,6 +1786,7 @@ fn recovery_keeps_opaque_graph_and_assets() {
     let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
         panic!("the snapshot must decode as versioned");
     };
+    let back = *back;
     assert!(back.unresolved_assets.is_empty(), "captured pictures restage: {:?}", back.unresolved_assets);
     assert_eq!(back.revision, rev, "the revision travels with the snapshot");
     // Same identities the crashed session had.
@@ -2018,6 +2019,7 @@ fn recovery_after_source_replacement_keeps_no_carry() {
     let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
         panic!("the snapshot must decode as versioned");
     };
+    let back = *back;
     let recovered = decks_core::DecksController::new(vec![], vec![]);
     recovered.install_recovered_session(back.deck, back.context, back.revision);
     assert_eq!(recovered.source_state(), decks_core::SourceState::Replaced);
