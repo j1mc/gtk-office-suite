@@ -370,14 +370,14 @@ fn resolve_anchor(
         widths
             .get(c)
             .copied()
-            .filter(|w| w.is_finite() && *w > 0.0)
+            .filter(|w| w.is_finite() && *w >= 0.0)
             .unwrap_or(COL_WIDTH)
     };
     let height_of = |r: usize| {
         heights
             .get(r)
             .copied()
-            .filter(|h| h.is_finite() && *h > 0.0)
+            .filter(|h| h.is_finite() && *h >= 0.0)
             .unwrap_or(ROW_HEIGHT)
     };
     let w: f64 = (col..to_col).map(width_of).sum::<f64>() + (to_col_off - from_col_off) / 9525.0;
@@ -747,14 +747,22 @@ pub fn read_charts_detailed(
         return (out, issues);
     }
 
+    // The owning sheet's real geometry, mirroring the writer: hidden
+    // rows/columns occupy zero pixels when the object moves and sizes
+    // with its cells (the writer default), so a chart laid out over them
+    // inverts to the written size.
     let geometry = |name: &str| -> (Vec<f64>, Vec<f64>) {
         sheets
             .iter()
             .find(|s| s.name == name)
             .map(|s| {
                 (
-                    s.col_widths.iter().copied().collect(),
-                    s.row_heights.iter().copied().collect(),
+                    (0..s.cols.max(s.col_widths.len()))
+                        .map(|c| if s.is_col_hidden(c) { 0.0 } else { s.col_width(c) })
+                        .collect(),
+                    (0..s.rows.max(s.row_heights.len()))
+                        .map(|r| if s.is_row_hidden(r) { 0.0 } else { s.row_height(r) })
+                        .collect(),
                 )
             })
             .unwrap_or_default()
