@@ -37,6 +37,10 @@ pub struct LiveModel {
     doc: Document,
     /// Buffer offset where each paragraph's text starts.
     starts: Vec<usize>,
+    /// Edits applied since the document was opened (LET-004): every layout
+    /// records the revision it drew, so print, thumbnails, PDF and headless
+    /// export prove they show the current document, not a stale one.
+    revision: u64,
     /// The buffer is being changed from the model.
     projecting: bool,
     history: History,
@@ -46,6 +50,18 @@ pub struct LiveModel {
     /// Track changes: the author edits are recorded as, or None when
     /// edits apply directly (`letters_core::track`).
     pub tracking: Option<String>,
+}
+
+/// The live model's document at one revision: the document itself, its
+/// paragraphs' buffer starts, and how many edits had landed when taken.
+/// Every ordinary layout (screen, thumbnails, print, preview, PDF,
+/// headless export) is drawn from one of these plus
+/// `doc_tab::layout_options`, and records its revision.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub doc: Document,
+    pub starts: Vec<usize>,
+    pub revision: u64,
 }
 
 /// The live model of `buf`, if it has one.
@@ -113,15 +129,23 @@ impl LiveModel {
     /// into the buffer.
     fn show(&mut self, buf: &gtk::TextBuffer, doc: Document) {
         self.history.clear();
+        // A fresh epoch: undo starts here, and so does the revision.
+        self.revision = 0;
         self.projecting = true;
         self.starts = crate::bridge::render_to_buffer(&doc, buf);
         self.projecting = false;
         self.doc = doc;
     }
 
-    /// The current document and its paragraphs' buffer starts.
-    pub fn snapshot(&self) -> (Document, Vec<usize>) {
-        (self.doc.clone(), self.starts.clone())
+    /// The current document, its paragraphs' buffer starts, and the
+    /// revision the layout drawn from them records.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { doc: self.doc.clone(), starts: self.starts.clone(), revision: self.revision }
+    }
+
+    /// How many edits have landed since the document was opened.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Update the buffer to the model, after the model
@@ -296,6 +320,7 @@ impl LiveModel {
             Ok(inverse) => {
                 self.history.set_merge(typing);
                 self.history.record(inverse);
+                self.revision += 1;
                 self.project(buf, &old);
                 true
             }
@@ -363,6 +388,7 @@ impl LiveModel {
         let old = self.doc.clone();
         let done = if redo { self.history.redo(&mut self.doc) } else { self.history.undo(&mut self.doc) };
         if done.is_some() {
+            self.revision += 1;
             self.project(buf, &old);
         }
         done.is_some()

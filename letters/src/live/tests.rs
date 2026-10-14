@@ -27,16 +27,16 @@ fn shown(buf: &gtk::TextBuffer) -> (String, Vec<Vec<String>>) {
 /// it, are what rendering the model's document from scratch gives, and
 /// nothing but the model has edited the buffer.
 fn check(buf: &gtk::TextBuffer, live: &Rc<RefCell<LiveModel>>, what: &str) {
-    let (doc, starts) = live.borrow().snapshot();
+    let snap = live.borrow().snapshot();
     let fresh = gtk::TextBuffer::new(Some(&buf.tag_table()));
-    let want_starts = crate::bridge::render_to_buffer(&doc, &fresh);
+    let want_starts = crate::bridge::render_to_buffer(&snap.doc, &fresh);
     let (got, want) = (shown(buf), shown(&fresh));
     assert_eq!(got.0, want.0, "the buffer's text after {what}");
     if let Some(i) = got.1.iter().zip(&want.1).position(|(a, b)| a != b) {
         let around: String = got.0.chars().skip(i.saturating_sub(10)).take(20).collect();
         panic!("tags at char {i} ({around:?}) after {what}: {:?}, rendering gives {:?}", got.1[i], want.1[i]);
     }
-    assert_eq!(starts, want_starts, "starts after {what}");
+    assert_eq!(snap.starts, want_starts, "starts after {what}");
     assert_eq!(live.borrow().foreign_edits, 0, "the buffer was edited behind the model's back by {what}");
 }
 
@@ -285,7 +285,7 @@ fn a_keystroke_on_200_paragraphs_relays_out_within_budget() {
             .map(|i| format!("Paragraph {i}: the quick brown fox jumps over the lazy dog, twice over at least."))
             .collect();
         let (buf, live) = tab(&Document::from_plain_text(&text.join("\n")));
-        let (doc, _) = live.borrow().snapshot();
+        let doc = live.borrow().snapshot().doc;
         let mut typeset = Typeset::new(doc.clone(), LayoutOptions::default());
 
         let full = {
@@ -298,7 +298,7 @@ fn a_keystroke_on_200_paragraphs_relays_out_within_budget() {
         for k in 0..21 {
             let start = Instant::now();
             type_at(&buf, base + k, "x");
-            let (doc, _) = live.borrow().snapshot();
+            let doc = live.borrow().snapshot().doc;
             let shaped = typeset.update(doc, LayoutOptions::default());
             samples.push(start.elapsed());
             assert_eq!(shaped, 1, "only the edited paragraph is shaped again");
@@ -383,8 +383,28 @@ fn markdown_shortcuts_make_formatting() {
         }
         settle();
         check(&buf, &live, "a Print Layout shortcut");
-        let doc = live.borrow().snapshot().0;
+        let doc = live.borrow().snapshot().doc;
         assert!(doc.paragraphs[0].runs.iter().any(|r| r.text == "it" && r.style.italic), "{:?}", doc.paragraphs[0].runs);
+    });
+}
+
+/// The snapshot carries the revision its document is at, and every edit
+/// — typing, undo, redo — advances it (LET-004): layouts pin this, so a
+/// stale view can never claim to show the current document.
+#[test]
+fn revisions_advance_one_per_edit_and_undo() {
+    gtk_test(|| {
+        let (buf, live) = tab(&Document::from_plain_text("one"));
+        assert_eq!(live.borrow().revision(), 0, "a fresh tab starts a new epoch");
+        assert_eq!(live.borrow().snapshot().revision, 0);
+        type_at(&buf, 3, "x");
+        assert_eq!(live.borrow().revision(), 1, "typing is one edit");
+        assert_eq!(live.borrow().snapshot().revision, 1);
+        undo(&buf, false);
+        assert_eq!(live.borrow().revision(), 2, "undo is an edit too");
+        undo(&buf, true);
+        assert_eq!(live.borrow().revision(), 3, "so is redo");
+        assert_eq!(live.borrow().snapshot().doc.to_plain_text(), "onex");
     });
 }
 
@@ -655,7 +675,7 @@ fn review_anchors_hold_across_unicode_edits_and_one_history_undoes_them() {
                     6..=8 => { undo(&buf, false); ops.push("undo".into()); }
                     _ => { undo(&buf, true); ops.push("redo".into()); }
                 }
-                let (doc, _) = live.borrow_mut().snapshot();
+                let doc = live.borrow_mut().snapshot().doc;
                 let what = format!("seed {seed:#x} step {step} after {ops:?}");
                 assert_eq!(covered(&doc, &|s| s.comments.contains(&1)), "COMMENTED", "the comment moved: {what}");
                 assert_eq!(covered(&doc, &|s| s.revision.is_some()), "INSERTED", "the tracked insertion moved: {what}");
@@ -666,7 +686,7 @@ fn review_anchors_hold_across_unicode_edits_and_one_history_undoes_them() {
                 undo(&buf, false);
                 undos += 1;
             }
-            let (back, _) = live.borrow_mut().snapshot();
+            let back = live.borrow_mut().snapshot().doc;
             assert_eq!(back.paragraphs, original.paragraphs, "seed {seed:#x}: undoing everything did not restore the document after {ops:?}");
             check(&buf, &live, &format!("seed {seed:#x} after undoing everything"));
         }
@@ -832,9 +852,9 @@ fn check_with_chips(buf: &gtk::TextBuffer, live: &Rc<RefCell<LiveModel>>, what: 
             })
             .collect::<Vec<_>>()
     };
-    let (doc, starts) = live.borrow().snapshot();
+    let snap = live.borrow().snapshot();
     let fresh = gtk::TextBuffer::new(Some(&buf.tag_table()));
-    let want_starts = crate::bridge::render_to_buffer(&doc, &fresh);
+    let want_starts = crate::bridge::render_to_buffer(&snap.doc, &fresh);
     let (got_text, got_tags) = shown(buf);
     let (want_text, want_tags) = shown(&fresh);
     assert_eq!(got_text, want_text, "the buffer's text after {what}");
@@ -844,6 +864,6 @@ fn check_with_chips(buf: &gtk::TextBuffer, live: &Rc<RefCell<LiveModel>>, what: 
         let around: String = got_text.chars().skip(i.saturating_sub(10)).take(20).collect();
         panic!("tags at char {i} ({around:?}) after {what}: {:?}, rendering gives {:?}", got_tags[i], want_tags[i]);
     }
-    assert_eq!(starts, want_starts, "starts after {what}");
+    assert_eq!(snap.starts, want_starts, "starts after {what}");
     assert_eq!(live.borrow().foreign_edits, 0, "the buffer was edited behind the model's back by {what}");
 }

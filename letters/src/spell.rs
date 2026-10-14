@@ -191,7 +191,7 @@ impl SpellCheckHandle {
 
     /// Replace the model word at the caret with `replacement`: the backend
     /// a spelling-suggestions menu applies (LET-003). The word's range is a
-    /// sequence range from `snapshot().0`; the buffer offsets derived from
+    /// sequence range from `snapshot().doc`; the buffer offsets derived from
     /// it place the caret only. One model edit, so one Undo takes it back.
     /// False with no live model or when the caret is not on a word.
     #[allow(dead_code)]
