@@ -1227,9 +1227,7 @@ impl DecksController {
         {
             let slides = self.slides.borrow();
             let masters = self.masters.borrow();
-            let mut next = slides.iter().flat_map(|s| {
-                std::iter::once(s.ids.slide).chain(s.ids.objects.iter().copied()).chain(s.ids.deleted.iter().copied())
-            }).chain(masters.iter().map(|m| m.id)).max().unwrap_or(0) + 1;
+            let mut next = crate::ops::next_session_id(&slides, &masters);
             for l in layouts.iter_mut() {
                 l.id = next;
                 next += 1;

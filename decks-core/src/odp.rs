@@ -2384,6 +2384,7 @@ mod tests {
     fn styles_xml_ties_the_master_its_background_and_the_slide_together() {
         let deck = Deck {
             masters: vec![MasterSlide {
+                id: 0,
                 name: "House Style".into(),
                 background: "#204060".into(),
                 default_font: "Sans".into(),
@@ -2431,6 +2432,7 @@ mod tests {
     fn deck_with_picture(path: &str) -> Deck {
         Deck {
             masters: vec![MasterSlide {
+                id: 0,
                 name: "Default".into(),
                 background: "#ffffff".into(),
                 default_font: "Sans".into(),
@@ -2911,6 +2913,7 @@ mod default_font_tests {
         let deck = Deck {
             slides: vec![],
             masters: vec![MasterSlide {
+                id: 0,
                 name: "M".into(),
                 background: "#ffffff".into(),
                 default_font: "Liberation Serif".into(),
@@ -2940,6 +2943,7 @@ mod default_font_tests {
         let deck = Deck {
             slides: vec![],
             masters: vec![MasterSlide {
+                id: 0,
                 name: "M".into(),
                 background: "#ffffff".into(),
                 default_font: "   ".into(),
