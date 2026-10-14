@@ -2320,10 +2320,11 @@ mod tests {
         let c = DecksController::new(vec![slide("S1")], vec![]);
         let s = sid(&c, 0);
         let revision = c.revision();
+        let id = crate::ops::next_id(&c.slides.borrow());
         let outcome = c.apply_ops_txn(vec![Op::InsertObject {
             slide: s,
             at: 0,
-            id: crate::ops::next_id(&c.slides.borrow()),
+            id,
             object: Box::new(rect(3.0, 4.0)),
         }]);
         assert!(outcome.applied);
