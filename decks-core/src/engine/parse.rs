@@ -1280,10 +1280,9 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         }
     }
     if masters.is_empty() {
-        let id = fresh;
-        fresh += 1;
         masters.push(MasterSlide {
-            id,
+            // Stamped by the ensure below, once, with everything else.
+            id: 0,
             name: "Default".into(),
             background: "#ffffff".into(),
             default_font: MasterSlide::DEFAULT_FONT.into(),
@@ -1294,8 +1293,6 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     }
 
     if slides.is_empty() {
-        let slide_id = fresh;
-        fresh += 1;
         slides.push(Slide {
             title: "Slide 1".into(),
             background: "#ffffff".into(),
@@ -1304,7 +1301,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
-            ids: crate::ops::SlideIds { slide: slide_id, objects: Vec::new(), deleted: Vec::new() },
+            ids: Default::default(),
             layout_id: None,
         });
     }

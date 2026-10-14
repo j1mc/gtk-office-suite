@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_layouts_look_goes_over_its_masters() {
-        let mut m = MasterSlide {
+        let m = MasterSlide {
             id: 7,
             name: "M".into(),
             background: "#ffffff".into(),

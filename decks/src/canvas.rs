@@ -1353,6 +1353,7 @@ mod font_tests {
         );
     }
 
+    #[test]
     fn a_master_that_names_a_font_gets_it() {
         let m = master(7, "Liberation Serif");
         assert_eq!(master_font_family(Some(&m)), "Liberation Serif");
