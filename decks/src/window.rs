@@ -1451,7 +1451,7 @@ impl DecksWindow {
                     session.unresolved_assets
                 }
                 decks_core::recovery::SnapshotKind::Package(package) => {
-                    let Ok(deck) = crate::persistence::read_legacy_package(&state_dir, &package, &ext) else {
+                    let Ok(deck) = crate::persistence::read_legacy_package(&state_dir, package.as_slice(), &ext) else {
                         continue;
                     };
                     // Legacy snapshots carry no context: the session makes
