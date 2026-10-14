@@ -9,11 +9,11 @@ fn slide(title: &str, objects: Vec<SlideObject>, notes: &str) -> Slide {
         background: "#ffffff".into(),
         objects,
         notes: notes.to_string(),
-        master_idx: Some(0),
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
