@@ -391,7 +391,7 @@ fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityRepor
                     attr("operator").as_deref().unwrap_or("missing"),
                 ));
             }
-            if matches!(attr("dxfId"), None) {
+            if attr("dxfId").is_none() {
                 record(report, UNSUPPORTED_RULES, location, "a value rule names no style Tables resolves, so it paints Tables' default highlight rather than the file's");
             }
             if matches!(attr("stopIfTrue").as_deref(), Some("1") | Some("true")) {
