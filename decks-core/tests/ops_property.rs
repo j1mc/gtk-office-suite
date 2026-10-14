@@ -234,7 +234,10 @@ proptest! {
         let mut via_ops = start.clone();
         ensure_ids(&mut via_ops);
         let initial = live(&via_ops);
+        // The direct side tracks the same ids (builds name them), so it
+        // starts numbered exactly like the ops side.
         let mut plain = start;
+        ensure_ids(&mut plain);
         let mut history: History<Op> = History::default();
         for e in &edits {
             let ops = ops_for(&via_ops, e);
