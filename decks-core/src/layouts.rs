@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The model follows PowerPoint's: a master (background, font, decorations)
-// has several layouts; each slide uses one (`Slide::layout`, an index into
-// its master's `layouts`). A layout places placeholders and may add its own
-// background and decorations over the master's. A text box that fills a
-// placeholder says which (`TextBody::placeholder`), which is what lets a
-// layout move it and a file mark it (pptx `p:ph`, odp `presentation:class`).
+// has several layouts; each slide uses one (`Slide::layout_id`, the id of
+// one of its master's `layouts`). A layout places placeholders and may add
+// its own background and decorations over the master's. A text box that
+// fills a placeholder says which (`TextBody::placeholder`), which is what
+// lets a layout move it and a file mark it (pptx `p:ph`, odp
+// `presentation:class`).
 //
 // Applying a layout (`apply`) moves each of the slide's placeholder boxes
 // to the layout's place for its role, adds an empty box for a role the
@@ -116,6 +117,9 @@ impl LayoutKind {
 /// One placeholder's place on a layout, in model units.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutPlaceholder {
+    /// Stable identity within its layout (DCK-005): readers assign ids
+    /// once at import; 0 means not assigned yet (`ops::ensure_all_ids`).
+    pub id: u64,
     pub role: Placeholder,
     pub x: f64,
     pub y: f64,
@@ -126,6 +130,10 @@ pub struct LayoutPlaceholder {
 /// One layout of a master.
 #[derive(Clone, Debug)]
 pub struct Layout {
+    /// Stable identity within its master (DCK-005). Slides name their
+    /// layout by this id ([`crate::engine::Slide::layout_id`]); readers
+    /// assign ids once at import and 0 means not assigned yet.
+    pub id: u64,
     pub name: String,
     pub kind: LayoutKind,
     /// Its own background over the master's, if it has one.
@@ -136,11 +144,11 @@ pub struct Layout {
 }
 
 fn ph(role: Placeholder, x: f64, y: f64, w: f64, h: f64) -> LayoutPlaceholder {
-    LayoutPlaceholder { role, x, y, w, h }
+    LayoutPlaceholder { id: 0, role, x, y, w, h }
 }
 
 fn layout(name: &str, kind: LayoutKind, placeholders: Vec<LayoutPlaceholder>) -> Layout {
-    Layout { name: name.into(), kind, background: None, shapes: Vec::new(), placeholders }
+    Layout { id: 0, name: name.into(), kind, background: None, shapes: Vec::new(), placeholders }
 }
 
 /// The standard layouts a new master gets (PowerPoint's and Keynote's
@@ -162,11 +170,12 @@ pub fn standard() -> Vec<Layout> {
     ]
 }
 
-/// A master's background and decorations for a slide on its layout
-/// `layout`: the layout's background over the master's, and its
-/// decorations after the master's.
-pub fn effective_master(master: &MasterSlide, layout: Option<usize>) -> MasterSlide {
-    let Some(l) = layout.and_then(|i| master.layouts.get(i)) else { return master.clone() };
+/// A master's background and decorations for a slide on layout `layout_id`:
+/// the layout's background over the master's, and its decorations after
+/// the master's. The layout is resolved by stable id; an unknown id draws
+/// the bare master rather than a positional guess.
+pub fn effective_master(master: &MasterSlide, layout_id: Option<u64>) -> MasterSlide {
+    let Some(l) = layout_id.and_then(|id| master.layout_by_id(id)) else { return master.clone() };
     let mut m = master.clone();
     if let Some(bg) = &l.background {
         m.background = bg.clone();
@@ -253,11 +262,11 @@ mod tests {
             background: "#ffffff".into(),
             objects,
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: Some(7),
             transition: Default::default(),
             builds: vec![],
             ids: Default::default(),
-            layout: Some(0),
+            layout_id: Some(3),
         }
     }
 
@@ -293,7 +302,8 @@ mod tests {
 
     #[test]
     fn a_layouts_look_goes_over_its_masters() {
-        let mut m = MasterSlide {
+        let m = MasterSlide {
+            id: 7,
             name: "M".into(),
             background: "#ffffff".into(),
             default_font: "Sans".into(),
@@ -301,13 +311,19 @@ mod tests {
             page_emu: None,
             layouts: standard(),
         };
+        let mut masters = vec![m];
+        crate::ops::ensure_all_ids(&mut Vec::new(), &mut masters);
+        let mut m = masters.pop().unwrap();
         m.layouts[2].background = Some("#102030".into());
         m.layouts[2].shapes.push(SlideObject::Rect { x: 5.0, y: 5.0, w: 1.0, h: 1.0, rotation: 0.0 });
-        let e = effective_master(&m, Some(2));
+        let third = m.layouts[2].id;
+        let first = m.layouts[0].id;
+        let e = effective_master(&m, Some(third));
         assert_eq!(e.background, "#102030");
         assert_eq!(e.shapes.len(), 2);
-        assert_eq!(effective_master(&m, Some(0)).background, "#ffffff");
+        assert_eq!(effective_master(&m, Some(first)).background, "#ffffff");
         assert_eq!(effective_master(&m, None).shapes.len(), 1);
+        assert_eq!(effective_master(&m, Some(u64::MAX)).shapes.len(), 1, "an unknown layout id draws the bare master");
     }
 
     #[test]

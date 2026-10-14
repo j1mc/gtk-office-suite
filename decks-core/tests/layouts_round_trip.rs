@@ -12,7 +12,9 @@ use decks_core::DecksController;
 pub fn deck() -> Deck {
     let (slides, masters) = decks_core::templates::deck(3).unwrap();
     let c = DecksController::new(slides, masters);
-    assert!(c.apply_layout(1, 3), "Two Content applies");
+    let s = c.slide_id_at(1).unwrap();
+    let two = c.masters.borrow()[0].layouts[3].id;
+    assert!(c.apply_layout(s, two), "Two Content applies");
     c.deck()
 }
 
@@ -46,7 +48,7 @@ fn slides(d: &Deck) -> Vec<String> {
                     other => format!("{other:?}"),
                 })
                 .collect();
-            format!("{:?} {boxes:?}", s.layout)
+            format!("{:?} {boxes:?}", d.layout_of(s).map(|l| l.name.clone()))
         })
         .collect()
 }
@@ -55,7 +57,7 @@ fn slides(d: &Deck) -> Vec<String> {
 fn layouts_and_placeholders_survive_pptx_and_odp() {
     let d = deck();
     assert_eq!(d.masters[0].layouts.len(), 6);
-    assert_eq!(d.slides[1].layout, Some(3));
+    assert_eq!(d.layout_of(&d.slides[1]).map(|l| l.name.clone()).as_deref(), Some("Two Content"));
     // The applied layout added an empty second body.
     assert_eq!(d.slides[1].objects.len(), 3);
     for ext in ["pptx", "odp"] {
@@ -82,7 +84,7 @@ fn a_deck_without_layouts_is_read_back_without_any() {
         decks_core::write_deck(path.to_str().unwrap(), &d).unwrap();
         let back = decks_core::read_deck(path.to_str().unwrap()).unwrap();
         assert!(back.masters[0].layouts.is_empty(), "{ext}: {:?}", back.masters[0].layouts);
-        assert_eq!(back.slides[0].layout, None, "{ext}");
+        assert_eq!(back.slides[0].layout_id, None, "{ext}");
     }
 }
 
@@ -94,7 +96,8 @@ fn a_layout_with_its_own_look_keeps_it_in_both_formats() {
     let bar = SlideObject::Rect { x: 0.0, y: 500.0, w: 960.0, h: 40.0, rotation: 0.0 };
     d.masters[0].layouts[2].background = Some("#203040".into());
     d.masters[0].layouts[2].shapes.push(bar.clone());
-    d.slides[0].layout = Some(2);
+    d.slides[0].layout_id = Some(d.masters[0].layouts[2].id);
+    let look_name = d.masters[0].layouts[2].name.clone();
     for ext in ["pptx", "odp"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(format!("look.{ext}"));
@@ -104,7 +107,8 @@ fn a_layout_with_its_own_look_keeps_it_in_both_formats() {
         assert_eq!(l.background.as_deref(), Some("#203040"), "{ext}");
         assert_eq!(l.shapes.len(), 1, "{ext}: {:?}", l.shapes);
         assert_eq!(back.masters[0].shapes.len(), d.masters[0].shapes.len(), "{ext}: the master's own decorations");
-        assert_eq!(back.slides[0].layout, Some(2), "{ext}");
+        // Layout ids are session-local; the name is what persists.
+        assert_eq!(back.layout_of(&back.slides[0]).map(|l| l.name.clone()).as_deref(), Some(look_name.as_str()), "{ext}");
         assert_eq!(layouts(&back), layouts(&d), "{ext}");
     }
 }

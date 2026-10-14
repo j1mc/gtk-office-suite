@@ -133,23 +133,19 @@ fn page(groups: &[&adw::PreferencesGroup]) -> adw::PreferencesPage {
 
 /// Build the inspector. `changed` redraws the canvas and the rest of the
 /// window after an edit.
-pub fn build(
-    ctl: &Rc<DecksController>,
-    current_slide: &Rc<Cell<usize>>,
-    selected: &Rc<Cell<Option<usize>>>,
-    changed: Rc<dyn Fn()>,
-) -> FormatInspector {
+pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspector {
     // Set while widgets are filled from the model, so their change signals
     // don't write straight back into it.
     let syncing = Rc::new(Cell::new(false));
     let apply: Rc<dyn Fn(FormatEdit)> = {
-        let (ctl, cs, sel, syncing, changed) = (ctl.clone(), current_slide.clone(), selected.clone(), syncing.clone(), changed.clone());
+        let (ctl, syncing, changed) = (ctl.clone(), syncing.clone(), changed.clone());
         Rc::new(move |edit: FormatEdit| {
             if syncing.get() {
                 return;
             }
-            let Some(oi) = sel.get() else { return };
-            if ctl.format_objects(cs.get(), &[oi], &edit) {
+            let sel = ctl.selection();
+            let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) else { return };
+            if ctl.format_objects(slide_id, &[object_id], &edit) {
                 changed();
             }
         })
@@ -271,7 +267,7 @@ pub fn build(
     let animate_page = page(&[&build_group]);
 
     // ── Chart ────────────────────────────────────────────────────────────
-    let chart = crate::chart_inspector::build(ctl, current_slide, selected, changed.clone());
+    let chart = crate::chart_inspector::build(ctl, changed.clone());
 
     // ── Tabs ─────────────────────────────────────────────────────────────
     let stack = adw::ViewStack::new();
@@ -306,7 +302,7 @@ pub fn build(
     preview.set_action_name(Some("app.preview-transition"));
     transition.add_suffix(&preview);
     slide_group.add(&transition);
-    let layout = crate::layout_picker::build(ctl, current_slide, changed.clone());
+    let layout = crate::layout_picker::build(ctl, changed.clone());
     slide_group.add(&layout.row);
     slide_group.add(&crate::master_view::inspector_row());
     let empty = page(&[&slide_group]);
@@ -317,12 +313,12 @@ pub fn build(
 
     // ── Model → widgets ──────────────────────────────────────────────────
     let sync: Rc<dyn Fn()> = {
-        let (ctl, cs, sel, syncing) = (ctl.clone(), current_slide.clone(), selected.clone(), syncing.clone());
+        let (ctl, syncing) = (ctl.clone(), syncing.clone());
         let (outer, stack) = (outer.clone(), stack.clone());
         let (style_tab, text_tab, chart_tab, chart_sync) = (style_tab.clone(), text_tab.clone(), chart_tab.clone(), chart.sync.clone());
         // The object last shown, so a newly selected chart opens on its
         // Chart tab.
-        let shown: Rc<Cell<Option<(usize, usize)>>> = Rc::default();
+        let shown: Rc<Cell<Option<(u64, u64)>>> = Rc::default();
         let (fill, outline, outline_width, kind) = (fill.clone(), outline.clone(), outline_width.clone(), kind.clone());
         let (font, size, bold, italic, text_color) =
             (font.clone(), size.clone(), bold.clone(), italic.clone(), text_color.clone());
@@ -333,11 +329,12 @@ pub fn build(
         let (build_in, build_out, build_order) = (build_in.clone(), build_out.clone(), build_order.clone());
         let picture_group = picture_group.clone();
         Rc::new(move || {
-            let f: Option<ObjectFormat> = sel.get().and_then(|oi| ctl.object_format(cs.get(), oi));
+            let sel = ctl.selection();
+            let f: Option<ObjectFormat> = sel.slide_id.zip(sel.primary_object_id).and_then(|(sid, oid)| ctl.object_format(sid, oid));
             let Some(f) = f else {
                 outer.set_visible_child_name("empty");
                 layout_sync();
-                let current = ctl.slides.borrow().get(cs.get()).map(|s| s.transition).unwrap_or_default();
+                let current = sel.slide_id.and_then(|sid| ctl.slide_index(sid)).and_then(|idx| ctl.slides.borrow().get(idx).map(|s| s.transition)).unwrap_or_default();
                 syncing.set(true);
                 if let Some(i) = Transition::ALL.iter().position(|t| *t == current) {
                     transition.set_selected(i as u32);
@@ -351,7 +348,7 @@ pub fn build(
             text_tab.set_visible(f.has_text);
             chart_tab.set_visible(f.chart.is_some());
             picture_group.set_visible(f.picture);
-            let now = sel.get().map(|oi| (cs.get(), oi));
+            let now = sel.slide_id.zip(sel.primary_object_id);
             let newly = shown.replace(now) != now;
             let visible = stack.visible_child_name().map(|n| n.to_string());
             let shown_ok = match visible.as_deref() {
@@ -403,12 +400,12 @@ pub fn build(
             w.set_value(bw);
             h.set_value(bh);
             rotation.set_value(f.rotation.rem_euclid(360.0).round());
-            if let (Some(oi), Some(slide)) = (sel.get(), ctl.slides.borrow().get(cs.get())) {
+            if let (Some(object_id), Some(slide)) = (sel.primary_object_id, sel.slide_id.and_then(|sid| ctl.slide_index(sid)).and_then(|idx| ctl.slides.borrow().get(idx).cloned())) {
                 let pick = |out: bool| {
                     slide
                         .builds
                         .iter()
-                        .find(|b| b.object == oi && b.out == out)
+                        .find(|b| b.object == object_id && b.out == out)
                         .and_then(|b| BuildEffect::ALL.iter().position(|e| *e == b.effect))
                         .map_or(0, |i| i as u32 + 1)
                 };
@@ -418,7 +415,7 @@ pub fn build(
                     .builds
                     .iter()
                     .enumerate()
-                    .filter(|(_, b)| b.object == oi)
+                    .filter(|(_, b)| b.object == object_id)
                     .map(|(i, _)| i + 1)
                     .collect();
                 let n = slide.builds.len();
@@ -566,51 +563,55 @@ pub fn build(
         (&forward, ZOrderOp::BringForward),
         (&to_front, ZOrderOp::BringToFront),
     ] {
-        let (ctl, cs, sel, changed) = (ctl.clone(), current_slide.clone(), selected.clone(), changed.clone());
+        let (ctl, changed) = (ctl.clone(), changed.clone());
         button.connect_clicked(move |_| {
-            let Some(oi) = sel.get() else { return };
-            let n = ctl.slides.borrow().get(cs.get()).map_or(0, |s| s.objects.len());
-            ctl.z_order_object(cs.get(), oi, op);
-            // The selection follows the object to its new place.
-            sel.set(Some(decks_core::undo::z_order_index(oi, n, op)));
-            changed();
+            let sel = ctl.selection();
+            let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) else { return };
+            // Identity is unchanged by a reorder: the selection still names
+            // the same object, so nothing follows it to a new index.
+            if ctl.z_order_object(slide_id, object_id, op) {
+                changed();
+            }
         });
     }
 
     for (button, fill) in [(&crop_fill, true), (&crop_reset, false)] {
-        let (ctl, cs, sel, changed) = (ctl.clone(), current_slide.clone(), selected.clone(), changed.clone());
+        let (ctl, changed) = (ctl.clone(), changed.clone());
         button.connect_clicked(move |_| {
-            let Some(oi) = sel.get() else { return };
-            if ctl.crop_picture(cs.get(), oi, fill) {
+            let sel = ctl.selection();
+            let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) else { return };
+            if ctl.crop_picture(slide_id, object_id, fill) {
                 changed();
             }
         });
     }
 
     {
-        let (ctl, cs, syncing, changed) = (ctl.clone(), current_slide.clone(), syncing.clone(), changed.clone());
+        let (ctl, syncing, changed) = (ctl.clone(), syncing.clone(), changed.clone());
         transition.connect_selected_notify(move |r| {
             if syncing.get() {
                 return;
             }
             if let Some(t) = Transition::ALL.get(r.selected() as usize) {
-                if ctl.set_transition(cs.get(), *t) {
-                    changed();
+                if let Some(slide_id) = ctl.selection().slide_id {
+                    if ctl.set_transition(slide_id, *t) {
+                        changed();
+                    }
                 }
             }
         });
     }
 
     for (row, out) in [(&build_in, false), (&build_out, true)] {
-        let (ctl, cs, sel, syncing, changed, sync) =
-            (ctl.clone(), current_slide.clone(), selected.clone(), syncing.clone(), changed.clone(), sync.clone());
+        let (ctl, syncing, changed, sync) = (ctl.clone(), syncing.clone(), changed.clone(), sync.clone());
         row.connect_selected_notify(move |r| {
             if syncing.get() {
                 return;
             }
-            let Some(oi) = sel.get() else { return };
+            let sel = ctl.selection();
+            let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) else { return };
             let effect = (r.selected() as usize).checked_sub(1).and_then(|i| BuildEffect::ALL.get(i).copied());
-            if ctl.set_build(cs.get(), oi, out, effect) {
+            if ctl.set_build(slide_id, object_id, out, effect) {
                 changed();
                 sync();
             }

@@ -24,8 +24,6 @@ pub(crate) struct EditorHandles<'a> {
     pub slide_list: &'a gtk::ListBox,
     pub slides: &'a Rc<RefCell<Vec<Slide>>>,
     pub masters: &'a Rc<RefCell<Vec<MasterSlide>>>,
-    pub current_slide: &'a Rc<Cell<usize>>,
-    pub selected_object: &'a Rc<Cell<Option<usize>>>,
     pub controller: &'a Rc<DecksController>,
     pub refresh_hud: &'a Rc<dyn Fn()>,
     pub transition: &'a Rc<RefCell<TransitionState>>,
@@ -34,7 +32,7 @@ pub(crate) struct EditorHandles<'a> {
 /// Cross-app copy and paste (DESIGN-UI), in place text editing on a
 /// double-click, and the editor's keys: navigation, delete, undo and redo.
 pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
-    let EditorHandles { window, canvas, slide_list, slides, masters, current_slide, selected_object, controller, refresh_hud, transition } = h;
+    let EditorHandles { window, canvas, slide_list, slides, masters, controller, refresh_hud, transition } = h;
     let text_editing = register_text_editor(h, editor_host);
     // ── Cross-app clipboard (DESIGN-UI): Ctrl+C copies the selected
     // text box as a styled fragment; Ctrl+V pastes a fragment as a
@@ -42,8 +40,6 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
     // the notes view has focus.
     {
         let ss = slides.clone();
-        let cs_ref = current_slide.clone();
-        let so = selected_object.clone();
         let cs = canvas.clone();
         let controller2 = controller.clone();
         let refresh = refresh_hud.clone();
@@ -64,11 +60,11 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
                 return glib::Propagation::Proceed;
             }
             if keyval == gtk::gdk::Key::c {
-                let idx = cs_ref.get();
                 let slides = ss.borrow();
-                let frag = so
-                    .get()
-                    .and_then(|oi| slides.get(idx).and_then(|s| s.objects.get(oi)))
+                let frag = controller2
+                    .primary_object_index()
+                    .zip(controller2.selected_slide_index())
+                    .and_then(|(oi, idx)| slides.get(idx).and_then(|s| s.objects.get(oi)))
                     .and_then(decks_core::fragment::copy_object);
                 if let Some(frag) = frag {
                     let provider = suite_common::clipboard::provider(
@@ -88,7 +84,6 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
                 return glib::Propagation::Proceed;
             }
             let cs2 = cs.clone();
-            let cs_ref2 = cs_ref.clone();
             let controller3 = controller2.clone();
             let refresh2 = refresh.clone();
             suite_common::clipboard::read_string(
@@ -100,8 +95,9 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
                         .and_then(decks_core::fragment::Fragment::from_json)
                     {
                         let obj = decks_core::fragment::paste_as_text_box(&frag, 240.0, 200.0);
-                        let idx = cs_ref2.get();
-                        controller3.add_object(idx, obj);
+                        if let Some(slide_id) = controller3.selection().slide_id {
+                            controller3.add_object(slide_id, obj);
+                        }
                         cs2.queue_draw();
                         refresh2();
                     }
@@ -119,8 +115,6 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
         let sl = slide_list.clone();
         let ss = slides.clone();
         let cs = canvas.clone();
-        let cs_ref = current_slide.clone();
-        let so = selected_object.clone();
         let controller = controller.clone();
         let ts = transition.clone();
         let m = masters.clone();
@@ -136,27 +130,23 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
             // Ctrl+Z: undo
             if mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) && keyval == gtk::gdk::Key::z {
                 if controller.undo() {
-                    let (slide, object) = controller.repair_selection(cs_ref.get(), so.get());
-                    cs_ref.set(slide);
-                    so.set(object);
+                    controller.repair_selection();
                     cs.queue_draw();
                     // Snapshot instead of holding ss.borrow() across the
                     // call -- rebuild_slide_list()'s select_row() fires
                     // row-selected synchronously, which reaches ss.borrow_mut().
                     let slides = ss.borrow().clone();
-                    rebuild_slide_list(&sl, &slides, &m.borrow(), cs_ref.get());
+                    rebuild_slide_list(&sl, &slides, &m.borrow(), controller.selected_slide_index().unwrap_or(0));
                 }
                 return glib::Propagation::Stop;
             }
             // Ctrl+Shift+Z: redo
             if mods.contains(gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK) && keyval == gtk::gdk::Key::z {
                 if controller.redo() {
-                    let (slide, object) = controller.repair_selection(cs_ref.get(), so.get());
-                    cs_ref.set(slide);
-                    so.set(object);
+                    controller.repair_selection();
                     cs.queue_draw();
                     let slides = ss.borrow().clone();
-                    rebuild_slide_list(&sl, &slides, &m.borrow(), cs_ref.get());
+                    rebuild_slide_list(&sl, &slides, &m.borrow(), controller.selected_slide_index().unwrap_or(0));
                 }
                 return glib::Propagation::Stop;
             }
@@ -169,52 +159,70 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
                 // the keyboard reaches what the pointer does: the inspector
                 // follows the selection (PowerPoint and Keynote do the same).
                 gtk::gdk::Key::Tab | gtk::gdk::Key::ISO_Left_Tab => {
-                    let count = ss.borrow().get(cs_ref.get()).map_or(0, |s| s.objects.len());
+                    let sel = controller.selection();
+                    let Some(slide_id) = sel.slide_id else {
+                        return glib::Propagation::Proceed;
+                    };
+                    let Some(idx) = controller.slide_index(slide_id) else {
+                        return glib::Propagation::Proceed;
+                    };
+                    let count = ss.borrow().get(idx).map_or(0, |s| s.objects.len());
                     if count == 0 {
                         return glib::Propagation::Proceed;
                     }
                     let back = keyval == gtk::gdk::Key::ISO_Left_Tab || mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-                    so.set(Some(next_object(so.get(), count, back)));
+                    let next = next_object(controller.primary_object_index(), count, back);
+                    if let Some(object_id) = controller.object_id_at(idx, next) {
+                        controller.select_objects(slide_id, &[object_id], Some(object_id), decks_core::controller::SelectionMode::Object);
+                    }
                     refresh();
                     cs.queue_draw();
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
-                    let idx = cs_ref.get();
-                    if idx > 0 {
-                        let sls = ss.borrow();
-                        if idx < sls.len() && idx > 0 {
-                            // Backwards, the slide being left plays
-                            // its own transition in reverse.
-                            TransitionState::start(&ts, TransitionType::of(sls[idx].transition),
-                                &sls[idx], &sls[idx - 1], &m.borrow(), &cs);
+                    if let Some(idx) = controller.selected_slide_index() {
+                        if idx > 0 {
+                            let sls = ss.borrow();
+                            if idx < sls.len() && idx > 0 {
+                                // Backwards, the slide being left plays
+                                // its own transition in reverse.
+                                TransitionState::start(&ts, TransitionType::of(sls[idx].transition),
+                                    &sls[idx], &sls[idx - 1], &m.borrow(), &cs);
+                            }
+                            // Snapshot + drop before rebuild_slide_list(),
+                            // whose select_row() reaches ss.borrow_mut().
+                            let snap = sls.clone();
+                            drop(sls);
+                            if let Some(slide_id) = controller.slide_id_at(idx - 1) {
+                                controller.select_slide(slide_id);
+                            }
+                            rebuild_slide_list(&sl, &snap, &m.borrow(), idx - 1);
+                            cs.queue_draw();
                         }
-                        // Snapshot + drop before rebuild_slide_list(),
-                        // whose select_row() reaches ss.borrow_mut().
-                        let snap = sls.clone();
-                        drop(sls);
-                        cs_ref.set(idx - 1);
-                        rebuild_slide_list(&sl, &snap, &m.borrow(), idx - 1);
-                        cs.queue_draw();
                     }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Right | gtk::gdk::Key::Down | gtk::gdk::Key::space => {
-                    let idx = cs_ref.get();
-                    let slides = ss.borrow();
-                    if idx + 1 < slides.len() {
-                        TransitionState::start(&ts, TransitionType::of(slides[idx + 1].transition),
-                            &slides[idx], &slides[idx + 1], &m.borrow(), &cs);
-                        let snap = slides.clone();
-                        drop(slides);
-                        cs_ref.set(idx + 1);
-                        rebuild_slide_list(&sl, &snap, &m.borrow(), idx + 1);
-                        cs.queue_draw();
+                    if let Some(idx) = controller.selected_slide_index() {
+                        let slides = ss.borrow();
+                        if idx + 1 < slides.len() {
+                            TransitionState::start(&ts, TransitionType::of(slides[idx + 1].transition),
+                                &slides[idx], &slides[idx + 1], &m.borrow(), &cs);
+                            let snap = slides.clone();
+                            drop(slides);
+                            if let Some(slide_id) = controller.slide_id_at(idx + 1) {
+                                controller.select_slide(slide_id);
+                            }
+                            rebuild_slide_list(&sl, &snap, &m.borrow(), idx + 1);
+                            cs.queue_draw();
+                        }
                     }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Home => {
-                    cs_ref.set(0);
+                    if let Some(slide_id) = controller.slide_id_at(0) {
+                        controller.select_slide(slide_id);
+                    }
                     let snap = ss.borrow().clone();
                     rebuild_slide_list(&sl, &snap, &m.borrow(), 0);
                     cs.queue_draw();
@@ -226,24 +234,19 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
                         let snap = slides.clone();
                         let last = snap.len() - 1;
                         drop(slides);
-                        cs_ref.set(last);
+                        if let Some(slide_id) = controller.slide_id_at(last) {
+                            controller.select_slide(slide_id);
+                        }
                         rebuild_slide_list(&sl, &snap, &m.borrow(), last);
                         cs.queue_draw();
                     }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Delete | gtk::gdk::Key::BackSpace => {
-                    let idx = cs_ref.get();
-                    let slides = ss.borrow();
-                    if idx < slides.len() {
-                        if let Some(oi) = so.get() {
-                            if oi < slides[idx].objects.len() {
-                                let obj = slides[idx].objects[oi].clone();
-                                drop(slides);
-                                controller.delete_object(idx, oi, obj);
-                                so.set(None);
-                                cs.queue_draw();
-                            }
+                    let sel = controller.selection();
+                    if let (Some(slide_id), Some(object_id)) = (sel.slide_id, sel.primary_object_id) {
+                        if controller.delete_object(slide_id, object_id) {
+                            cs.queue_draw();
                         }
                     }
                     glib::Propagation::Stop
@@ -258,7 +261,7 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
 struct TextEdit {
     slide_id: u64,
     object_id: u64,
-    master: Option<usize>,
+    master: Option<u64>,
     original: String,
     bounds: (f64, f64, f64, f64),
 }
@@ -358,17 +361,16 @@ fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell
                     // the current slide or stale object index.
                     let target = {
                         let slides = controller.slides.borrow();
-                        slides.iter().position(|s| s.ids.slide == edit.slide_id).and_then(|si| {
-                            let slide = &slides[si];
+                        slides.iter().find(|s| s.ids.slide == edit.slide_id).and_then(|slide| {
                             let oi = slide.ids.objects.iter().position(|id| *id == edit.object_id)?;
                             match slide.objects.get(oi)? {
-                                SlideObject::TextBox { text, .. } if *text == edit.original => Some((si, oi)),
+                                SlideObject::TextBox { text, .. } if *text == edit.original => Some((edit.slide_id, edit.object_id)),
                                 _ => None,
                             }
                         })
                     };
-                    if let Some((si, oi)) = target {
-                        controller.change_text(si, oi, edit.original, new_text);
+                    if let Some((slide_id, object_id)) = target {
+                        controller.change_text(slide_id, object_id, new_text);
                         refresh();
                     }
                 }
@@ -393,8 +395,6 @@ fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell
     }
     {
         let slides = h.slides.clone();
-        let current = h.current_slide.clone();
-        let selected = h.selected_object.clone();
         let controller = h.controller.clone();
         let refresh = h.refresh_hud.clone();
         let canvas = h.canvas.downgrade();
@@ -407,9 +407,13 @@ fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell
             }
             let Some(canvas) = canvas.upgrade() else { return };
             let (hx, hy) = canvas_to_slide(x, y, canvas.width() as f64, canvas.height() as f64);
+            // Resolve the view index through the controller first: the
+            // window's slide borrow below must never overlap a
+            // controller call on the same RefCell.
+            let Some(idx) = controller.selected_slide_index() else { return };
             let mut slides = slides.borrow_mut();
             decks_core::ops::ensure_ids(&mut slides);
-            let Some(slide) = slides.get(current.get()) else { return };
+            let Some(slide) = slides.get(idx) else { return };
             let Some(oi) = hit_test_object(&slide.objects, hx, hy) else { return };
             let SlideObject::TextBox { text, x, y, w, h, .. } = &slide.objects[oi] else { return };
             let edit = TextEdit {
@@ -419,9 +423,11 @@ fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell
                 original: text.clone(),
                 bounds: (*x, *y, *w, *h),
             };
+            let slide_id = edit.slide_id;
+            let object_id = edit.object_id;
             drop(slides);
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            selected.set(Some(oi));
+            controller.select_objects(slide_id, &[object_id], Some(object_id), decks_core::controller::SelectionMode::Object);
             refresh();
             canvas.queue_draw();
             let buffer = text_view.buffer();

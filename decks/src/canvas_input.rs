@@ -102,8 +102,6 @@ fn resized(
 pub(crate) fn register_canvas_pointer_input(
     canvas: &gtk::DrawingArea,
     slides: &Rc<RefCell<Vec<Slide>>>,
-    current_slide: &Rc<Cell<usize>>,
-    selected_object: &Rc<Cell<Option<usize>>>,
     controller: &Rc<DecksController>,
     refresh_hud: &Rc<dyn Fn()>,
     snap_enabled: &Rc<Cell<bool>>,
@@ -111,16 +109,14 @@ pub(crate) fn register_canvas_pointer_input(
 ) {
         let ss = slides.clone();
         let cs = canvas.clone();
-        let cs_ref = current_slide.clone();
-        let so = selected_object.clone();
         let controller = controller.clone();
         let refresh = refresh_hud.clone();
 
         #[derive(Clone, Copy)]
         enum DragMode {
-            Move { oi: usize, orig: Rect },
-            Resize { oi: usize, handle: crate::canvas::SelectionHandle, orig_bounds: (f64, f64, f64, f64) },
-            Rotate { oi: usize, orig_angle: f64 },
+            Move { slide_id: u64, object_id: u64, oi: usize, orig: Rect },
+            Resize { slide_id: u64, object_id: u64, oi: usize, handle: crate::canvas::SelectionHandle, orig_bounds: (f64, f64, f64, f64) },
+            Rotate { slide_id: u64, object_id: u64, oi: usize, orig_angle: f64 },
         }
 
         let drag_mode: Rc<Cell<Option<DragMode>>> = Rc::new(Cell::new(None));
@@ -136,10 +132,9 @@ pub(crate) fn register_canvas_pointer_input(
         let cs_b = cs.clone();
         let cs_u = cs.clone();
         let cs_e = cs.clone();
-        let cs_ref_b = cs_ref.clone();
-        let cs_ref_u = cs_ref.clone();
-        let cs_ref_e = cs_ref.clone();
-        let so_b = so.clone();
+        let ctl_b = controller.clone();
+        let ctl_u = controller.clone();
+        let ctl_e = controller.clone();
         let refresh_b = refresh.clone();
         let snap_u = snap_enabled.clone();
         let snap_e = snap_enabled.clone();
@@ -148,22 +143,28 @@ pub(crate) fn register_canvas_pointer_input(
         let guides_e = guides.clone();
 
         drag.connect_drag_begin(move |_g, x, y| {
-            let idx = cs_ref_b.get();
+            let Some(idx) = ctl_b.selected_slide_index() else { return };
+            let Some(slide_id) = ctl_b.slide_id_at(idx) else { return };
             let sl = ss_b.borrow();
             if idx >= sl.len() { return; }
 
-            if let Some(oi) = so_b.get() {
+            if let Some(oi) = ctl_b.primary_object_index() {
                 if oi < sl[idx].objects.len() {
                     if let Some(handle) = crate::canvas::hit_test_handles(
                         &sl[idx].objects[oi], x, y, cs_b.width() as f64, cs_b.height() as f64
                     ) {
+                        let object_id = ctl_b.object_id_at(idx, oi).unwrap_or(u64::MAX);
                         if handle == crate::canvas::SelectionHandle::Rotate {
                             dm_begin.set(Some(DragMode::Rotate {
+                                slide_id,
+                                object_id,
                                 oi,
                                 orig_angle: sl[idx].objects[oi].rotation(),
                             }));
                         } else {
                             dm_begin.set(Some(DragMode::Resize {
+                                slide_id,
+                                object_id,
                                 oi,
                                 handle,
                                 orig_bounds: decks_core::undo::obj_bounds(&sl[idx].objects[oi]),
@@ -176,19 +177,22 @@ pub(crate) fn register_canvas_pointer_input(
 
             let (sx, sy) = canvas_to_slide(x, y, cs_b.width() as f64, cs_b.height() as f64);
             if let Some(oi) = hit_test_object(&sl[idx].objects, sx, sy) {
-                so_b.set(Some(oi));
-                dm_begin.set(Some(DragMode::Move { oi, orig: obj_bounds(&sl[idx].objects[oi]) }));
+                let object_id = ctl_b.object_id_at(idx, oi).unwrap_or(u64::MAX);
+                let orig = obj_bounds(&sl[idx].objects[oi]);
+                drop(sl);
+                ctl_b.select_objects(slide_id, &[object_id], Some(object_id), decks_core::controller::SelectionMode::Object);
+                dm_begin.set(Some(DragMode::Move { slide_id, object_id, oi, orig }));
             } else {
-                so_b.set(None);
+                drop(sl);
+                ctl_b.select_slide(slide_id);
                 dm_begin.set(None);
             }
-            drop(sl);
             cs_b.queue_draw();
             refresh_b();
         });
 
         drag.connect_drag_update(move |_g, dx, dy| {
-            let idx = cs_ref_u.get();
+            let Some(idx) = ctl_u.selected_slide_index() else { return };
             let mut sl = ss_u.borrow_mut();
             if idx >= sl.len() { return; }
 
@@ -197,7 +201,7 @@ pub(crate) fn register_canvas_pointer_input(
 
             if let Some(mode) = dm_update.get() {
                 match mode {
-                    DragMode::Move { oi, orig } => {
+                    DragMode::Move { oi, orig, .. } => {
                         if oi < sl[idx].objects.len() {
                             let others = others(&sl[idx], oi);
                             let (r, g) = moved(orig, (dx * k, dy * k), &others, SNAP_PX * k, snap_u.get());
@@ -206,7 +210,7 @@ pub(crate) fn register_canvas_pointer_input(
                             cs_u.queue_draw();
                         }
                     }
-                    DragMode::Resize { oi, handle, orig_bounds } => {
+                    DragMode::Resize { oi, handle, orig_bounds, .. } => {
                         if oi < sl[idx].objects.len() {
                             let others = others(&sl[idx], oi);
                             let (r, g) = resized(handle, orig_bounds, (dx * k, dy * k), &others, SNAP_PX * k, snap_u.get());
@@ -215,7 +219,7 @@ pub(crate) fn register_canvas_pointer_input(
                             cs_u.queue_draw();
                         }
                     }
-                    DragMode::Rotate { oi, orig_angle } => {
+                    DragMode::Rotate { oi, orig_angle, .. } => {
                         if oi < sl[idx].objects.len() {
                             let angle_delta = (dx + dy) * 0.5;
                             let mut new_angle = (orig_angle + angle_delta) % 360.0;
@@ -232,13 +236,13 @@ pub(crate) fn register_canvas_pointer_input(
         });
 
         drag.connect_drag_end(move |_g, dx, dy| {
-            let idx = cs_ref_e.get();
+            let Some(idx) = ctl_e.selected_slide_index() else { dm_end.set(None); return };
             let (_, _, sw, _) = crate::canvas::slide_geometry(cs_e.width() as f64, cs_e.height() as f64);
             let k = 960.0 / sw.max(1.0);
 
             if let Some(mode) = dm_end.get() {
                 match mode {
-                    DragMode::Move { oi, orig } => {
+                    DragMode::Move { slide_id, object_id, oi, orig } => {
                         let others = ss_e.borrow().get(idx).map(|s| others(s, oi)).unwrap_or_default();
                         let (r, _) = moved(orig, (dx * k, dy * k), &others, SNAP_PX * k, snap_e.get());
                         let (net_dx, net_dy) = (r.0 - orig.0, r.1 - orig.1);
@@ -248,17 +252,17 @@ pub(crate) fn register_canvas_pointer_input(
                             if let Some(o) = ss_e.borrow_mut().get_mut(idx).and_then(|s| s.objects.get_mut(oi)) {
                                 set_obj_origin(o, orig.0, orig.1);
                             }
-                            controller.move_object(idx, oi, net_dx, net_dy);
+                            ctl_e.move_object(slide_id, object_id, net_dx, net_dy);
                         }
                     }
-                    DragMode::Resize { oi, handle, orig_bounds } => {
+                    DragMode::Resize { slide_id, object_id, oi, handle, orig_bounds } => {
                         let others = ss_e.borrow().get(idx).map(|s| others(s, oi)).unwrap_or_default();
                         let (new_bounds, _) = resized(handle, orig_bounds, (dx * k, dy * k), &others, SNAP_PX * k, snap_e.get());
                         if new_bounds != orig_bounds {
-                            controller.resize_object(idx, oi, orig_bounds, new_bounds);
+                            ctl_e.resize_object(slide_id, object_id, new_bounds);
                         }
                     }
-                    DragMode::Rotate { oi, orig_angle } => {
+                    DragMode::Rotate { slide_id, object_id, orig_angle, .. } => {
                         let angle_delta = (dx + dy) * 0.5;
                         let mut new_angle = (orig_angle + angle_delta) % 360.0;
                         if new_angle < 0.0 { new_angle += 360.0; }
@@ -266,7 +270,7 @@ pub(crate) fn register_canvas_pointer_input(
                             new_angle = (new_angle / 15.0).round() * 15.0;
                         }
                         if new_angle != orig_angle {
-                            controller.rotate_object(idx, oi, orig_angle, new_angle);
+                            ctl_e.rotate_object(slide_id, object_id, new_angle);
                         }
                     }
                 }

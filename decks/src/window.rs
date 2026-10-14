@@ -31,10 +31,11 @@ pub struct DecksWindow {
     canvas: gtk::DrawingArea,
     /// Canonical slide-list state, undo history, and dirty flag — see
     /// decks_core::controller::DecksController (issue #103). window.rs
-    /// no longer owns this state itself, only reads/writes through it.
+    /// no longer owns this state itself, only reads/writes through it:
+    /// the current slide and selected objects live in the controller's
+    /// selection (by stable id) and every view derives indices from it
+    /// at the point of use.
     controller: Rc<DecksController>,
-    current_slide: Rc<Cell<usize>>,
-    selected_object: Rc<Cell<Option<usize>>>,
     content_stack: gtk::Stack,
     editor_split: adw::OverlaySplitView,
     file_path: Rc<RefCell<Option<String>>>,
@@ -55,13 +56,14 @@ impl DecksWindow {
                 background: "#ffffff".into(),
                 objects: vec![],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
             vec![MasterSlide {
+                id: 0,
                 name: "Default".into(),
                 background: "#ffffff".into(),
                 default_font: MasterSlide::DEFAULT_FONT.into(),
@@ -73,20 +75,19 @@ impl DecksWindow {
         let slides = controller.slides.clone();
         let masters = controller.masters.clone();
         let dirty = controller.dirty.clone();
-        let current_slide = Rc::new(Cell::new(0usize));
-        let selected_object = Rc::new(Cell::new(None));
         let file_path = controller.file_path.clone();
 
         // Test-only state snapshot (#104): only registered when
         // GTK_OFFICE_TEST_MODE is set — see tables/src/window.rs for the
         // identical pattern and rationale.
         if std::env::var_os("GTK_OFFICE_TEST_MODE").is_some() {
-            let (ctl, cs, so) = (controller.clone(), current_slide.clone(), selected_object.clone());
+            let ctl = controller.clone();
             let act = gio::SimpleAction::new("test-snapshot", None);
             act.connect_activate(move |_, _| {
                 let Ok(path) = std::env::var("GTK_OFFICE_SNAPSHOT_PATH") else { return };
-                let mut snap = decks_core::snapshot::snapshot(&ctl);
-                snap.selection = Some((cs.get(), so.get()));
+                // The selection is controller-owned: snapshot() reads it
+                // from there, so this must not overwrite it.
+                let snap = decks_core::snapshot::snapshot(&ctl);
                 let _ = std::fs::write(path, snap.to_json());
             });
             app.add_action(&act);
@@ -171,8 +172,7 @@ impl DecksWindow {
         // made the scrolled window clip the slide at narrow widths.
         {
             let s = slides.clone();
-            let c = current_slide.clone();
-            let so = selected_object.clone();
+            let ctl = controller.clone();
             let ts = transition.clone();
             let m = masters.clone();
             let gd = guides.clone();
@@ -183,7 +183,10 @@ impl DecksWindow {
                 }
                 drop(t);
                 let slides = s.borrow();
-                let cur = c.get();
+                // View indices, derived from the controller's selection at
+                // the point of use — the window stores no slide position.
+                let cur = ctl.selected_slide_index().unwrap_or(0);
+                let primary = ctl.primary_object_index();
                 // A11y: every state change redraws, so the accessible
                 // description tracks slide/selection here (issue #87).
                 // Also embed the canvas's position relative to the
@@ -194,7 +197,7 @@ impl DecksWindow {
                 // compute_point works correctly.
                 let desc = {
                     let n_objs = slides.get(cur).map(|sl| sl.objects.len()).unwrap_or(0);
-                    let base = match so.get() {
+                    let base = match primary {
                         Some(oi) => format!(
                             "slide {} of {}, {} objects, object {} selected",
                             cur + 1, slides.len(), n_objs, oi + 1
@@ -213,7 +216,7 @@ impl DecksWindow {
                 };
                 area.update_property(&[gtk::accessible::Property::Description(&desc)]);
                 let accent = crate::canvas::accent_rgb(area);
-                let selected_set: std::collections::HashSet<usize> = so.get().into_iter().collect();
+                let selected_set: std::collections::HashSet<usize> = primary.into_iter().collect();
                 crate::canvas::draw_slide_multi(cr, width as f64, height as f64, &slides, cur, &selected_set, None, &m.borrow(), accent);
                 crate::canvas::draw_guides(cr, width as f64, height as f64, &gd.borrow(), accent);
             });
@@ -290,17 +293,16 @@ impl DecksWindow {
         let thumb_updater: ThumbUpdater = Rc::new(RefCell::new(None));
         let refresh_hud: Rc<dyn Fn()> = {
             let ss = slides.clone();
-            let cs_ref = current_slide.clone();
-            let so = selected_object.clone();
+            let ctl = controller.clone();
             let insp = inspector_sync.clone();
             let status = status_label.clone();
             let ca = canvas_area.clone();
             let tu = thumb_updater.clone();
             Rc::new(move || {
-                let idx = cs_ref.get();
+                let idx = ctl.selected_slide_index().unwrap_or(0);
                 let slides = ss.borrow();
                 if let Some(slide) = slides.get(idx) {
-                    ca.sync_objects(&slide.objects, so.get());
+                    ca.sync_objects(&slide.objects, ctl.primary_object_index());
                 }
                 drop(slides);
                 if let Some(update) = tu.borrow().as_ref() {
@@ -331,7 +333,7 @@ impl DecksWindow {
                 refresh();
                 da.queue_draw();
             });
-            let inspector = crate::format_inspector::build(&controller, &current_slide, &selected_object, changed);
+            let inspector = crate::format_inspector::build(&controller, changed);
             editor_split.set_sidebar(Some(&inspector.sidebar));
             *inspector_sync.borrow_mut() = Some(inspector.sync.clone());
             (inspector.sync)();
@@ -439,7 +441,6 @@ impl DecksWindow {
         // (#1316). It used to replace the deck without asking.
         {
             let ctl = controller.clone();
-            let cs_ref = current_slide.clone();
             let cs = canvas.clone();
             let refresh = refresh_hud.clone();
             suite_common::open_files_on_drop(&suite_win.window, app, move |file| {
@@ -457,7 +458,8 @@ impl DecksWindow {
                     rotation: 0.0,
                     crop: Default::default(),
                 };
-                ctl.add_object(cs_ref.get(), obj);
+                let Some(slide_id) = ctl.selection().slide_id else { return false };
+                ctl.add_object(slide_id, obj);
                 cs.queue_draw();
                 refresh();
                 true
@@ -486,7 +488,6 @@ impl DecksWindow {
 
                 let win_weak = win.downgrade();
                 let force_close = force_close.clone();
-                let dirty = dirty.clone();
                 let m = m.clone();
                 let path_state = path_state.clone();
                 let slot = slot.clone();
@@ -507,13 +508,14 @@ impl DecksWindow {
                         // the close guard's Save wrote straight over a file
                         // whose content the format can't keep.
                         let deck = m.deck();
+                        let checkpoint = m.checkpoint();
                         let w = win.clone();
                         let target = path.clone();
                         let m_save = m.clone();
                         crate::loss_ui::save_after_asking_with_context(&win, m_save.clone(), Some(&target), &target, move || match save_deck(&path, &deck, &m_save.carried_for_save()) {
                             Ok(()) => {
                                 m_save.repin_after_save(&path);
-                                dirty.set(false);
+                                m_save.acknowledge_save(checkpoint);
                                 slot.clear_or_report();
                                 force_close.set(true);
                                 w.close();
@@ -550,6 +552,7 @@ impl DecksWindow {
                             if let Some(path) = local_path(&file, true, &win2) {
                                 let path_str = path.to_string_lossy().to_string();
                                 let deck = m.deck();
+                                let checkpoint = m.checkpoint();
                                 let target = path_str.clone();
                                 let w = win2.clone();
                                 let m_save = m.clone();
@@ -560,7 +563,7 @@ impl DecksWindow {
                                     Ok(()) => {
                                         m_save.repin_after_save(&path_str);
                                         *path_state.borrow_mut() = Some(path_str);
-                                        dirty.set(false);
+                                        m_save.acknowledge_save(checkpoint);
                                         slot.clear_or_report();
                                         force_close.set(true);
                                         w.close();
@@ -621,15 +624,13 @@ impl DecksWindow {
         let toolbar = build_decks_toolbar();
         suite_win.add_top_bar(&toolbar);
         // Export as PDF, handouts and PNG, and their menu section (export_ui.rs).
-        crate::export_ui::register(app, &suite_win.window, &suite_win.header_bar, &controller, &current_slide);
+        crate::export_ui::register(app, &suite_win.window, &suite_win.header_bar, &controller);
         let handles = crate::canvas_keys::EditorHandles {
             window: &suite_win.window,
             canvas: &canvas,
             slide_list: &slide_list,
             slides: &slides,
             masters: &masters,
-            current_slide: &current_slide,
-            selected_object: &selected_object,
             controller: &controller,
             refresh_hud: &refresh_hud,
             transition: &transition,
@@ -645,7 +646,7 @@ impl DecksWindow {
         // ── Wire sidebar signals ──────────────────────────────────────────
         let _sl = slide_list.clone();
         let cs = canvas.clone();
-        let cs_ref = current_slide.clone();
+        let ctl = controller.clone();
         let ss = slides.clone();
         let notes_skip = Rc::new(Cell::new(false));
         let notes_skip2 = notes_skip.clone();
@@ -654,7 +655,9 @@ impl DecksWindow {
             if let Some(r) = row {
                 let idx = r.index() as usize;
                 if idx < ss.borrow().len() {
-                    cs_ref.set(idx);
+                    if let Some(slide_id) = ctl.slide_id_at(idx) {
+                        ctl.select_slide(slide_id);
+                    }
                     cs.queue_draw();
                     let slides = ss.borrow();
                     if let Some(slide) = slides.get(idx) {
@@ -678,18 +681,16 @@ impl DecksWindow {
             let sl = slide_list.clone();
             let ss = slides.clone();
             let m = masters.clone();
-            let cs_ref = current_slide.clone();
+            let ctl = controller.clone();
             *thumb_updater.borrow_mut() = Some(Box::new(move || {
-                crate::sidebar::update_thumbnail(&sl, &ss.borrow(), &m.borrow(), cs_ref.get());
+                crate::sidebar::update_thumbnail(&sl, &ss.borrow(), &m.borrow(), ctl.selected_slide_index().unwrap_or(0));
             }));
         }
 
         // Second row-selected handler: HUD follows slide switches.
         {
             let refresh = refresh_hud.clone();
-            let so = selected_object.clone();
             slide_list.connect_row_selected(move |_, _| {
-                so.set(None);
                 refresh();
             });
         }
@@ -743,7 +744,6 @@ impl DecksWindow {
         // undoable edit (a word per step) that marks the deck changed.
         {
             let controller = controller.clone();
-            let cs_ref = current_slide.clone();
             let skip = notes_skip.clone();
             notes_buffer.connect_changed(move |buf| {
                 // `skip` is cleared by the row-selected handler once its
@@ -754,7 +754,9 @@ impl DecksWindow {
                 // was still alive (the exact Tables reentrancy bug class).
                 if skip.get() { return; }
                 let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-                controller.set_notes(cs_ref.get(), &text);
+                if let Some(slide_id) = controller.selection().slide_id {
+                    controller.set_notes(slide_id, &text);
+                }
             });
         }
 
@@ -763,7 +765,6 @@ impl DecksWindow {
             let sl = slide_list.clone();
             let ss = slides.clone();
             let cs = canvas.clone();
-            let cs_ref = current_slide.clone();
             let cs_stack = content_stack.clone();
             let controller = controller.clone();
             let masters = masters.clone();
@@ -774,15 +775,16 @@ impl DecksWindow {
                     background: "#ffffff".into(),
                     objects: vec![],
                     notes: String::new(),
-            master_idx: Some(0),
-            transition: Default::default(),
-            builds: Vec::new(),
-            ids: Default::default(),
-            layout: None,
+                    master_id: None,
+                    transition: Default::default(),
+                    builds: Vec::new(),
+                    ids: Default::default(),
+                    layout_id: None,
                 };
-                let idx = controller.add_slide(idx, new_slide);
-                rebuild_slide_list(&sl, &ss.borrow().clone(), &masters.borrow(), idx);
-                cs_ref.set(idx);
+                let Some(id) = controller.add_slide(idx, new_slide) else { return };
+                controller.select_slide(id);
+                let to = controller.slide_index(id).unwrap_or(idx);
+                rebuild_slide_list(&sl, &ss.borrow().clone(), &masters.borrow(), to);
                 cs.queue_draw();
                 cs_stack.set_visible_child_name("editor");
             });
@@ -793,13 +795,12 @@ impl DecksWindow {
             let sl = slide_list.clone();
             let ss = slides.clone();
             let cs = canvas.clone();
-            let cs_ref = current_slide.clone();
             let controller = controller.clone();
             let masters = masters.clone();
             del_btn.connect_clicked(move |_| {
-                let idx = cs_ref.get();
-                if let Some(new_idx) = controller.delete_slide(idx) {
-                    cs_ref.set(new_idx);
+                let Some(slide_id) = controller.selection().slide_id else { return };
+                if controller.delete_slide(slide_id) {
+                    let new_idx = controller.selected_slide_index().unwrap_or(0);
                     rebuild_slide_list(&sl, &ss.borrow().clone(), &masters.borrow(), new_idx);
                     cs.queue_draw();
                 }
@@ -828,8 +829,6 @@ impl DecksWindow {
             let cs = canvas.clone();
             let sl = slide_list.clone();
             let ss = slides.clone();
-            let cs_ref = current_slide.clone();
-            let so = selected_object.clone();
             let masters = masters.clone();
             let refresh = refresh_hud.clone();
             let act = gio::SimpleAction::new(name, None);
@@ -837,13 +836,12 @@ impl DecksWindow {
                 let changed = if is_undo { controller.undo() } else { controller.redo() };
                 if changed {
                     // An undone insert can take the current slide or the
-                    // selected object away with it.
-                    let (slide, object) = controller.repair_selection(cs_ref.get(), so.get());
-                    cs_ref.set(slide);
-                    so.set(object);
+                    // selected object away with it; the controller repairs
+                    // its owned selection, which is read back here.
+                    controller.repair_selection();
                     cs.queue_draw();
                     let snapshot = ss.borrow().clone();
-                    rebuild_slide_list(&sl, &snapshot, &masters.borrow(), cs_ref.get());
+                    rebuild_slide_list(&sl, &snapshot, &masters.borrow(), controller.selected_slide_index().unwrap_or(0));
                     // The inspector shows the undone state too.
                     refresh();
                 }
@@ -861,12 +859,13 @@ impl DecksWindow {
         // Insert buttons in the header bar (insert_bar.rs): a shape from the
         // library by its index, or a 3x3 table; each selected once in.
         {
-            let (cs, cs_ref, controller, refresh, so) =
-                (canvas.clone(), current_slide.clone(), controller.clone(), refresh_hud.clone(), selected_object.clone());
+            let (cs, controller, refresh) =
+                (canvas.clone(), controller.clone(), refresh_hud.clone());
             let insert = move |obj: SlideObject| {
-                let idx = cs_ref.get();
-                controller.add_object(idx, obj);
-                so.set(controller.slides.borrow().get(idx).map(|s| s.objects.len().saturating_sub(1)));
+                let Some(slide_id) = controller.selection().slide_id else { return };
+                if let Some(object_id) = controller.add_object(slide_id, obj) {
+                    controller.select_objects(slide_id, &[object_id], Some(object_id), decks_core::SelectionMode::Object);
+                }
                 cs.queue_draw();
                 refresh();
             };
@@ -898,22 +897,21 @@ impl DecksWindow {
         // "Add Text Box"
         {
             let cs = canvas.clone();
-            let cs_ref = current_slide.clone();
             let controller = controller.clone();
             let refresh = refresh_hud.clone();
-            let so = selected_object.clone();
             let act = gio::SimpleAction::new("add-text-box", None);
             act.connect_activate(move |_, _| {
-                let idx = cs_ref.get();
+                let Some(slide_id) = controller.selection().slide_id else { return };
                 let obj = SlideObject::TextBox {
                     text: "Text".into(), x: 200.0, y: 150.0, w: 200.0, h: 40.0,
                     rotation: 0.0,
                     runs: vec![],
                     body: Default::default(),
                 };
-                controller.add_object(idx, obj);
-                // What was just inserted is selected, ready to format.
-                so.set(controller.slides.borrow().get(idx).map(|s| s.objects.len().saturating_sub(1)));
+                if let Some(object_id) = controller.add_object(slide_id, obj) {
+                    // What was just inserted is selected, ready to format.
+                    controller.select_objects(slide_id, &[object_id], Some(object_id), decks_core::SelectionMode::Object);
+                }
                 cs.queue_draw();
                 refresh();
             });
@@ -927,16 +925,14 @@ impl DecksWindow {
         {
             let ss = slides.clone();
             let cs = canvas.clone();
-            let cs_ref = current_slide.clone();
             let shape_count = Rc::new(Cell::new(0u32));
             let controller = controller.clone();
             let refresh = refresh_hud.clone();
-            let so = selected_object.clone();
             let act = gio::SimpleAction::new("add-shape", None);
             act.connect_activate(move |_, _| {
-                let idx = cs_ref.get();
+                let Some(slide_id) = controller.selection().slide_id else { return };
                 let ss_snap = ss.borrow();
-                if idx >= ss_snap.len() { return; }
+                if controller.slide_index(slide_id).is_none_or(|idx| idx >= ss_snap.len()) { return; }
                 let count = shape_count.get();
                 shape_count.set(count + 1);
                 // A styled shape in the theme's default look (accent fill,
@@ -949,8 +945,9 @@ impl DecksWindow {
                     SlideObject::Shape { kind: ShapeKind::Ellipse, x: 220.0, y: 170.0, w: 160.0, h: 160.0, rotation: 0.0, style: ShapeStyle::default() }
                 };
                 drop(ss_snap);
-                controller.add_object(idx, obj);
-                so.set(controller.slides.borrow().get(idx).map(|s| s.objects.len().saturating_sub(1)));
+                if let Some(object_id) = controller.add_object(slide_id, obj) {
+                    controller.select_objects(slide_id, &[object_id], Some(object_id), decks_core::SelectionMode::Object);
+                }
                 cs.queue_draw();
                 refresh();
             });
@@ -963,7 +960,6 @@ impl DecksWindow {
         // "Add Image"
         {
             let cs = canvas.clone();
-            let cs_ref = current_slide.clone();
             let w = suite_win.window.clone();
             let controller = controller.clone();
             let refresh = refresh_hud.clone();
@@ -977,19 +973,18 @@ impl DecksWindow {
                 fl.append(&f);
                 dlg.set_filters(Some(&fl));
                 let cs = cs.clone();
-                let cs_ref = cs_ref.clone();
                 let controller = controller.clone();
                 let _refresh = refresh.clone();
                 crate::file_pick::open(&dlg, &w,
                     move |result: Result<gio::File, glib::Error>| {
                         if let Ok(file) = result {
                             if let Ok(path) = suite_common::locations::open_location(&file).map_err(|e| eprintln!("{e}")) {
-                                let idx = cs_ref.get();
+                                let Some(slide_id) = controller.selection().slide_id else { return };
                                 let p = path.to_string_lossy().to_string();
                                 let obj = SlideObject::Image {
                                     path: p, x: 200.0, y: 200.0, w: 200.0, h: 150.0, rotation: 0.0, crop: Default::default()
                                 };
-                                controller.add_object(idx, obj);
+                                controller.add_object(slide_id, obj);
                                 cs.queue_draw();
                             }
                         }
@@ -1008,11 +1003,11 @@ impl DecksWindow {
             // (on the second monitor if there is one) and, with two
             // monitors, the presenter display (presenter_window.rs).
             for (name, rehearse) in [("present", false), ("rehearse", true)] {
-                let (m, cs_ref, app2) = (controller.clone(), current_slide.clone(), app.clone());
+                let (m, app2) = (controller.clone(), app.clone());
                 let act = gio::SimpleAction::new(name, None);
                 act.connect_activate(move |_, _| {
                     let deck = m.deck();
-                    crate::presenter_window::start(&app2, deck, cs_ref.get(), rehearse);
+                    crate::presenter_window::start(&app2, deck, m.selected_slide_index().unwrap_or(0), rehearse);
                 });
                 app.add_action(&act);
             }
@@ -1025,8 +1020,9 @@ impl DecksWindow {
         // "Go to slide N" (0-based), for the command line and automation:
         // `gapplication action org.tunaos.decks go-to-slide "uint32 1"`.
         {
-            let (ss, cs_ref, cs, sl, m, so) =
-                (slides.clone(), current_slide.clone(), canvas.clone(), slide_list.clone(), masters.clone(), selected_object.clone());
+            let (ss, cs, sl, m) =
+                (slides.clone(), canvas.clone(), slide_list.clone(), masters.clone());
+            let ctl = controller.clone();
             let refresh = refresh_hud.clone();
             let act = gio::SimpleAction::new("go-to-slide", Some(glib::VariantTy::UINT32));
             act.connect_activate(move |_, param| {
@@ -1036,8 +1032,9 @@ impl DecksWindow {
                 if i >= snap.len() {
                     return;
                 }
-                cs_ref.set(i);
-                so.set(None);
+                if let Some(slide_id) = ctl.slide_id_at(i) {
+                    ctl.select_slide(slide_id);
+                }
                 rebuild_slide_list(&sl, &snap, &m.borrow(), i);
                 cs.queue_draw();
                 refresh();
@@ -1048,11 +1045,12 @@ impl DecksWindow {
         // "Preview transition": play how the current slide arrives, from
         // the one before it, on the canvas (the inspector's Slide page).
         {
-            let (ss, cs_ref, cs, ts, m) = (slides.clone(), current_slide.clone(), canvas.clone(), transition.clone(), masters.clone());
+            let (ss, cs, ts, m) = (slides.clone(), canvas.clone(), transition.clone(), masters.clone());
+            let ctl = controller.clone();
             let act = gio::SimpleAction::new("preview-transition", None);
             act.connect_activate(move |_, _| {
                 let slides = ss.borrow();
-                let idx = cs_ref.get();
+                let idx = ctl.selected_slide_index().unwrap_or(0);
                 let Some(to) = slides.get(idx) else { return };
                 let blank = Slide { objects: vec![], ..to.clone() };
                 let from = idx.checked_sub(1).and_then(|i| slides.get(i)).unwrap_or(&blank);
@@ -1070,8 +1068,6 @@ impl DecksWindow {
             slide_list: &slide_list,
             slides: &slides,
             masters: &masters,
-            current_slide: &current_slide,
-            selected_object: &selected_object,
             controller: &controller,
             refresh_hud: &refresh_hud,
             transition: &transition,
@@ -1081,8 +1077,6 @@ impl DecksWindow {
         crate::canvas_input::register_canvas_pointer_input(
             &canvas,
             &slides,
-            &current_slide,
-            &selected_object,
             &controller,
             &refresh_hud,
             &snap_enabled,
@@ -1100,12 +1094,14 @@ impl DecksWindow {
             let masters = masters.clone();
             let w = suite_win.window.clone();
             let dirty = dirty.clone();
+            let ctl_new_doc = controller.clone();
             let act = gtk::gio::SimpleAction::new("new-document", None);
             act.connect_activate(move |_, _| {
-                let (cs, cs_scroll, ss, path_ref, sl, masters, refresh, dirty) = (
+                let (cs, cs_scroll, ss, path_ref, sl, masters, refresh, ctl) = (
                     cs.clone(), cs_scroll.clone(), ss.clone(), path_ref.clone(),
-                    sl.clone(), masters.clone(), refresh.clone(), dirty.clone(),
+                    sl.clone(), masters.clone(), refresh.clone(), ctl_new_doc.clone(),
                 );
+                let dirty = dirty.clone();
                 suite_common::confirm_discarding(&w, dirty.get(), "presentation", move || {
                 if cs.child_by_name("editor").is_none() {
                     cs.add_titled(&cs_scroll, Some("editor"), "Editor");
@@ -1118,15 +1114,21 @@ impl DecksWindow {
                         background: "#ffffff".into(),
                         objects: vec![],
                         notes: String::new(),
-                        master_idx: Some(0),
+                        master_id: None,
                         transition: Default::default(),
                         builds: Vec::new(),
                         ids: Default::default(),
-                        layout: None,
+                        layout_id: None,
                     }];
                 }
+                // Fresh literals carry no ids; mint them so the
+                // controller's selection can name the first slide.
+                decks_core::ops::ensure_all_ids(&mut ss.borrow_mut(), &mut masters.borrow_mut());
                 *path_ref.borrow_mut() = None;
-                dirty.set(false);
+                ctl.mark_saved();
+                if let Some(id) = ctl.slide_id_at(0) {
+                    ctl.select_slide(id);
+                }
                 rebuild_slide_list(&sl, &ss.borrow().clone(), &masters.borrow(), 0);
                 cs.queue_draw();
                 refresh();
@@ -1140,22 +1142,22 @@ impl DecksWindow {
         {
             let (cs, sl, ss, ms) = (content_stack.clone(), slide_list.clone(), slides.clone(), masters.clone());
             let (cs_scroll, path_ref, refresh) = (editor_split.clone(), file_path.clone(), refresh_hud.clone());
-            let (cs_ref, so, w) = (current_slide.clone(), selected_object.clone(), suite_win.window.clone());
+            let w = suite_win.window.clone();
             let dirty = dirty.clone();
             let ctl = controller.clone();
             let act = gtk::gio::SimpleAction::new("new-from-template", None);
             act.connect_activate(move |_, _| {
                 let (cs, sl, ss, ms) = (cs.clone(), sl.clone(), ss.clone(), ms.clone());
-                let (cs_scroll, path_ref, refresh, cs_ref, so) =
-                    (cs_scroll.clone(), path_ref.clone(), refresh.clone(), cs_ref.clone(), so.clone());
+                let (cs_scroll, path_ref, refresh) =
+                    (cs_scroll.clone(), path_ref.clone(), refresh.clone());
                 let (w2, dirty) = (w.clone(), dirty.clone());
                 let ctl = ctl.clone();
                 crate::template_chooser::present(&w, move |index| {
                     let ctl = ctl.clone();
                     let Some((slides, masters)) = decks_core::templates::deck(index) else { return };
                     let (cs, sl, ss, ms) = (cs.clone(), sl.clone(), ss.clone(), ms.clone());
-                    let (cs_scroll, path_ref, refresh, cs_ref, so, dirty) =
-                        (cs_scroll.clone(), path_ref.clone(), refresh.clone(), cs_ref.clone(), so.clone(), dirty.clone());
+                    let (cs_scroll, path_ref, refresh, dirty) =
+                        (cs_scroll.clone(), path_ref.clone(), refresh.clone(), dirty.clone());
                     suite_common::confirm_discarding(&w2, dirty.get(), "presentation", move || {
                     let ctl = ctl.clone();
                     if cs.child_by_name("editor").is_none() {
@@ -1167,9 +1169,10 @@ impl DecksWindow {
                     *path_ref.borrow_mut() = None;
                     // A template is a new document: no source, no provenance.
                     ctl.clear_source_context();
-                    dirty.set(false);
-                    cs_ref.set(0);
-                    so.set(None);
+                    ctl.mark_saved();
+                    if let Some(id) = ctl.slide_id_at(0) {
+                        ctl.select_slide(id);
+                    }
                     rebuild_slide_list(&sl, &ss.borrow().clone(), &ms.borrow(), 0);
                     cs.queue_draw();
                     refresh();
@@ -1183,8 +1186,6 @@ impl DecksWindow {
             let cs = content_stack.clone();
             let sl = slide_list.clone();
             let ss = slides.clone();
-            let cs_ref = current_slide.clone();
-            let so = selected_object.clone();
             let da = canvas.clone();
             let w = suite_win.window.clone();
             let cs_scroll = editor_split.clone();
@@ -1195,8 +1196,8 @@ impl DecksWindow {
 
             let act = gtk::gio::SimpleAction::new("open-file", None);
             act.connect_activate(move |_, _| {
-                let (cs, sl, ss, cs_ref, so, da, w, cs_scroll, path_ref, masters, dirty) = (
-                    cs.clone(), sl.clone(), ss.clone(), cs_ref.clone(), so.clone(), da.clone(),
+                let (cs, sl, ss, da, w, cs_scroll, path_ref, masters, dirty) = (
+                    cs.clone(), sl.clone(), ss.clone(), da.clone(),
                     w.clone(), cs_scroll.clone(), path_ref.clone(), masters.clone(), dirty.clone(),
                 );
                 let parent = w.clone();
@@ -1208,16 +1209,12 @@ impl DecksWindow {
                 let cs = cs.clone();
                 let sl = sl.clone();
                 let ss = ss.clone();
-                let cs_ref = cs_ref.clone();
-                let so = so.clone();
                 let da = da.clone();
                 let w2 = w.clone();
                 let cs_scroll = cs_scroll.clone();
                 let path_ref = path_ref.clone();
                 let masters = masters.clone();
-                let dirty = dirty.clone();
 
-                let ctl = ctl.clone();
                 crate::file_pick::open(&dlg, &w,
                     move |result: Result<gio::File, glib::Error>| {
                         if let Ok(file) = result {
@@ -1227,15 +1224,15 @@ impl DecksWindow {
                                     Ok((deck, context)) => {
                                         // Model, report and provenance land as
                                         // one session, only after a
-                                        // successful import (DCK-002).
+                                        // successful import (DCK-002). The
+                                        // install resets the owned selection
+                                        // to the first slide.
                                         ctl.install_opened_deck(deck, context);
-                                        cs_ref.set(0);
-                                        so.set(None);
                                         // Recent, as an open from the command
                                         // line or file manager is (open_path).
                                         suite_common::push_recent_file(&gio::Settings::new("org.tunaos.decks"), &path_str);
                                         *path_ref.borrow_mut() = Some(path_str);
-                                        dirty.set(false);
+                                        ctl.mark_saved();
                                         if cs.child_by_name("editor").is_none() {
                                             cs.add_titled(&cs_scroll, Some("editor"), "Editor");
                                         }
@@ -1279,13 +1276,13 @@ impl DecksWindow {
             let w_clone = w.clone();
             let path_clone = path_ref.clone();
             let m_save = controller.clone();
-            let dirty_save = dirty.clone();
             let slot_save = autosave_slot.clone();
             act_save.connect_activate(move |_, _| {
                 let current_path = path_clone.borrow().clone();
                 if let Some(path_str) = current_path {
                     let deck = m_save.deck();
-                    let (w_clone, dirty_save, slot_save) = (w_clone.clone(), dirty_save.clone(), slot_save.clone());
+                    let checkpoint = m_save.checkpoint();
+                    let (w_clone, slot_save) = (w_clone.clone(), slot_save.clone());
                     let target = path_str.clone();
                     let m_write = m_save.clone();
                     crate::loss_ui::save_after_asking_with_context(&w_clone.clone(), m_write.clone(), Some(&target), &target, move || match save_deck(&path_str, &deck, &m_write.carried_for_save()) {
@@ -1293,7 +1290,7 @@ impl DecksWindow {
                             m_write.repin_after_save(&path_str);
                             let settings = gio::Settings::new("org.tunaos.decks");
                             suite_common::push_recent_file(&settings, &path_str);
-                            dirty_save.set(false);
+                            m_write.acknowledge_save(checkpoint);
                             slot_save.clear_or_report();
                         }
                         Err(e) => {
@@ -1314,7 +1311,6 @@ impl DecksWindow {
 
             let act_save_as = gtk::gio::SimpleAction::new("save-file-as", None);
             let m_as = controller.clone();
-            let dirty_as = dirty.clone();
             let slot_as = autosave_slot.clone();
             act_save_as.connect_activate(move |_, _| {
                 let dlg = gtk::FileDialog::new();
@@ -1333,7 +1329,6 @@ impl DecksWindow {
                 let w2 = w.clone();
                 let path_ref = path_ref.clone();
                 let m_inner = m_as.clone();
-                let dirty_as = dirty_as.clone();
                 let slot_as = slot_as.clone();
                 dlg.save(Some(&w), None::<&gio::Cancellable>,
                     move |result: Result<gio::File, glib::Error>| {
@@ -1341,8 +1336,9 @@ impl DecksWindow {
                             if let Some(path) = local_path(&file, true, &w2) {
                                 let path_str = path.to_string_lossy().to_string();
                                 let deck = m_inner.deck();
+                                let checkpoint = m_inner.checkpoint();
                                 let source = path_ref.borrow().clone();
-                                let (w2, path_ref, dirty_as, slot_as) = (w2.clone(), path_ref.clone(), dirty_as.clone(), slot_as.clone());
+                                let (w2, path_ref, slot_as) = (w2.clone(), path_ref.clone(), slot_as.clone());
                                 let target = path_str.clone();
                                 let m_write = m_inner.clone();
                                 crate::loss_ui::save_after_asking_with_context(&w2.clone(), m_write.clone(), source.as_deref(), &target, move || match save_deck(&path_str, &deck, &m_write.carried_for_save()) {
@@ -1356,7 +1352,7 @@ impl DecksWindow {
                                         let settings = gio::Settings::new("org.tunaos.decks");
                                         suite_common::push_recent_file(&settings, &path_str);
                                         *path_ref.borrow_mut() = Some(path_str);
-                                        dirty_as.set(false);
+                                        m_write.acknowledge_save(checkpoint);
                                         slot_as.clear_or_report();
                                     }
                                     Err(e) => {
@@ -1439,8 +1435,6 @@ impl DecksWindow {
             slide_list,
             canvas,
             controller,
-            current_slide,
-            selected_object,
             content_stack,
             editor_split,
             file_path,
@@ -1476,11 +1470,10 @@ impl DecksWindow {
             if !recovered {
                 continue;
             }
-            // open_path() pointed file_path at the temp recovery file and left
-            // `dirty` untouched (it's a plain field write, not an undo-stack
-            // mutation) — recovered content targets the *original* path (or
-            // none) and must count as dirty so the close guard offers to
-            // save it.
+            // open_path() pointed file_path at the temp recovery file and
+            // marked the installed deck saved — recovered content targets
+            // the *original* path (or none) and must count as dirty so
+            // the close guard offers to save it.
             *self.file_path.borrow_mut() = meta.original_path.as_ref().map(|p| p.to_string_lossy().to_string());
             // The scratch file open_path just read is already deleted: its
             // provenance would pin a ghost. Recovery adopts the snapshot's
@@ -1520,11 +1513,14 @@ impl DecksWindow {
         // The deck on screen becomes the file just read — model, report
         // and provenance together, only after a successful import.
         // (Recovery marks it dirty again afterwards: recovered work is
-        // unsaved.)
+        // unsaved.) The install resets the owned selection to the first
+        // slide; reassert it by id so a reader with no slides still lands
+        // on nothing selected rather than stale state.
         self.controller.install_opened_deck(deck, context);
-        self.controller.dirty.set(false);
-        self.current_slide.set(0);
-        self.selected_object.set(None);
+        self.controller.mark_saved();
+        if let Some(id) = self.controller.slide_id_at(0) {
+            self.controller.select_slide(id);
+        }
         *self.file_path.borrow_mut() = Some(path.to_string());
         if self.content_stack.child_by_name("editor").is_none() {
             self.content_stack.add_titled(&self.editor_split, Some("editor"), "Editor");

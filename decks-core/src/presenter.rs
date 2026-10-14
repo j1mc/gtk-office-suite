@@ -217,8 +217,8 @@ pub struct MissingMedia {
 /// not whether an existing file can be decoded.
 pub fn missing_media(deck: &Deck) -> Vec<MissingMedia> {
     deck.slides.iter().enumerate().flat_map(|(slide_index, slide)| {
-        let master = slide.master_idx.and_then(|i| deck.masters.get(i));
-        let layout = master.and_then(|m| slide.layout.and_then(|i| m.layouts.get(i)));
+        let master = deck.master_of(slide);
+        let layout = deck.layout_of(slide);
         // Match effective_master's additive decorations without cloning a master.
         slide.objects.iter()
             .chain(master.into_iter().flat_map(|m| m.shapes.iter()))
@@ -273,8 +273,8 @@ mod tests {
     fn deck() -> Deck {
         Deck {
             slides: vec![
-                Slide { title: "Opening".into(), background: "#fff".into(), objects: vec![], notes: "Welcome".into(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None },
-                Slide { title: "Details".into(), background: "#fff".into(), objects: vec![], notes: "Explain this".into(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None },
+                Slide { title: "Opening".into(), background: "#fff".into(), objects: vec![], notes: "Welcome".into(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None },
+                Slide { title: "Details".into(), background: "#fff".into(), objects: vec![], notes: "Explain this".into(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None },
             ],
             masters: vec![],
         }
@@ -372,7 +372,7 @@ mod tests {
         let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
         let mut deck = deck();
         deck.masters.push(crate::engine::MasterSlide {
-            name: "Master".into(), background: "#fff".into(), default_font: "Sans".into(),
+            id: 0, name: "Master".into(), background: "#fff".into(), default_font: "Sans".into(),
             shapes: Vec::new(), page_emu: None, layouts: Vec::new(),
         });
         deck.masters[0].shapes.push(image(&path("master")));
@@ -382,7 +382,10 @@ mod tests {
         let mut unused = deck.masters[0].clone();
         unused.shapes = vec![image(&path("unused-master"))];
         deck.masters.push(unused);
-        deck.slides[0].layout = Some(0);
+        crate::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+        deck.slides[0].master_id = Some(deck.masters[0].id);
+        deck.slides[1].master_id = Some(deck.masters[0].id);
+        deck.slides[0].layout_id = Some(deck.masters[0].layouts[0].id);
         deck.slides[1].objects.push(image(&path("slide")));
         assert_eq!(missing_media(&deck), vec![
             MissingMedia { slide_index: 0, path: path("master") },
@@ -390,13 +393,14 @@ mod tests {
             MissingMedia { slide_index: 1, path: path("slide") },
             MissingMedia { slide_index: 1, path: path("master") },
         ]);
-        deck.slides[0].layout = Some(usize::MAX);
-        deck.slides[1].master_idx = Some(usize::MAX);
+        deck.slides[0].layout_id = Some(u64::MAX);
+        deck.slides[1].master_id = Some(u64::MAX);
         assert_eq!(missing_media(&deck), vec![
             MissingMedia { slide_index: 0, path: path("master") },
             MissingMedia { slide_index: 1, path: path("slide") },
         ]);
-        deck.slides[0].master_idx = None;
+        // `None` inherits the first master; only an unknown id excludes it.
+        deck.slides[0].master_id = Some(u64::MAX);
         deck.slides[1].objects.clear();
         assert!(missing_media(&deck).is_empty());
     }

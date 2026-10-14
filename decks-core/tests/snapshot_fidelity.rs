@@ -38,7 +38,11 @@ fn through_a_snapshot(deck: &Deck, kind: &str, tag: &str) -> Deck {
 
 /// A deck of exactly these slides, with no masters.
 fn deck_of(slides: Vec<Slide>) -> Deck {
-    Deck { slides, masters: vec![] }
+    let mut deck = Deck { slides, masters: vec![] };
+    // Writers map builds to file ids through stable object ids, so the
+    // deck needs them before the snapshot (DCK-005).
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck
 }
 
 /// A slide carrying only what the caller cares about.
@@ -48,11 +52,11 @@ fn slide_of(objects: Vec<SlideObject>, notes: &str, background: &str) -> Slide {
         background: background.to_string(),
         objects,
         notes: notes.to_string(),
-        master_idx: None,
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -321,9 +325,11 @@ fn slide_order_survives_a_snapshot() {
 fn masters_survive_a_snapshot() {
     let mut complaints: Vec<String> = Vec::new();
     for kind in FORMATS {
-        let deck = Deck {
+        let mut deck = Deck {
             masters: vec![
                 MasterSlide {
+                    // Stamped with session ids below, once, with the slides.
+                    id: 0,
                     name: "House Style".into(),
                     background: "#204060".into(),
                     default_font: "Cantarell".into(),
@@ -332,6 +338,7 @@ fn masters_survive_a_snapshot() {
                     layouts: Vec::new(),
                 },
                 MasterSlide {
+                    id: 0,
                     name: "Second".into(),
                     background: "#a01020".into(),
                     default_font: "Cantarell".into(),
@@ -346,11 +353,12 @@ fn masters_survive_a_snapshot() {
                     background: String::new(),
                     objects: vec![text_box("on the house master", 10.0, 10.0)],
                     notes: String::new(),
-                    master_idx: Some(0),
+                    // Stamped with the masters' ids below.
+                    master_id: None,
                     transition: Default::default(),
                     builds: Vec::new(),
                     ids: Default::default(),
-                    layout: None,
+                    layout_id: None,
                 },
                 // On the *second* master, which is what makes the mapping
                 // testable: a reader that loses it falls back to master 0,
@@ -361,14 +369,19 @@ fn masters_survive_a_snapshot() {
                     background: String::new(),
                     objects: vec![text_box("on the second master", 10.0, 10.0)],
                     notes: String::new(),
-                    master_idx: Some(1),
+                    master_id: None,
                     transition: Default::default(),
                     builds: Vec::new(),
                     ids: Default::default(),
-                    layout: None,
+                    layout_id: None,
                 },
             ],
         };
+        // Stable master and slide ids, minted once here (DCK-005): the
+        // first slide stays on the first master, the second on the second.
+        decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+        deck.slides[0].master_id = Some(deck.masters[0].id);
+        deck.slides[1].master_id = Some(deck.masters[1].id);
         let back = through_a_snapshot(&deck, kind, "masters");
         if back.masters.is_empty() {
             complaints.push(format!("{kind}: the deck came back with no masters at all"));
@@ -402,12 +415,13 @@ fn masters_survive_a_snapshot() {
             ));
         }
         // Each slide must still name the master it was on, not merely
-        // find some master in the package.
-        let mapping: Vec<Option<usize>> =
-            back.slides.iter().map(|s| s.master_idx).collect();
-        if mapping != vec![Some(0), Some(1)] {
+        // find some master in the package. Master ids are session-local,
+        // so the assertion is on names, which persist.
+        let mapping: Vec<Option<String>> =
+            back.slides.iter().map(|s| back.master_of(s).map(|m| m.name.clone())).collect();
+        if mapping != vec![Some("House Style".into()), Some("Second".into())] {
             complaints.push(format!(
-                "{kind}: the slides were on masters [0, 1] and came back on {mapping:?}"
+                "{kind}: the slides were on masters [House Style, Second] and came back on {mapping:?}"
             ));
         }
         // And the slide's own content must not have absorbed the master's.
@@ -541,6 +555,7 @@ fn the_masters_font_survives_a_snapshot() {
     for kind in FORMATS {
         let deck = Deck {
             masters: vec![MasterSlide {
+                id: 0,
                 name: "House Style".into(),
                 background: "#ffffff".into(),
                 // A real face rather than a generic family: "Sans" is the
@@ -556,11 +571,11 @@ fn the_masters_font_survives_a_snapshot() {
                 background: String::new(),
                 objects: vec![text_box("body text", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
         };
         let back = through_a_snapshot(&deck, kind, "master-font");
@@ -590,9 +605,10 @@ fn the_masters_font_survives_a_snapshot() {
 /// readers honour, this test is the one that should fail.
 #[test]
 fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
-    let deck = Deck {
+    let mut deck = Deck {
         masters: vec![
             MasterSlide {
+                id: 0,
                 name: "First".into(),
                 background: "#ffffff".into(),
                 default_font: "Liberation Serif".into(),
@@ -601,6 +617,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 layouts: Vec::new(),
             },
             MasterSlide {
+                id: 0,
                 name: "Second".into(),
                 background: "#ffffff".into(),
                 default_font: "Liberation Mono".into(),
@@ -615,25 +632,28 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 background: String::new(),
                 objects: vec![text_box("on first", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             },
             Slide {
                 title: String::new(),
                 background: String::new(),
                 objects: vec![text_box("on second", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(1),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             },
         ],
     };
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck.slides[0].master_id = Some(deck.masters[0].id);
+    deck.slides[1].master_id = Some(deck.masters[1].id);
 
     let pptx = through_a_snapshot(&deck, "pptx", "two-fonts");
     let pptx_fonts: Vec<&str> = pptx.masters.iter().map(|m| m.default_font.as_str()).collect();
@@ -669,6 +689,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
 fn the_pptx_declares_the_theme_part_it_ships() {
     let deck = Deck {
         masters: vec![MasterSlide {
+            id: 7,
             name: "House Style".into(),
             background: "#ffffff".into(),
             default_font: "Liberation Serif".into(),
@@ -681,11 +702,11 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             background: String::new(),
             objects: vec![],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: Some(7),
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }],
     };
     let bytes = decks_core::write_deck_bytes("pptx", &deck).expect("write pptx");
@@ -804,6 +825,7 @@ fn a_master_decorations_run_styling_survives_a_snapshot() {
         let deck = Deck {
             slides: vec![slide_of(vec![text_box("Slide body", 10.0, 10.0)], "", "")],
             masters: vec![MasterSlide {
+                id: 0,
                 name: "House Style".into(),
                 background: "#ffffff".into(),
                 default_font: "Cantarell".into(),
@@ -892,6 +914,7 @@ fn a_masters_run_styles_do_not_collide_with_a_slides_in_odp() {
             "",
         )],
         masters: vec![MasterSlide {
+            id: 0,
             name: "House".into(),
             background: "#ffffff".into(),
             default_font: "Cantarell".into(),
@@ -1568,18 +1591,26 @@ fn slide_transitions_survive_a_snapshot() {
 #[test]
 fn object_builds_survive_a_snapshot() {
     use decks_core::builds::{Build, BuildEffect, Edge};
-    let builds = vec![
-        Build { object: 2, effect: BuildEffect::Dissolve, out: false },
-        Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-        Build { object: 1, effect: BuildEffect::Appear, out: true },
+    // Builds name stable object ids; across a save and reopen the ids
+    // are minted fresh, so the assertion is on (position, effect, out).
+    let mut slide = slide_of(vec![text_box("a", 10.0, 10.0), text_box("b", 10.0, 100.0), text_box("c", 10.0, 200.0)], "", "#ffffff");
+    decks_core::ops::ensure_all_ids(std::slice::from_mut(&mut slide), &mut []);
+    let ids = slide.ids.objects.clone();
+    slide.builds = vec![
+        Build { object: ids[2], effect: BuildEffect::Dissolve, out: false },
+        Build { object: ids[0], effect: BuildEffect::Move(Edge::Left), out: false },
+        Build { object: ids[1], effect: BuildEffect::Appear, out: true },
     ];
-    let slide = Slide {
-        builds: builds.clone(),
-        ..slide_of(vec![text_box("a", 10.0, 10.0), text_box("b", 10.0, 100.0), text_box("c", 10.0, 200.0)], "", "#ffffff")
-    };
     for kind in FORMATS {
         let back = through_a_snapshot(&deck_of(vec![slide.clone()]), kind, "builds");
-        assert_eq!(back.slides[0].builds, builds, "{kind}");
+        let got: Vec<(usize, BuildEffect, bool)> = back.slides[0].builds.iter().map(|b| {
+            (back.slides[0].object_index(b.object).unwrap(), b.effect, b.out)
+        }).collect();
+        assert_eq!(got, vec![
+            (2, BuildEffect::Dissolve, false),
+            (0, BuildEffect::Move(Edge::Left), false),
+            (1, BuildEffect::Appear, true),
+        ], "{kind}");
     }
 }
 
