@@ -189,9 +189,17 @@ fn rules_and_filters_survive_a_snapshot() {
     use tables_core::sheet::{CondOp, CondRule, FilterColumn, FilterDef};
     let mut first = SheetModel::new("First", 8, 5, 0);
     first.data[0][0] = "keep".into();
+    // Two rules out of priority order: the writer numbers rules in
+    // document order (rust_xlsxwriter assigns sequential priorities), so
+    // absolute stored numbers normalize to dense ranks — evaluation order
+    // is the invariant that must survive.
     first.cond_rules.push(CondRule {
         range: (0, 0, 2, 0), op: CondOp::Greater, value: 1.0, value2: 1.0,
-        fill: "C6EFCE".into(), priority: 2,
+        fill: "C6EFCE".into(), priority: 5,
+    });
+    first.cond_rules.push(CondRule {
+        range: (0, 1, 2, 1), op: CondOp::Less, value: 0.0, value2: 0.0,
+        fill: "FFEB9C".into(), priority: 2,
     });
     let mut later = SheetModel::new("Later", 8, 5, 1);
     for (r, v) in ["Name", "ask", "hide", "ask"].iter().enumerate() {
@@ -209,8 +217,9 @@ fn rules_and_filters_survive_a_snapshot() {
     later.hidden_rows_manual.insert(3);
     let back = through_a_snapshot(&[first, later], "rules-filters");
     assert_eq!(back.len(), 2);
-    assert_eq!(back[0].cond_rules.len(), 1, "no rule leaks between sheets");
-    assert_eq!((back[0].cond_rules[0].op, back[0].cond_rules[0].priority), (CondOp::Greater, 2));
+    assert_eq!(back[0].cond_rules.len(), 2, "no rule leaks between sheets");
+    assert_eq!((back[0].cond_rules[0].op, back[0].cond_rules[0].priority), (CondOp::Less, 1));
+    assert_eq!((back[0].cond_rules[1].op, back[0].cond_rules[1].priority), (CondOp::Greater, 2));
     assert!(back[1].hidden_rows.contains(&2), "the filter hide recovers");
     assert!(!back[1].hidden_rows.contains(&0), "the header is not a filter hide");
     assert!(back[1].hidden_rows_manual.contains(&3), "the manual hide recovers independent");
