@@ -14,13 +14,13 @@ use crate::toolbar::{find_toolbar_child, build_decks_toolbar};
 use crate::transition::{TransitionState, TransitionType, draw_transition};
 
 use decks_core::engine::{Slide, SlideObject, MasterSlide, Deck};
-use decks_core::{read_deck_with_context, write_deck_bytes, write_deck_with_context, DecksController};
+use decks_core::{read_deck_with_context, write_deck_with_context, DecksController};
 
 /// Late-bound thumbnail-refresh callback (the slide list is built after
 /// the closure that will eventually call it is created).
 type ThumbUpdater = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
-use crate::persistence::{autosave_format_hint, autosave_state_dir, next_doc_id};
+use crate::persistence::{autosave_state_dir, next_doc_id};
 
 
 // ── DecksWindow ──────────────────────────────────────────────────────────
@@ -1376,7 +1376,8 @@ impl DecksWindow {
         // ── Autosave: periodic crash-recovery snapshot ──────────────────
         // Mirrors Tables: writes to the state-dir slot, never to the deck's
         // own path, and never clears `dirty` — a snapshot is not a save,
-        // the close guard still needs to fire.
+        // the close guard still needs to fire. One helper serves the manual
+        // action and the timer below (see persistence.rs).
         {
             let m = controller.clone();
             let dirty = dirty.clone();
@@ -1385,19 +1386,7 @@ impl DecksWindow {
             let path_state = file_path.clone();
             let act = gtk::gio::SimpleAction::new("autosave-now", None);
             act.connect_activate(move |_, _| {
-                if !dirty.get() {
-                    return;
-                }
-                let deck = m.deck();
-                let path = path_state.borrow().clone();
-                let kind = autosave_format_hint(&path);
-                if let Ok(bytes) = write_deck_bytes(&kind, &deck) {
-                    let meta = suite_common::autosave::SnapshotMeta {
-                        original_path: path.map(std::path::PathBuf::from),
-                        kind,
-                    };
-                    notices.record(slot.write(&bytes, &meta));
-                }
+                crate::persistence::autosave_once(&m, &dirty, &slot, &notices, path_state.borrow().clone());
             });
             app.add_action(&act);
         }
@@ -1411,18 +1400,7 @@ impl DecksWindow {
             let enabled = settings.boolean("auto-save");
             if enabled {
                 glib::source::timeout_add_seconds_local(interval, move || {
-                    if dirty.get() {
-                        let deck = m.deck();
-                        let path = path_state.borrow().clone();
-                        let kind = autosave_format_hint(&path);
-                        if let Ok(bytes) = write_deck_bytes(&kind, &deck) {
-                            let meta = suite_common::autosave::SnapshotMeta {
-                                original_path: path.map(std::path::PathBuf::from),
-                                kind,
-                            };
-                            notices.record(slot.write(&bytes, &meta));
-                        }
-                    }
+                    crate::persistence::autosave_once(&m, &dirty, &slot, &notices, path_state.borrow().clone());
                     glib::ControlFlow::Continue
                 });
             }
@@ -1474,15 +1452,36 @@ impl DecksWindow {
             // marked the installed deck saved — recovered content targets
             // the *original* path (or none) and must count as dirty so
             // the close guard offers to save it.
-            *self.file_path.borrow_mut() = meta.original_path.as_ref().map(|p| p.to_string_lossy().to_string());
+            match meta.original_path.as_ref().map(|p| p.to_str()) {
+                // Never saved: no identity to restore.
+                None => *self.file_path.borrow_mut() = None,
+                Some(Some(path)) => *self.file_path.borrow_mut() = Some(path.to_string()),
+                Some(None) => {
+                    // The envelope keeps native path bytes, so a non-UTF-8
+                    // original arrives here exactly; the session identity
+                    // is a String and must not receive a lossy guess of it
+                    // (DCK-003). The work stays, as an unsaved document,
+                    // and this says where it can go instead.
+                    *self.file_path.borrow_mut() = None;
+                    let err = adw::AlertDialog::builder()
+                        .heading(suite_common::i18n("Could Not Reassociate Recovered Document"))
+                        .body(&suite_common::i18n("The recovered document's original location has a name Decks cannot reuse. It is kept as an unsaved document: save it to a destination you choose."))
+                        .build();
+                    err.add_response("ok", &suite_common::i18n("_OK"));
+                    err.present(Some(&self.window));
+                }
+            }
             // The scratch file open_path just read is already deleted: its
             // provenance would pin a ghost. Recovery adopts the snapshot's
             // bytes with no context, so the next save inspects the live
             // original instead (DCK-002; versioned payload is DCK-003).
             self.controller.clear_source_context();
             self.controller.dirty.set(true);
-            let name = meta.original_path.as_ref()
-                .and_then(|p| p.file_name())
+            // Names the original when it has one the session can hold;
+            // a rejected non-UTF-8 identity shows as Untitled rather than
+            // mojibake claiming to be the file's name.
+            let name = self.file_path.borrow().as_ref()
+                .and_then(|p| std::path::Path::new(p).file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Untitled".to_string());
             self.window.set_title(Some(&format!("{name} (Recovered) — Decks")));

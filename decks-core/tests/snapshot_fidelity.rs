@@ -1671,3 +1671,53 @@ fn provenance_snapshot_follows_the_session() {
         None
     );
 }
+
+/// A snapshot that cannot even be built must not clear the good one an
+/// earlier revision wrote, and the failure must be told exactly as the
+/// notifier policy says — once, then silence until it either repeats
+/// often enough or recovers (DCK-003, error propagation).
+#[test]
+fn serialization_failure_retains_last_generation() {
+    use suite_common_core::autosave::{AutosaveNotices, AutosaveSlot, SnapshotMeta};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let slot = AutosaveSlot::new(dir.path().join("state"), "doc-1");
+    let mut policy = AutosaveNotices::new();
+    assert!(policy.succeeded().is_none(), "a quiet session stays quiet");
+    // First generation: a plain deck snapshots fine.
+    let good = deck_of(vec![slide_of(vec![text_box("kept", 10.0, 10.0)], "", "")]);
+    let bytes = decks_core::write_deck_bytes("pptx", &good).expect("a plain deck snapshots");
+    let meta = SnapshotMeta { original_path: None, kind: "pptx".into() };
+    slot.write(&bytes, &meta).expect("the first generation lands");
+    // Second generation: the picture's file is gone, so there are no
+    // bytes to write — only the failure, reported once without spam.
+    let gone = dir.path().join("gone.png");
+    let bad = deck_of(vec![slide_of(
+        vec![SlideObject::Image {
+            path: gone.to_string_lossy().to_string(),
+            x: 10.0, y: 10.0, w: 30.0, h: 30.0,
+            rotation: 0.0,
+            crop: Default::default(),
+        }],
+        "",
+        "",
+    )]);
+    let err = decks_core::write_deck_bytes("pptx", &bad).expect_err("a missing picture must fail the snapshot");
+    assert!(err.contains("gone.png"), "the failure names the file: {err}");
+    assert!(policy.failed(&err).is_some(), "the first failure is told");
+    assert!(policy.failed(&err).is_none(), "the second identical failure is not repeated");
+    // Nothing was written, so the previous generation reads back whole.
+    let (back, back_meta) = slot.read().expect("the prior generation survives");
+    assert_eq!(back, bytes, "the slot still holds the first generation");
+    assert_eq!(back_meta.kind, "pptx");
+    let path = dir.path().join("legacy.pptx");
+    std::fs::write(&path, &back).expect("stage the generation");
+    let recovered = decks_core::read_deck(path.to_str().unwrap()).expect("it still opens");
+    let texts: Vec<&str> = recovered.slides.iter().flat_map(|s| s.objects.iter().filter_map(|o| match o {
+        SlideObject::TextBox { text, .. } => Some(text.as_str()),
+        _ => None,
+    })).collect();
+    assert!(texts.contains(&"kept"), "the work is still there: {texts:?}");
+    // A later success closes the streak visibly.
+    slot.write(&bytes, &meta).expect("a later generation lands");
+    assert!(policy.succeeded().is_some(), "the recovery is told");
+}
