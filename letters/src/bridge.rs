@@ -1311,13 +1311,19 @@ pub fn insert_footnote_marker(buf: &gtk::TextBuffer, insert: &mut gtk::TextIter,
     buf.insert_with_tags_by_name(insert, &format!("[{}]", idx + 1), &[&name]);
 }
 
-/// Model offset (`Document`'s global char offsets) of buffer offset `off`.
+/// Buffer offset `off` in `Document` char offsets: the structured editor's
+/// space, where objects count their text rather than one sequence char.
+/// Kept beside `LiveModel::sequence_offset` (the ops' space) deliberately:
+/// the two mappings agree on plain text and differ on objects, and each
+/// consumer needs its own (LET-003). Collapsing them misplaces structured
+/// commands in documents with footnotes or chips before a table.
 fn model_offset(doc: &Document, starts: &[usize], off: usize) -> usize {
     let (para, offset) = paragraph_offset(doc, starts, off);
     doc.paragraph_offset(para) + offset
 }
 
-/// Buffer offset of model offset `off`.
+/// Buffer offset of `Document` char offset `off` (the inverse of
+/// `model_offset`, for restoring the caret where a command left it).
 fn buffer_offset_of_model(doc: &Document, starts: &[usize], off: usize) -> usize {
     let para = doc.paragraph_at(off).min(doc.paragraphs.len().saturating_sub(1));
     let within = off.saturating_sub(doc.paragraph_offset(para));
@@ -1351,7 +1357,7 @@ where
     }
 }
 
-/// Apply a structured editing operation directly to the GtkTextBuffer through
+/// Apply a structured editing operation to the tab's live model through
 /// letters_core::StructuredEditor, preserving document structure and cursor position.
 pub fn apply_structured_edit<F>(buf: &gtk::TextBuffer, edit: F)
 where

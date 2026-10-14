@@ -3,9 +3,10 @@
 // PageView — the Print Layout view (ADR 0010). It draws the pages of a
 // `letters_core::layout::pango::Typeset`: the same render tree and the same
 // `draw_page` that print and PDF use, so what it shows is where the lines
-// and page breaks really are. It edits the tab's GtkTextBuffer (still the
-// document's live state; see page_edit.rs): the caret and selection are the
-// buffer's, mapped onto the laid-out pages.
+// and page breaks really are. Edits go to the tab's live model as ops (see
+// page_edit.rs); the buffer is the model's projection, hosting the caret,
+// the selection, the IME and the text screen readers read, mapped onto the
+// laid-out pages.
 //
 // Zoom is physical: 100% is 96/72 px per point, a Letter page is 816 px
 // wide, as in every other word processor and in the render lab's
@@ -75,8 +76,10 @@ mod imp {
         }
     }
 
-    /// The text screen readers see is the buffer's, the text the page view
-    /// edits; offsets are the buffer's char offsets.
+    /// The text screen readers see is the buffer's — the model's projection,
+    /// which also hosts the caret, the selection and the IME; offsets are
+    /// the buffer's char offsets. The model stays the sole authority: this
+    /// impl only reads (LET-003).
     impl AccessibleTextImpl for PageView {
         fn contents(&self, start: u32, end: u32) -> Option<glib::Bytes> {
             let buf = self.buffer.borrow().clone()?;

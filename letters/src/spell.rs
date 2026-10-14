@@ -110,23 +110,34 @@ impl SpellChecker {
         Ok(dict)
     }
 
-    fn check_all(&self) {
+    pub(crate) fn check_all(&self) {
         let start = self.buffer.start_iter();
         let end = self.buffer.end_iter();
         self.buffer.remove_tag(&self.error_tag, &start, &end);
-        let text = self.buffer.text(&start, &end, false).to_string();
-        let mut pos = 0usize;
-        let bytes = text.as_bytes();
-        while pos < bytes.len() {
-            while pos < bytes.len() && !is_word_byte(bytes[pos]) { pos += 1; }
-            if pos >= bytes.len() { break; }
+        // The words are the model's (LET-003): iteration runs over the
+        // live model's sequence text, and only the presentation-only error
+        // tag goes onto the buffer. Without a live model there is nothing
+        // to check — and no fallback that writes content. Offsets are
+        // char counts throughout: the byte indices this used confused
+        // non-ASCII words with the chars after them.
+        let Some(live) = crate::live::of(&self.buffer) else { return };
+        let mut m = live.borrow_mut();
+        let chars: Vec<char> = letters_core::edit::sequence_text(m.document()).chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            while pos < chars.len() && !is_word_char(chars[pos]) { pos += 1; }
+            if pos >= chars.len() { break; }
             let ws = pos;
-            while pos < bytes.len() && is_word_byte(bytes[pos]) { pos += 1; }
-            let word = &text[ws..pos];
-            if !self.is_correct(word) {
-                let mut si = start; si.forward_chars(ws as i32);
-                let mut ei = start; ei.forward_chars(pos as i32);
-                self.buffer.apply_tag(&self.error_tag, &si, &ei);
+            while pos < chars.len() && is_word_char(chars[pos]) { pos += 1; }
+            let word: String = chars[ws..pos].iter().collect();
+            if !self.is_correct(&word) {
+                if let (Some(s), Some(e)) = (m.buffer_offset(ws), m.buffer_offset(pos)) {
+                    self.buffer.apply_tag(
+                        &self.error_tag,
+                        &self.buffer.iter_at_offset(s as i32),
+                        &self.buffer.iter_at_offset(e as i32),
+                    );
+                }
             }
         }
     }
@@ -145,6 +156,24 @@ pub struct SpellCheckHandle {
 #[allow(dead_code)]
 impl SpellCheckHandle {
     pub fn word_at_cursor(&self, buffer: &gtk::TextBuffer) -> Option<String> {
+        // The word is the model's (LET-003): the caret's buffer offset maps
+        // to a sequence offset, and the word bounds come from the sequence
+        // text. Buffer offsets are for caret placement only. Without a live
+        // model, fall back to reading the buffer (read-only: no content is
+        // written back).
+        if let Some(live) = crate::live::of(buffer) {
+            let mut m = live.borrow_mut();
+            let at = m.sequence_offset(buffer.cursor_position().max(0) as usize);
+            let chars: Vec<char> = letters_core::edit::sequence_text(m.document()).chars().collect();
+            if at > chars.len() {
+                return None;
+            }
+            let (mut s, mut e) = (at, at);
+            while s > 0 && is_word_char(chars[s - 1]) { s -= 1; }
+            while e < chars.len() && is_word_char(chars[e]) { e += 1; }
+            let word: String = chars[s..e].iter().collect();
+            return (word.len() >= 2 && word.chars().any(|c| c.is_ascii_alphabetic())).then_some(word);
+        }
         let ins = buffer.cursor_position();
         let mut start = buffer.iter_at_offset(ins);
         let mut end = start;
@@ -158,6 +187,32 @@ impl SpellCheckHandle {
         }
         let word = buffer.text(&start, &end, false).to_string();
         if word.len() >= 2 && word.chars().any(|c| c.is_ascii_alphabetic()) { Some(word) } else { None }
+    }
+
+    /// Replace the model word at the caret with `replacement`: the backend
+    /// a spelling-suggestions menu applies (LET-003). The word's range is a
+    /// sequence range from `snapshot().0`; the buffer offsets derived from
+    /// it place the caret only. One model edit, so one Undo takes it back.
+    /// False with no live model or when the caret is not on a word.
+    #[allow(dead_code)]
+    pub fn replace_word_at_caret(&self, buffer: &gtk::TextBuffer, replacement: &str) -> bool {
+        let Some(live) = crate::live::of(buffer) else { return false };
+        let mut m = live.borrow_mut();
+        let at = m.sequence_offset(buffer.cursor_position().max(0) as usize);
+        let chars: Vec<char> = letters_core::edit::sequence_text(m.document()).chars().collect();
+        if at > chars.len() {
+            return false;
+        }
+        let (mut s, mut e) = (at, at);
+        while s > 0 && is_word_char(chars[s - 1]) { s -= 1; }
+        while e < chars.len() && is_word_char(chars[e]) { e += 1; }
+        let word: String = chars[s..e].iter().collect();
+        if word.len() < 2 || !word.chars().any(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+        let (Some(bs), Some(be)) = (m.buffer_offset(s), m.buffer_offset(e)) else { return false };
+        drop(m);
+        crate::dialogs::replace_ranges(buffer, &[(bs, be)], replacement)
     }
 
     pub fn suggestions(&self, word: &str) -> Vec<String> {
@@ -255,6 +310,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 fn is_word_byte(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'\''
+}
+
+/// The char version of `is_word_byte`: one word definition for buffer and
+/// model iteration alike (ASCII letters and apostrophe, as hunspell sees).
+fn is_word_char(c: char) -> bool {
+    c.is_ascii() && is_word_byte(c as u8)
 }
 
 

@@ -2,17 +2,19 @@
 //
 // page_edit.rs — editing on the Print Layout view (ADR 0010, stage 3).
 //
-// The tab's GtkTextBuffer is still the document's live state, so the page
-// view edits *it*: a click places the buffer's cursor at the character the
-// laid-out page shows there, typing goes through a GtkIMContext into the
-// buffer, and the view lays the document out again after every change.
+// The tab's live model is the document's live state, so the page view
+// edits *it*: a click places the buffer's cursor at the character the
+// laid-out page shows there, typing goes through a GtkIMContext into model
+// ops, and the view lays the document out again after every change. The
+// buffer is the model's projection, hosting the caret, the selection, the
+// IME and the text screen readers read (LET-003).
 // Undo, formatting actions, find and save all keep working unchanged,
-// because they act on the same buffer.
+// because they act on the same model.
 //
 // Enter continues and ends lists (`bridge::enter_in_list`); Markdown
 // shortcuts act on the buffer, so they work here too; the suite clipboard
-// format is connected by doc_tab; screen readers read the view through
-// GtkAccessibleText (page_view.rs).
+// format is connected by doc_tab; screen readers read the buffer's text
+// through GtkAccessibleText (page_view.rs).
 
 use gtk4::{self as gtk, gdk, glib, prelude::*};
 
