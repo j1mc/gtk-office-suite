@@ -932,7 +932,7 @@ impl DecksWindow {
             act.connect_activate(move |_, _| {
                 let Some(slide_id) = controller.selection().slide_id else { return };
                 let ss_snap = ss.borrow();
-                if controller.slide_index(slide_id).map_or(true, |idx| idx >= ss_snap.len()) { return; }
+                if controller.slide_index(slide_id).is_none_or(|idx| idx >= ss_snap.len()) { return; }
                 let count = shape_count.get();
                 shape_count.set(count + 1);
                 // A styled shape in the theme's default look (accent fill,
