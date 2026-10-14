@@ -58,6 +58,7 @@ pub enum ValidationRule {
     Decimal { min: Option<f64>, max: Option<f64> },
     TextLength { min: Option<usize>, max: Option<usize> },
     Regex(String),
+}
 
 impl ValidationRule {
     pub fn validate(&self, value: &str) -> bool {
