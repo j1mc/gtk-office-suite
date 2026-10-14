@@ -342,6 +342,9 @@ fn scan_auto_filter(xml: &str, location: &str, report: &mut CompatibilityReport)
     if !(xml.contains("<autoFilter") || xml.contains(":autoFilter")) {
         return;
     }
+    // One entry names every unsupported construct: the report dedupes by
+    // feature id, so separate records would collapse to the first.
+    let mut found = Vec::new();
     for (needle, what) in [
         ("<customFilters", "custom filters"),
         ("<dynamicFilter", "dynamic filters"),
@@ -351,13 +354,17 @@ fn scan_auto_filter(xml: &str, location: &str, report: &mut CompatibilityReport)
         ("<iconFilter", "icon filters"),
     ] {
         if xml.contains(needle) {
-            record(report, FILTER_CRITERIA, location, &format!(
-                "{what} aren't read — only value lists are; reopening shows plain hidden rows with no {what} to clear"
-            ));
+            found.push(what);
         }
     }
+    if !found.is_empty() {
+        record(report, FILTER_CRITERIA, location, &format!(
+            "{} aren't read — only value lists are; reopening shows plain hidden rows with no {} to clear",
+            found.join(", "),
+            found.join(", "),
+        ));
+    }
 }
-
 /// What one worksheet part holds that the model cannot carry: filter
 /// constructs, array formulas and rule shapes the reader skips.
 fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityReport) {
