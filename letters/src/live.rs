@@ -143,11 +143,6 @@ impl LiveModel {
         Snapshot { doc: self.doc.clone(), starts: self.starts.clone(), revision: self.revision }
     }
 
-    /// How many edits have landed since the document was opened.
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
     /// Update the buffer to the model, after the model
     /// changed from `old`. Only the changed paragraphs' lines are
     /// re-rendered; a change to a table or an inline object re-renders the

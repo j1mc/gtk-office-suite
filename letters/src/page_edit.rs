@@ -421,6 +421,7 @@ mod tests {
         let view = PageView::new();
         let snap = live.borrow().snapshot();
         view.set_typeset(Typeset::new(snap.doc, Default::default()), snap.starts);
+        (view, buf)
     }
 
     #[test]
