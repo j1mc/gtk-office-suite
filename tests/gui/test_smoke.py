@@ -6131,18 +6131,20 @@ class DecksCanonicalSelectionSmoke(BaseGUITestCase):
         slide_id = before["slides"][0]["id"]
         self.assertEqual(before["slide_id"], slide_id, "the selection names the open slide")
         # Each insert selects what it made: the primary object is the new shape.
+        # (The deck opens with the file's own text box, so the first shape
+        # brings the count to two.)
         self.gapplication_action(self.AID, "add-shape")
-        one = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 1, interval=0.5,
+        one = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 2, interval=0.5,
                               description="the first shape")
-        first_id = one["slides"][0]["objects"][0]["id"]
+        first_id = one["slides"][0]["objects"][1]["id"]
         self.assertEqual(one["primary_object_id"], first_id, "the insert is selected")
         self.assertEqual(one["selected_ids"], [first_id], one)
         self.gapplication_action(self.AID, "add-shape")
-        two = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 2, interval=0.5,
+        two = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 3, interval=0.5,
                               description="the second shape")
         ids = [o["id"] for o in two["slides"][0]["objects"]]
-        self.assertEqual(len(set(ids)), 2, f"objects have distinct ids: {ids}")
-        self.assertEqual(two["primary_object_id"], ids[1], "the second insert is selected")
+        self.assertEqual(len(set(ids)), 3, f"objects have distinct ids: {ids}")
+        self.assertEqual(two["primary_object_id"], ids[2], "the second insert is selected")
         # Reorder via slide ops: duplicate, then move the copy up. The same
         # slide ids come back in a new order, and the selection follows the copy.
         self.gapplication_action(self.AID, "duplicate-slide")
@@ -6172,7 +6174,7 @@ class DecksCanonicalSelectionSmoke(BaseGUITestCase):
         self.wait_until(lambda: os.path.getsize(self._doc) > 0, bool, interval=0.25, description="the save to land")
         self.relaunch_app(launch_args=[self._doc])
         reopened = self.wait_until(snap, lambda s: s and s["slide_count"] == 2, interval=0.5, description="the deck to reopen")
-        self.assertEqual([len(s["objects"]) for s in reopened["slides"]], [2, 2], "both slides keep their objects")
+        self.assertEqual([len(s["objects"]) for s in reopened["slides"]], [3, 3], "both slides keep their objects")
         live = [s["id"] for s in reopened["slides"]]
         self.assertEqual(len(set(live)), 2, "reopened slides have distinct ids")
         self.assertIn(reopened["slide_id"], live, "the selection names a surviving slide")
@@ -6241,6 +6243,9 @@ def rich_odp_parts(png):
         'xmlns:xlink="http://www.w3.org/1999/xlink" '
         'xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" office:version="1.3"'
     )
+    def notes(t):
+        return ('<presentation:notes><draw:frame presentation:class="notes" svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="5cm">'
+                f'<draw:text-box><text:p>{t}</text:p></draw:text-box></draw:frame></presentation:notes>')
     content = (
         f'<?xml version="1.0" encoding="UTF-8"?><office:document-content {ns}>'
         '<office:automatic-styles>'

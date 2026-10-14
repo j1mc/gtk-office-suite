@@ -1134,6 +1134,7 @@ impl DecksWindow {
                 refresh();
                 });
             });
+            app.add_action(&act);
         }
 
         // New From Template (template_chooser.rs), in place of the suite's
@@ -1178,6 +1179,7 @@ impl DecksWindow {
                     });
                 });
             });
+            app.add_action(&act);
         }
 
         {
