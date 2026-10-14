@@ -1475,8 +1475,8 @@ fn parse_pages(
     scale: (f64, f64),
     resolve_image: &mut dyn FnMut(&str) -> Option<String>,
     charts: &std::collections::HashMap<String, crate::engine::chart::ChartData>,
-    /// Session id counter (DCK-005): every page stamps its slide and
-    /// objects once at import, so builds name stable ids.
+    // Session id counter (DCK-005): every page stamps its slide and
+    // objects once at import, so builds name stable ids.
     fresh: &mut u64,
 ) -> Result<Vec<Page>, String> {
     let mut pages: Vec<Page> = Vec::new();

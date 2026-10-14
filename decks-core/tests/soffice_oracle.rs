@@ -1271,7 +1271,7 @@ fn geometry_survives_a_conversion_between_the_two_formats() {
         title: "T".into(),
         background: String::new(),
         notes: String::new(),
-        master_idx: None,
+        master_id: None,
         objects: vec![SlideObject::Rect {
             x: 96.0,
             y: 54.0,
@@ -1282,7 +1282,7 @@ fn geometry_survives_a_conversion_between_the_two_formats() {
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }];
     let want = (96.0, 54.0, 192.0, 108.0);
     let dir = tempfile::tempdir().unwrap();
@@ -1646,7 +1646,7 @@ fn impress_keeps_a_themes_decorations_in_both_formats() {
             // model has no layouts), so the theme's decorations are on each
             // master a slide is on.
             for s in &read.slides {
-                let m = &read.masters[s.master_idx.unwrap_or(0)];
+                let m = s.master_id.and_then(|id| read.masters.iter().find(|m| m.id == id)).unwrap_or(&read.masters[0]);
                 let got: Vec<String> = m.shapes.iter().map(look).collect();
                 assert_eq!(got, want, "{} {ext}: the master's decorations through Impress", t.name);
             }
@@ -1701,9 +1701,10 @@ fn impress_keeps_a_master_view_edit() {
     use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle};
     let (slides, masters) = decks_core::templates::deck(3).unwrap();
     let c = decks_core::DecksController::new(slides, masters);
-    c.edit_master(0).unwrap();
+    c.edit_master(c.slide_id_at(0).unwrap()).unwrap();
     let style = ShapeStyle { fill: Some(Color(0xE0, 0x1B, 0x24)), gradient: None, stroke: None };
-    c.add_object(0, SlideObject::Shape { kind: ShapeKind::Triangle, x: 860.0, y: 20.0, w: 80.0, h: 80.0, rotation: 0.0, style: style.clone() });
+    let mslide = c.slide_id_at(0).unwrap();
+    c.add_object(mslide, SlideObject::Shape { kind: ShapeKind::Triangle, x: 860.0, y: 20.0, w: 80.0, h: 80.0, rotation: 0.0, style: style.clone() });
     c.finish_master().unwrap();
     let deck = c.deck();
     for ext in ["pptx", "odp"] {
@@ -1733,16 +1734,18 @@ fn impress_keeps_our_layouts_and_placeholders() {
     }
     let (slides, masters) = decks_core::templates::deck(3).unwrap();
     let c = decks_core::DecksController::new(slides, masters);
-    assert!(c.apply_layout(1, 3));
+    let s = c.slide_id_at(1).unwrap();
+    let two = c.masters.borrow()[0].layouts[3].id;
+    assert!(c.apply_layout(s, two));
     let deck = c.deck();
     let summary = |d: &Deck| -> Vec<String> {
         d.slides
             .iter()
             .map(|s| {
                 let kind = s
-                    .master_idx
-                    .and_then(|m| d.masters.get(m))
-                    .and_then(|m| m.layouts.get(s.layout?))
+                    .master_id
+                    .and_then(|id| d.masters.iter().find(|m| m.id == id))
+                    .and_then(|m| s.layout_id.and_then(|lid| m.layouts.iter().find(|l| l.id == lid)))
                     .map(|l| format!("{:?}", l.kind));
                 let boxes: Vec<String> = s
                     .objects

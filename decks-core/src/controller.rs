@@ -227,6 +227,10 @@ impl DecksController {
             redo_sels: RefCell::new(Vec::new()),
             merge_chain: Cell::new(false),
             master_edit: RefCell::new(None),
+            source_context: RefCell::new(None),
+            revision: Cell::new(0),
+            saved_revision: Cell::new(None),
+            selection: RefCell::new(selection),
         }
     }
 
