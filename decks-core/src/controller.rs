@@ -606,6 +606,7 @@ impl DecksController {
                     SlideObject::TextBox { text, .. } => r.start <= r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end),
                     _ => false,
                 }).unwrap_or(false);
+                if valid { Some(r) } else { mode = SelectionMode::Object; None }
             }
             _ => None,
         };
