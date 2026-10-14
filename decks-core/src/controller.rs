@@ -602,11 +602,10 @@ impl DecksController {
         let mut mode = if object_ids.is_empty() { SelectionMode::Object } else { sel.mode };
         let text_range = match (mode, sel.text_range) {
             (SelectionMode::Text, Some(r)) if object_ids.contains(&r.object_id) => {
-                let valid = slide.object_index(r.object_id).and_then(|at| match &slide.objects[at] {
-                    SlideObject::TextBox { text, .. } => Some(r.start <= r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end)),
-                    _ => Some(false),
+                let valid = slide.object_index(r.object_id).map(|at| match &slide.objects[at] {
+                    SlideObject::TextBox { text, .. } => r.start <= r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end),
+                    _ => false,
                 }).unwrap_or(false);
-                if valid { Some(r) } else { mode = SelectionMode::Object; None }
             }
             _ => None,
         };
@@ -978,7 +977,7 @@ impl DecksController {
             slide.object_index(*id).map(|at| (*id, obj_bounds(&slide.objects[at])))
         }).collect();
         if resolved.len() < 2 { return; }
-        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        resolved.sort_by_key(|r| r.0);
         resolved.dedup_by(|a, b| a.0 == b.0);
         if resolved.len() < 2 { return; }
         let bounds_list: Vec<(f64, f64, f64, f64)> = resolved.iter().map(|(_, b)| *b).collect();
@@ -1029,7 +1028,7 @@ impl DecksController {
         let mut items: Vec<(u64, (f64, f64, f64, f64))> = object_ids.iter().filter_map(|id| {
             slide.object_index(*id).map(|at| (*id, obj_bounds(&slide.objects[at])))
         }).collect();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items.sort_by_key(|item| item.0);
         items.dedup_by(|a, b| a.0 == b.0);
         if items.len() < 3 { return; }
 
