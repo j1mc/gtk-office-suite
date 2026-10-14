@@ -100,3 +100,47 @@ fn carried_safe_parts_survive_a_tables_save() {
     }
     assert_eq!(suite_common_core::carry::problems(&target), Vec::<String>::new());
 }
+
+/// TBL-002: a two-sheet workbook with charts on both sheets rewrites to a
+/// consistent package twice over, and every chart still resolves to its
+/// owning sheet after the second write.
+#[test]
+fn chart_relationships_stay_consistent_across_rewrites() {
+    use tables_core::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition};
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = tables_core::TablesEngine::new(10, 4).expect("engine");
+    engine.add_sheet("Later").unwrap();
+    let mut first = tables_core::sheet::SheetModel::new("First", 10, 4, engine.sheet_id_at(0).unwrap());
+    first.data[1][0] = "A".into();
+    first.data[1][1] = "3".into();
+    first.charts.push(ChartSpec {
+        kind: ChartKind::Bar, title: "First chart".into(),
+        x_axis_title: None, y_axis_title: None, legend_position: LegendPosition::Right,
+        series: vec![ChartSeries { name: "One".into(), cat: (1, 0, 1), val: (1, 1, 1), color: None }],
+        cat: (1, 0, 1), val: (1, 1, 1), anchor: (3, 2),
+        width_px: 480.0, height_px: 280.0,
+    });
+    let mut later = tables_core::sheet::SheetModel::new("Later", 10, 4, engine.sheet_id_at(1).unwrap());
+    later.data[1][0] = "B".into();
+    later.data[1][1] = "7".into();
+    later.charts.push(ChartSpec {
+        kind: ChartKind::Line, title: "Later chart".into(),
+        x_axis_title: None, y_axis_title: None, legend_position: LegendPosition::None,
+        series: vec![ChartSeries { name: String::new(), cat: (1, 0, 1), val: (1, 1, 1), color: None }],
+        cat: (1, 0, 1), val: (1, 1, 1), anchor: (0, 2),
+        width_px: 320.0, height_px: 200.0,
+    });
+    let once = dir.path().join("once.xlsx");
+    tables_core::io::save_sheets_to_xlsx_with_engine(once.to_str().unwrap(), &[first, later], Some(&engine)).unwrap();
+    assert_eq!(suite_common_core::carry::problems(&once), Vec::<String>::new());
+    let (engine2, sheets2) = tables_core::io::load_workbook(once.to_str().unwrap()).expect("reopen");
+    assert_eq!(sheets2[0].charts.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["First chart"]);
+    assert_eq!(sheets2[1].charts.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Later chart"]);
+    let twice = dir.path().join("twice.xlsx");
+    tables_core::io::save_sheets_to_xlsx_with_engine(twice.to_str().unwrap(), &sheets2, Some(&engine2)).unwrap();
+    assert_eq!(suite_common_core::carry::problems(&twice), Vec::<String>::new());
+    let (_, sheets3) = tables_core::io::load_workbook(twice.to_str().unwrap()).expect("reopen twice");
+    assert_eq!(sheets3[0].charts.len(), 1);
+    assert_eq!(sheets3[1].charts.len(), 1);
+    assert_eq!(sheets3[1].charts[0].legend_position, LegendPosition::None);
+}

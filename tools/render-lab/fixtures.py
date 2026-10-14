@@ -728,6 +728,27 @@ def tables():
     ws.add_chart(ch, "D2")
     save(wb, "chart-scatter", "An XY scatter of (1,3) (2.5,7) (4,5) (6,9) as points, anchored at D2")
 
+    # TBL-002: two named series with a bottom legend, so a visual
+    # comparison covers multi-series legends — what the single-series
+    # fixtures above cannot show. (No chart/axis titles: neither these
+    # fixtures nor the grid's chart drawing carry them.)
+    from openpyxl.chart.series import SeriesLabel
+    wb, ws = book()
+    for i, (q, a, b) in enumerate((("Q1", 3, 2), ("Q2", 7, 5), ("Q3", 5, 6), ("Q4", 9, 4)), start=1):
+        ws.cell(i, 1, q)
+        ws.cell(i, 2, a)
+        ws.cell(i, 3, b)
+    ch = BarChart()
+    ch.legend.position = "b"
+    ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[0].title = SeriesLabel(v="Sales")
+    ch.add_data(Reference(ws, min_col=3, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[1].title = SeriesLabel(v="Plan")
+    ch.set_categories(Reference(ws, min_col=1, min_row=1, max_row=4))
+    ch.width, ch.height = 9, 6
+    ws.add_chart(ch, "D2")
+    save(wb, "chart-multi", "A bar chart of Sales (3,7,5,9) and Plan (2,5,6,4) over Q1..Q4 with a bottom legend, anchored at D2")
+
 
 # ── Decks (pptx) ──────────────────────────────────────────────────────────
 def decks(img):

@@ -330,8 +330,9 @@ fn xml_bool_attr(tag: &str, attr: &str) -> bool {
 }
 
 /// name → target for each `<Relationship Id="rIdN" Target="...">` in a
-/// `.rels` part.
-fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
+/// `.rels` part. Shared with the chart reader, which resolves the same
+/// workbook→worksheet→drawing→chart chain (TBL-002).
+pub(crate) fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for tag in xml.split("<Relationship ").skip(1) {
         let tag = tag.split('>').next().unwrap_or("");

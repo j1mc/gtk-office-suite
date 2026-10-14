@@ -118,6 +118,47 @@ fn a_default_sheet_gains_no_layout_it_never_had() {
     }
 }
 
+/// TBL-002: charts ride the same snapshot bytes as everything else — a
+/// later sheet's multi-series chart, with names, colors, titles, legend
+/// and size, recovers where it was.
+#[test]
+fn charts_survive_a_snapshot() {
+    use tables_core::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition};
+    let mut first = SheetModel::new("First", 8, 5, 0);
+    first.data[0][0] = "1".into();
+    let mut later = SheetModel::new("Later", 8, 5, 1);
+    for (r, (label, v)) in [("North", "10"), ("South", "20")].iter().enumerate() {
+        later.data[r + 1][0] = label.to_string();
+        later.data[r + 1][1] = v.to_string();
+    }
+    later.charts.push(ChartSpec {
+        kind: ChartKind::Bar,
+        title: "Later sales".into(),
+        x_axis_title: Some("Region".into()),
+        y_axis_title: Some("Revenue".into()),
+        legend_position: LegendPosition::Bottom,
+        series: vec![
+            ChartSeries { name: "Sales".into(), cat: (1, 0, 2), val: (1, 1, 2), color: Some("4472C4".into()) },
+            ChartSeries { name: "Plan".into(), cat: (1, 0, 2), val: (1, 2, 2), color: None },
+        ],
+        cat: (1, 0, 2),
+        val: (1, 1, 2),
+        anchor: (1, 3),
+        width_px: 320.0,
+        height_px: 200.0,
+    });
+    let back = through_a_snapshot(&[first, later], "charts");
+    assert_eq!(back.len(), 2);
+    assert!(back[0].charts.is_empty(), "no chart leaks onto the first sheet");
+    let c = &back[1].charts[0];
+    assert_eq!((c.title.as_str(), c.series.len()), ("Later sales", 2));
+    assert_eq!(c.series[0].name, "Sales");
+    assert_eq!(c.series[0].color.as_deref(), Some("4472C4"));
+    assert_eq!(c.x_axis_title.as_deref(), Some("Region"));
+    assert_eq!(c.legend_position, LegendPosition::Bottom);
+    assert!((c.width_px - 320.0).abs() < 1.0, "size survives recovery: {}", c.width_px);
+}
+
 #[test]
 fn layout_is_kept_per_sheet_not_smeared_across_them() {
     // Sheet properties are resolved by name through workbook.xml's rels;

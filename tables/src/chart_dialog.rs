@@ -132,19 +132,17 @@ pub fn opener(
                 };
                 let Some(first) = first else { return };
                 let kind = ct.get();
-                let chart = ChartSpec {
+                // The canonical series vector holds the series from the
+                // start; the legacy ranges mirror it (TBL-002).
+                let chart = ChartSpec::single_series(
                     kind,
-                    title: String::new(),
-                    x_axis_title: None,
-                    y_axis_title: None,
-                    legend_position: tables_core::sheet::LegendPosition::Right,
-                    series: Vec::new(),
-                    cat: (first, 0, last),
-                    val: (first, col, last),
-                    anchor: (last + 2, col),
-                    width_px: 480.0,
-                    height_px: 280.0,
-                };
+                    String::new(),
+                    (first, 0, last),
+                    (first, col, last),
+                    (last + 2, col),
+                    480.0,
+                    280.0,
+                );
                 crate::sheet_actions::apply(&ctl, &grid, |c| c.mutate_sheet("Insert Chart", move |sheet| {
                     sheet.charts.push(chart);
                 }));

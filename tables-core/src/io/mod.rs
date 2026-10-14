@@ -27,7 +27,7 @@ mod xlsx_styles;
 mod props;
 mod save;
 
-pub use charts::read_charts_from_xlsx;
+pub use charts::{read_charts_detailed, read_charts_from_xlsx, ChartReadIssue};
 pub use format::{is_writable_format, xlsx_save_as_name, FORMATS};
 pub use numfmt::{code_for_kind, kind_for_code};
 pub use xlsx_styles::{parse_cell_styles, XfStyle};

@@ -242,6 +242,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/chart-multi": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/chart-pie": {
     "A": "green",
     "B": "green",
