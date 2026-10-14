@@ -243,7 +243,9 @@ fn undoing_an_added_slide_and_object_repairs_a_selection_past_the_end() {
     assert_eq!(c.selected_slide_index(), Some(0), "so did the slide");
     assert!(c.selection().object_ids.is_empty(), "object 0 of another slide is not what was selected");
     assert!(c.redo() && c.redo());
-    assert_eq!(c.selected_slide_index(), Some(1));
-    assert_eq!(c.selected_object_indices(), vec![0]);
+    // Redo applies onto the current selection, which stays put (repaired):
+    // only undo restores the selection a step saw.
+    assert_eq!(c.selected_slide_index(), Some(0));
+    assert!(c.selection().object_ids.is_empty());
 }
 

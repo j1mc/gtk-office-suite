@@ -407,9 +407,12 @@ fn register_text_editor(h: EditorHandles, editor_host: &gtk::Overlay) -> Rc<Cell
             }
             let Some(canvas) = canvas.upgrade() else { return };
             let (hx, hy) = canvas_to_slide(x, y, canvas.width() as f64, canvas.height() as f64);
+            // Resolve the view index through the controller first: the
+            // window's slide borrow below must never overlap a
+            // controller call on the same RefCell.
+            let Some(idx) = controller.selected_slide_index() else { return };
             let mut slides = slides.borrow_mut();
             decks_core::ops::ensure_ids(&mut slides);
-            let Some(idx) = controller.selected_slide_index() else { return };
             let Some(slide) = slides.get(idx) else { return };
             let Some(oi) = hit_test_object(&slide.objects, hx, hy) else { return };
             let SlideObject::TextBox { text, x, y, w, h, .. } = &slide.objects[oi] else { return };

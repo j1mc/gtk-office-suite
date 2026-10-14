@@ -1392,7 +1392,10 @@ impl DecksController {
         done
     }
 
-    /// Redo one step, restoring the selection it left as well.
+    /// Redo one step. Unlike undo, redo applies onto the current
+    /// selection, which stays where the user put it (repaired to what
+    /// still exists); the step goes back on the undo stack, so undoing
+    /// it restores the selection it saw.
     pub fn redo(&self) -> bool {
         let pre = self.selection.borrow().clone();
         let mut history = self.history.borrow_mut();
@@ -1401,13 +1404,14 @@ impl DecksController {
         })
         .is_some();
         if done {
+            // The redone step goes onto the undo stack with the selection
+            // it saw, so a later undo of it restores that; but redo
+            // itself applies onto the current selection, which stays
+            // where the user put it (repaired to what still exists).
+            // Undo is the direction that restores selection.
             self.undo_sels.borrow_mut().push(pre);
-            match self.redo_sels.borrow_mut().pop() {
-                Some(sel) => self.set_selection(sel),
-                None => {
-                    self.repair_selection();
-                }
-            }
+            self.redo_sels.borrow_mut().pop();
+            self.repair_selection();
             if let Some(context) = self.source_context.borrow_mut().as_mut() {
                 context.note_history_step();
             }

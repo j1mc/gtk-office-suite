@@ -6246,6 +6246,17 @@ def rich_odp_parts(png):
     def notes(t):
         return ('<presentation:notes><draw:frame presentation:class="notes" svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="5cm">'
                 f'<draw:text-box><text:p>{t}</text:p></draw:text-box></draw:frame></presentation:notes>')
+    styles = (
+        f'<?xml version="1.0" encoding="UTF-8"?><office:document-styles {ns}>'
+        '<office:styles/>'
+        '<office:automatic-styles>'
+        '<style:page-layout style:name="PM1"><style:page-layout-properties fo:page-width="28cm" fo:page-height="15.75cm"/></style:page-layout>'
+        '<style:style style:name="Mdeco" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#1c71d8" draw:stroke="none"/></style:style>'
+        '</office:automatic-styles>'
+        '<office:master-styles><style:master-page style:name="Brand" style:page-layout-name="PM1">'
+        '<draw:rect draw:style-name="Mdeco" svg:x="0cm" svg:y="14.75cm" svg:width="28cm" svg:height="1cm"/>'
+        '</style:master-page></office:master-styles></office:document-styles>'
+    )
     content = (
         f'<?xml version="1.0" encoding="UTF-8"?><office:document-content {ns}>'
         '<office:automatic-styles>'
