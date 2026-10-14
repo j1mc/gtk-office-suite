@@ -927,6 +927,7 @@ dependencies = [
 name = "decks-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "letters-core",
  "loro",
  "proptest",
