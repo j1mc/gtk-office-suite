@@ -1465,7 +1465,7 @@ impl DecksWindow {
                     *self.file_path.borrow_mut() = None;
                     let err = adw::AlertDialog::builder()
                         .heading(suite_common::i18n("Could Not Reassociate Recovered Document"))
-                        .body(&suite_common::i18n("The recovered document's original location has a name Decks cannot reuse. It is kept as an unsaved document: save it to a destination you choose."))
+                        .body(suite_common::i18n("The recovered document's original location has a name Decks cannot reuse. It is kept as an unsaved document: save it to a destination you choose."))
                         .build();
                     err.add_response("ok", &suite_common::i18n("_OK"));
                     err.present(Some(&self.window));

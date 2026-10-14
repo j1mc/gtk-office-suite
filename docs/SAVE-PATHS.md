@@ -54,9 +54,7 @@ Building the trace found one path writing around the boundary: **the Decks close
 | decks | Open… dialog | `decks/src/window.rs` | `read_deck` | 1 | read | `tests/gui/test_smoke.py::test_open_dialog_opens_the_chosen_file` |
 | decks | Save (Ctrl+S) | `decks/src/window.rs` | `save_deck` | 3 | asks | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |
 | decks | Save As | `decks/src/window.rs` | `save_deck` | 4 | asks | none: a Save As journey lands with #1270 |
-| decks | Autosave now (the action) | `decks/src/window.rs` | `write_deck` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
-| decks | Autosave now: the snapshot write | `decks/src/window.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
-| decks | Autosave timer | `decks/src/window.rs` | `write_deck` | 2 | snapshot | `tests/gui/test_smoke.py::DecksUnattendedAutosaveSmoke` |
-| decks | Autosave timer: the snapshot write | `decks/src/window.rs` | `slot.write` | 2 | snapshot | `tests/gui/test_smoke.py::DecksUnattendedAutosaveSmoke` |
+| decks | Autosave (the action and the timer share one helper) | `decks/src/persistence.rs` | `write_deck` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
+| decks | Autosave (the action and the timer share one helper): the snapshot write | `decks/src/persistence.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
 | decks | Open from the command line, a file manager or a drop (`GApplication::open`), and recovery | `decks/src/window.rs` | `read_deck` | 2 | read | `tests/gui/test_smoke.py::test_a_dropped_deck_opens_beside_unsaved_work` |
-| decks | The writer, behind every save | `decks/src/window.rs` | `write_deck` | 3 | helper | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |
+| decks | The writer, behind every save | `decks/src/window.rs` | `write_deck` | 1 | helper | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |
