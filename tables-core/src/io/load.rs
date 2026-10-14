@@ -287,11 +287,17 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         );
         sheet.sync_from_engine(&engine);
         if let Some(props) = sheet_props.get(name) {
-            // Written back out as manually-hidden rather than reproducing
-            // filter/manual as separate concepts — a saved-then-reopened
-            // xlsx has no filter state left to restore, only hidden rows,
-            // same as real Excel/Sheets after a filter is "applied".
-            *sheet.hidden_rows_manual = props.hidden_rows.clone();
+            // An imported value filter becomes an explicit definition
+            // whose derived rows are filter hides; every other hidden row
+            // the file holds is a manual hide. Clearing the filter then
+            // restores the same semantics it had before the save, while a
+            // rangeless session filter still reopens as manual hides (the
+            // writer has no autoFilter form for it — see save.rs).
+            if let Some(raw) = &props.auto_filter {
+                sheet.filter = Some(crate::sheet::FilterDef::from_shown_values(raw.range, &raw.columns, &sheet));
+                sheet.recompute_filter();
+            }
+            *sheet.hidden_rows_manual = props.hidden_rows.difference(&sheet.hidden_rows).copied().collect();
             *sheet.hidden_cols = props.hidden_cols.clone();
             if let Some(setup) = &props.page_setup {
                 sheet.page_setup = setup.clone();
@@ -378,17 +384,23 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
     // workbook→worksheet→drawing→chart relationship chain (TBL-002): a
     // later sheet's charts land on that sheet, and unsupported content is
     // reported by the reader and the package scan rather than silently
-    // moved or dropped. Conditional-formatting rules still resolve to the
-    // first worksheet (TBL-003); they used to be attached by the GUI after
-    // this returned, so every other opener of this function (recovery's
-    // tests, the corpus tooling) silently had neither.
+    // moved or dropped. Conditional-formatting rules resolve the same way
+    // (TBL-003): each rule lands on the worksheet that owns it, with its
+    // comparison, range, threshold(s), fill and priority intact. Unknown
+    // expressions, styles and stop-if-true flags are skipped with a reader
+    // note and reported by the package scan instead of approximated.
     for (owner, spec) in super::read_charts_detailed(path, &sheets).0 {
         if let Some(sheet) = sheets.iter_mut().find(|s| s.name == owner) {
             sheet.charts.push(spec);
         }
     }
-    if let Some(first) = sheets.first_mut() {
-        first.cond_rules = super::read_cond_rules_from_xlsx(path);
+    for (owner, rule) in super::read_cond_rules_detailed(path).0 {
+        if let Some(sheet) = sheets.iter_mut().find(|s| s.name == owner) {
+            sheet.cond_rules.push(rule);
+        }
+    }
+    for sheet in sheets.iter_mut() {
+        sheet.cond_rules.sort_by_key(|rule| rule.priority);
     }
     Ok((engine, sheets))
 }

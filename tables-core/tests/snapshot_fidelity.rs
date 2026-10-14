@@ -180,3 +180,44 @@ fn layout_is_kept_per_sheet_not_smeared_across_them() {
         "sheet 2 inherited sheet 1's 222px column width",
     );
 }
+
+/// TBL-003: rules keep their owning sheet and priority, and a ranged
+/// filter keeps its definition, derived hides and independent manual
+/// hides, through the same snapshot bytes recovery reads.
+#[test]
+fn rules_and_filters_survive_a_snapshot() {
+    use tables_core::sheet::{CondOp, CondRule, FilterColumn, FilterDef};
+    let mut first = SheetModel::new("First", 8, 5, 0);
+    first.data[0][0] = "keep".into();
+    first.cond_rules.push(CondRule {
+        range: (0, 0, 2, 0), op: CondOp::Greater, value: 1.0, value2: 1.0,
+        fill: "C6EFCE".into(), priority: 2,
+    });
+    let mut later = SheetModel::new("Later", 8, 5, 1);
+    for (r, v) in ["Name", "ask", "hide", "ask"].iter().enumerate() {
+        later.data[r][0] = v.to_string();
+    }
+    later.cond_rules.push(CondRule {
+        range: (1, 0, 3, 0), op: CondOp::Equal, value: 0.0, value2: 0.0,
+        fill: "FFC7CE".into(), priority: 1,
+    });
+    later.filter = Some(FilterDef {
+        range: Some((0, 0, 3, 0)),
+        columns: vec![FilterColumn { col: 0, hidden: ["hide".to_string()].into_iter().collect() }],
+    });
+    later.recompute_filter();
+    later.hidden_rows_manual.insert(3);
+    let back = through_a_snapshot(&[first, later], "rules-filters");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].cond_rules.len(), 1, "no rule leaks between sheets");
+    assert_eq!((back[0].cond_rules[0].op, back[0].cond_rules[0].priority), (CondOp::Greater, 2));
+    assert!(back[1].hidden_rows.contains(&2), "the filter hide recovers");
+    assert!(!back[1].hidden_rows.contains(&0), "the header is not a filter hide");
+    assert!(back[1].hidden_rows_manual.contains(&3), "the manual hide recovers independent");
+    assert!(!back[1].hidden_rows.contains(&3), "the manual hide is not a filter hide");
+    let def = back[1].filter.as_ref().expect("the definition recovers");
+    assert_eq!(def.range, Some((0, 0, 3, 0)));
+    assert!(def.columns.iter().any(|c| c.col == 0 && c.hidden.contains("hide")));
+    let rule = back[1].cond_rules.iter().find(|r| r.op == CondOp::Equal).expect("the later rule recovers");
+    assert_eq!((rule.range, rule.priority), ((1, 0, 3, 0), 1));
+}

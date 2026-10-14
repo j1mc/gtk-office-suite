@@ -29,7 +29,7 @@ use suite_common_core::charts::ChartKind;
 use suite_common_core::format::{NumberFormat, NumberFormatKind};
 use suite_common_core::print::{Orientation, PageSize};
 use tables_core::io::{load_workbook, save_sheets_to_xlsx_bytes};
-use tables_core::sheet::{ChartSeries, ChartSpec, CondOp, CondRule, LegendPosition, SheetModel, ValidationRule};
+use tables_core::sheet::{ChartSeries, ChartSpec, CondOp, CondRule, FilterColumn, FilterDef, LegendPosition, SheetModel, ValidationRule};
 use tables_core::style::Rgb;
 use tables_core::TablesEngine;
 
@@ -76,7 +76,7 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     s.page_setup.size = PageSize::Letter;
     s.page_setup.orientation = Orientation::Landscape;
     // Conditional formatting.
-    s.cond_rules.push(CondRule { range: (1, 1, 3, 1), op: CondOp::Greater, value: 15.0, value2: 0.0, fill: "C6EFCE".into() });
+    s.cond_rules.push(CondRule { range: (1, 1, 3, 1), op: CondOp::Greater, value: 15.0, value2: 0.0, fill: "C6EFCE".into(), priority: 1 });
     // A chart over the data: two named series (one colored), axis titles,
     // a non-default legend and a non-default size. TBL-002 keeps every
     // admitted field: the budget asserts each one below.
@@ -120,7 +120,7 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     let mut t = SheetModel::new("Later", ROWS, COLS, engine.sheet_id_at(1).unwrap());
     t.data[0][0] = "1".into();
     t.data[1][0] = "2".into();
-    t.cond_rules.push(CondRule { range: (0, 0, 1, 0), op: CondOp::Less, value: 2.0, value2: 0.0, fill: "FFEB9C".into() });
+    t.cond_rules.push(CondRule { range: (0, 0, 1, 0), op: CondOp::Less, value: 2.0, value2: 0.0, fill: "FFEB9C".into(), priority: 1 });
     let mut chart = s.charts[0].clone();
     chart.title = "Later chart".into();
     t.charts.push(chart);
@@ -151,7 +151,7 @@ fn retained_workbook() -> (TablesEngine, Vec<SheetModel>) {
     s.col_widths[1] = 140.0;
     s.row_heights[2] = 42.0;
     s.frozen_rows = 1;
-    s.cond_rules.push(CondRule { range: (1, 1, 3, 1), op: CondOp::Greater, value: 15.0, value2: 0.0, fill: "C6EFCE".into() });
+    s.cond_rules.push(CondRule { range: (1, 1, 3, 1), op: CondOp::Greater, value: 15.0, value2: 0.0, fill: "C6EFCE".into(), priority: 1 });
     s.charts.push(ChartSpec {
         kind: ChartKind::Bar,
         title: "Plain".into(),
@@ -228,8 +228,7 @@ const BUDGET: &[(&str, Budget, Check)] = &[
     ("second sheet", Kept, |_, s| s.len() == 2 && s[1].name == "Later" && s[1].data[1][0] == "2"),
     ("a filter's hide, as a filter", Lost("xlsx keeps no filter state: a filtered-out row is written hidden and reopens as a manually hidden row"),
         |_, s| s[0].hidden_rows.contains(&9)),
-    ("conditional formatting on a later sheet", Lost("the rule reader resolves the first worksheet only, so a later sheet's rules never come back"),
-        |_, s| s.get(1).is_some_and(|t| !t.cond_rules.is_empty())),
+    ("conditional formatting on a later sheet", Kept, |_, s| s.get(1).is_some_and(|t| !t.cond_rules.is_empty())),
     ("charts on a later sheet", Kept, |_, s| s.get(1).is_some_and(|t| t.charts.iter().any(|c| c.title == "Later chart"))),
     ("chart series past the first", Kept, |_, s| s[0].charts.iter().any(|c| c.series.len() > 1)),
     ("chart series names", Kept, |_, s| s[0].charts.iter().flat_map(|c| &c.series).any(|x| !x.name.trim().is_empty())),
@@ -252,7 +251,6 @@ const BUDGET: &[(&str, Budget, Check)] = &[
 /// model, with a location and a consequence.
 const LOST_COVERAGE: &[(&str, &str)] = &[
     ("a filter's hide, as a filter", "filter-state"),
-    ("conditional formatting on a later sheet", "rule-later-sheet"),
     ("protection password", "sheet-protection-password"),
     ("regex validation", "validation-rules"),
     ("unbounded validation", "validation-rules"),
@@ -331,14 +329,15 @@ fn retained_fields_save_without_a_question() {
     assert!(resave.features.is_empty(), "Tables' own file warns spuriously: {:?}", resave.features);
 }
 
-/// TBL-001: a real foreign file's model-insufficient content is reported
-/// per part. The saved full fixture carries a later sheet's rules (which
-/// the reader resolves to the first worksheet only), and the package scan
-/// names them — while every chart Tables writes (multi-series, named,
-/// colored, annotated, sized, later-sheet) stays silent, because TBL-002
-/// reads all of it back.
+/// TBL-003: the saved full fixture resaves without a question. Its later
+/// sheet's admitted rule reads back where it was, its filter-hidden row
+/// reopens as a manual hide, and every chart reads back — so neither the
+/// model nor Tables' own package warns on the next save. (Losses that
+/// never reach the file, like passwords and unwritable validation, are
+/// proven by `tbl001_each_loss_has_a_location` on the unsaved model and
+/// by the crafted foreign package in `loss.rs`.)
 #[test]
-fn the_saved_package_reports_what_the_model_cannot_carry() {
+fn the_saved_full_fixture_resaves_without_a_question() {
     let (engine, sheets) = workbook();
     let bytes = save_sheets_to_xlsx_bytes(&sheets, Some(&engine)).expect("save");
     let dir = tempfile::tempdir().unwrap();
@@ -346,13 +345,76 @@ fn the_saved_package_reports_what_the_model_cannot_carry() {
     std::fs::write(&path, &bytes).unwrap();
     let (_, back) = load_workbook(path.to_str().unwrap()).expect("reopen");
     let report = tables_core::io::loss::content_a_save_drops(Some(path.to_str().unwrap()), &back);
-    let hit = report.features.iter().find(|f| f.id == "rule-later-sheet")
-        .expect("the package scan must report 'rule-later-sheet'");
-    assert!(!hit.location.is_empty(), "'rule-later-sheet' names no location");
-    assert!(!hit.detail.is_empty(), "'rule-later-sheet' names no consequence");
-    for id in ["source-inspection-failed", "unsupported-charts", "chart-series", "filter-criteria", "pictures", "macros"] {
-        assert!(report.features.iter().all(|f| f.id != id), "'{id}' fires on Tables' own supported output");
+    assert!(report.features.is_empty(), "Tables' own full output warns spuriously: {:?}", report.features);
+}
+
+/// A ranged value filter's fixture: a labeled column under test, with a
+/// manual hide on a row the filter leaves visible.
+fn filtered_workbook() -> (TablesEngine, Vec<SheetModel>) {
+    let mut engine = TablesEngine::new(8, 4).expect("engine");
+    let mut s = SheetModel::new("Data", 8, 4, engine.sheet_id_at(0).unwrap());
+    for (r, v) in ["Region", "North", "South", "North", "East"].iter().enumerate() {
+        s.data[r][0] = v.to_string();
+        engine.set_cell_text(r, 0, v);
     }
+    s.filter = Some(FilterDef {
+        range: Some((0, 0, 4, 0)),
+        columns: vec![FilterColumn { col: 0, hidden: ["South".to_string(), "East".to_string()].into_iter().collect() }],
+    });
+    s.recompute_filter();
+    // A manual hide on a row the filter leaves visible: clearing the
+    // filter must never reveal it.
+    s.hidden_rows_manual.insert(1);
+    (engine, vec![s])
+}
+
+/// TBL-003: a ranged value filter persists through xlsx — range,
+/// criteria, derived hides and independent manual hides — and clearing
+/// it after reopen restores exactly the manual state.
+#[test]
+fn tbl003_filter_clear_after_reopen() {
+    let (engine, sheets) = filtered_workbook();
+    assert_eq!(sheets[0].filter.as_ref().and_then(|d| d.range), Some((0, 0, 4, 0)));
+    let hidden: Vec<usize> = {
+        let mut h: Vec<usize> = sheets[0].hidden_rows.iter().copied().collect();
+        h.sort_unstable();
+        h
+    };
+    assert_eq!(hidden, [2, 4], "the filter hides South and East, not the header: {hidden:?}");
+    let bytes = save_sheets_to_xlsx_bytes(&sheets, Some(&engine)).expect("save");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("filtered.xlsx");
+    std::fs::write(&path, &bytes).unwrap();
+    let (_, mut back) = load_workbook(path.to_str().unwrap()).expect("reopen");
+    let def = back[0].filter.clone().expect("the filter definition comes back");
+    assert_eq!(def.range, Some((0, 0, 4, 0)), "the range comes back: {def:?}");
+    assert_eq!(def.columns.len(), 1, "one criterion comes back: {def:?}");
+    assert_eq!(def.columns[0].col, 0);
+    for v in ["South", "East"] {
+        assert!(def.columns[0].hidden.contains(v), "{v} stays hidden: {def:?}");
+    }
+    let hidden: Vec<usize> = {
+        let mut h: Vec<usize> = back[0].hidden_rows.iter().copied().collect();
+        h.sort_unstable();
+        h
+    };
+    assert_eq!(hidden, [2, 4], "derived hides come back, header excluded: {hidden:?}");
+    assert!(back[0].hidden_rows_manual.contains(&1), "the manual hide comes back independent");
+    assert!(!back[0].hidden_rows.contains(&1), "the manual hide is not a filter hide");
+    // A persisted filter warns about nothing on the next save.
+    let report = tables_core::io::loss::content_a_save_drops(Some(path.to_str().unwrap()), &back);
+    assert!(report.features.is_empty(), "a persisted filter warns spuriously: {:?}", report.features);
+    // Clearing after reopen restores the manual state exactly.
+    back[0].filter = None;
+    *back[0].hidden_rows = Default::default();
+    assert!((0..8).all(|r| !back[0].hidden_rows.contains(&r)), "no filter hide survives the clear");
+    assert!(back[0].is_row_hidden(1), "the manual hide survives the clear");
+    assert!(!(2..5).any(|r| back[0].is_row_hidden(r)), "filtered rows come back: {:?}", back[0].hidden_rows);
+    // And the cleared sheet writes no filter for any reader.
+    let cleared = save_sheets_to_xlsx_bytes(&back, None).expect("resave");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&cleared)).expect("zip");
+    let sheet_xml = read_part(&mut zip, &["xl/worksheets/sheet1.xml".to_string()], "xl/worksheets/sheet1.xml");
+    assert!(!sheet_xml.contains("autoFilter"), "a cleared filter leaves no autoFilter behind");
 }
 
 /// What both readers can see, inspected in the saved XML independently of

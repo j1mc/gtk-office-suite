@@ -276,6 +276,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/filtered": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/frozen": {
     "A": "green",
     "B": "green",

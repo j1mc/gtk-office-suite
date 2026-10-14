@@ -25,20 +25,20 @@
 // |---|---|---|
 // | Cell values, formulas and their cached values | kept | loss budget | — |
 // | Global defined names | kept | loss budget | — |
-// | First-sheet cellIs rules (op, range, threshold, fill) | kept | loss budget | — |
+// | CellIs rules on any sheet (op, range, threshold, fill, priority) | kept | loss budget | — |
+// | Filter ranges with admitted value criteria | kept | loss budget | — |
 // | Charts on any sheet (kind, every series, names, sRGB colors, ranges, title, axis titles, legend, anchor, size) | kept (TBL-002) | loss budget | — |
 // | Manual hidden rows/columns, column widths, row heights | kept | loss budget | — |
 // | Print area and page setup | kept | loss budget | — |
 // | Notes and writable validation rules | kept | loss budget | — |
 // | Cell locks, hidden formulas, modeled protection flags | kept (#1552) | loss budget | — |
 // | Safe opaque parts (thumbnail, custom XML/properties) | kept (#1274) | package_consistency, opaque-parts smoke | carry, not this file |
-// | Conditional rules owned by a later sheet | WarnOnLoss (`rule-later-sheet`) | loss budget + unit tests | `model_drops`, `inspect_package` |
-// | Filter state (which rows a filter hid) | WarnOnLoss (`filter-state`) | loss budget | `model_drops` |
-// | Filter criteria (`autoFilter`) | WarnOnLoss (`filter-criteria`) | unit tests | `scan_sheet_content` |
+// | Session filter hides with no persisted range/value form | WarnOnLoss (`filter-state`) | loss budget | `model_drops` |
+// | Unsupported filter constructs (top-N, dates, colors, customs, table filters) | WarnOnLoss (`filter-criteria`) | unit tests | `scan_sheet_content`, `inspect_package` |
 // | Array formulas (`t="array"`) | WarnOnLoss (`array-formulas`) | unit tests | `scan_sheet_content` |
 // | Sheet-scoped names (`localSheetId`) | WarnOnLoss (`scoped-names`) | unit tests | `inspect_package` |
 // | Unsupported chart kinds, absolute anchors, unresolvable chart rels | WarnOnLoss (`unsupported-charts`) | unit tests | `scan_chart_xml`, drawing scan |
-// | Unsupported rule shapes (non-cellIs, unknown operator, multi-range) | WarnOnLoss (`unsupported-rules`) | unit tests | `scan_sheet_content` |
+// | Unsupported rule shapes (non-cellIs, unknown operator, multi-range, stop-if-true, missing style) | WarnOnLoss (`unsupported-rules`) | unit tests | `scan_sheet_content` |
 // | Pivot definitions, unwritable validation, passwords, inactive permissions | WarnOnLoss | unit tests | `model_drops`, `protection_drops` |
 // | Macros, pictures, comments, Excel tables, slicers, links, connections, OLE, sparklines | WarnOnLoss | unit tests | `inspect_package`, `inspect_ods` |
 // | A binary .xls source (cannot be enumerated) | WarnOnLoss (`legacy-xls-content`) | unit tests | `source_drops` |
@@ -75,7 +75,6 @@ const FILTER_STATE: (&str, &str) = ("filter-state", "Filter state (which rows a 
 const FILTER_CRITERIA: (&str, &str) = ("filter-criteria", "Filter criteria");
 const ARRAY_FORMULAS: (&str, &str) = ("array-formulas", "Array formulas");
 const SCOPED_NAMES: (&str, &str) = ("scoped-names", "Sheet-scoped names");
-const RULE_LATER_SHEET: (&str, &str) = ("rule-later-sheet", "Conditional rules on later sheets");
 const UNSUPPORTED_CHARTS: (&str, &str) = ("unsupported-charts", "Charts Tables can't read");
 const UNSUPPORTED_RULES: (&str, &str) = ("unsupported-rules", "Conditional formatting Tables can't read");
 const LEGACY_XLS: (&str, &str) = ("legacy-xls-content", "Original .xls content");
@@ -135,7 +134,7 @@ pub fn content_a_save_drops(source: Option<&str>, sheets: &[SheetModel]) -> Comp
 /// the document came from a file. Protection IO itself is #1552's merged
 /// work; this only inventories what that IO cannot reproduce.
 fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
-    for (index, sheet) in sheets.iter().enumerate() {
+    for sheet in sheets.iter() {
         if !sheet.pivot_tables.is_empty() {
             record(report, PIVOTS, &sheet.name, "the pivot's definition isn't written; its cells are");
         }
@@ -151,8 +150,21 @@ fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
         {
             record(report, PROTECTION_OPTIONS, &sheet.name, "nondefault permissions on an unprotected sheet cannot be written; they reset to defaults while cell locks and hidden formulas remain");
         }
-        if !sheet.hidden_rows.is_empty() {
-            let mut rows: Vec<usize> = sheet.hidden_rows.iter().map(|r| r + 1).collect();
+        // Filter hides the writer reproduces are the ranged definition's
+        // derived rows (written as an autoFilter); any other hidden row —
+        // a rangeless session filter, the dialog filter — is written as a
+        // plain hidden row, reopens as manually hidden, and no clearing
+        // of a filter can bring it back. Rules and charts on any sheet
+        // round-trip where they are (TBL-002, TBL-003), so they warn
+        // about nothing here.
+        let derived: std::collections::HashSet<usize> = sheet
+            .filter
+            .as_ref()
+            .filter(|def| def.range.is_some() && !def.columns.is_empty())
+            .map(|def| def.derive_hidden(sheet))
+            .unwrap_or_default();
+        let mut rows: Vec<usize> = sheet.hidden_rows.difference(&derived).map(|r| r + 1).collect();
+        if !rows.is_empty() {
             rows.sort_unstable();
             let shown = rows.iter().take(8).map(usize::to_string).collect::<Vec<_>>().join(", ");
             let more = if rows.len() > 8 { format!(" and {} more", rows.len() - 8) } else { String::new() };
@@ -160,19 +172,6 @@ fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
                 "{} row(s) hidden by a filter (row(s) {}{}) are written as plain hidden rows; they reopen as manually hidden rows, and clearing the filter cannot bring them back",
                 rows.len(), shown, more,
             ));
-        }
-        if index > 0 {
-            // Charts resolve to their owning sheet through relationships
-            // (TBL-002), so a later sheet's charts round-trip where they
-            // are. Conditional rules still resolve to the first worksheet
-            // (TBL-003).
-            if !sheet.cond_rules.is_empty() {
-                let n = sheet.cond_rules.len();
-                record(report, RULE_LATER_SHEET, &sheet.name, &format!(
-                    "{n} rule(s) are written, but Tables reads rules from the first worksheet only; reopening here drops them"
-                ));
-            }
-            continue;
         }
     }
 }
@@ -324,24 +323,45 @@ fn inspect_package(
         }
         scan_sheet_content(&xml, sheet, report);
     }
-    // The rule reader resolves the first worksheet only: rules owned by any
-    // other worksheet part are written by nobody and read by nobody once
-    // Tables saves over this file.
-    for sheet in sheets.iter().filter(|n| *n != "xl/worksheets/sheet1.xml") {
-        let xml = read_part(zip, sheet, budget)?;
-        if xml.contains("<conditionalFormatting") {
-            record(report, RULE_LATER_SHEET, sheet, "rules on a worksheet past the first are not read; saving over this file drops them");
+    // Excel-table filters live in table parts, not worksheet parts, and
+    // are not read: their rows' values stay, but the filter itself does
+    // not come back.
+    for table in names.iter().filter(|n| n.starts_with("xl/tables/table") && n.ends_with(".xml")) {
+        let xml = read_part(zip, table, budget)?;
+        if xml.contains("autoFilter") {
+            record(report, FILTER_CRITERIA, table, "an Excel-table filter isn't read; its cells stay, but reopening shows no filter to clear");
         }
     }
     Ok(())
 }
 
-/// What one worksheet part holds that the model cannot carry: filter
-/// criteria, array formulas and rule shapes the reader skips.
-fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityReport) {
-    if xml.contains("<autoFilter") || xml.contains(":autoFilter") {
-        record(report, FILTER_CRITERIA, location, "the filter's criteria aren't read — only which rows are hidden; reopening shows plain hidden rows with no filter to clear");
+/// What one worksheet `<autoFilter>` holds that the model cannot carry:
+/// each unsupported column construct, specifically. Admitted value lists
+/// are read (TBL-003), so a plain value filter warns about nothing.
+fn scan_auto_filter(xml: &str, location: &str, report: &mut CompatibilityReport) {
+    if !(xml.contains("<autoFilter") || xml.contains(":autoFilter")) {
+        return;
     }
+    for (needle, what) in [
+        ("<customFilters", "custom filters"),
+        ("<dynamicFilter", "dynamic filters"),
+        ("<top10", "top-N filters"),
+        ("<dateGroupItem", "date-group filters"),
+        ("<colorFilter", "color filters"),
+        ("<iconFilter", "icon filters"),
+    ] {
+        if xml.contains(needle) {
+            record(report, FILTER_CRITERIA, location, &format!(
+                "{what} aren't read — only value lists are; reopening shows plain hidden rows with no {what} to clear"
+            ));
+        }
+    }
+}
+
+/// What one worksheet part holds that the model cannot carry: filter
+/// constructs, array formulas and rule shapes the reader skips.
+fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityReport) {
+    scan_auto_filter(xml, location, report);
     if xml.contains("t=\"array\"") || xml.contains("t='array'") {
         record(report, ARRAY_FORMULAS, location, "array-formula cells are read as plain values and formulas; the shared array identity does not come back");
     }
@@ -370,6 +390,12 @@ fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityRepor
                     "a value rule with operator '{}' is not read; its cells keep their values but not the formatting",
                     attr("operator").as_deref().unwrap_or("missing"),
                 ));
+            }
+            if matches!(attr("dxfId"), None) {
+                record(report, UNSUPPORTED_RULES, location, "a value rule names no style Tables resolves, so it paints Tables' default highlight rather than the file's");
+            }
+            if matches!(attr("stopIfTrue").as_deref(), Some("1") | Some("true")) {
+                record(report, UNSUPPORTED_RULES, location, "a rule stops lower-priority rules when it matches; Tables paints the first matching rule and does not model stop-if-true separately");
             }
         }
     }
@@ -658,10 +684,11 @@ mod tests {
     }
 
     #[test]
-    fn later_sheet_charts_are_kept_while_rules_warn_with_their_owner() {
+    fn later_sheet_charts_and_rules_are_kept() {
         // TBL-002: charts resolve to their owning sheet through
-        // relationships, so a later sheet's chart warns about nothing. Its
-        // rules still resolve to the first worksheet (TBL-003) and warn.
+        // relationships, so a later sheet's chart warns about nothing.
+        // TBL-003: rules resolve the same way, so a later sheet's admitted
+        // rule warns about nothing either.
         use crate::sheet::{ChartKind, ChartSeries, ChartSpec, CondOp, CondRule, LegendPosition};
         let first = sheet();
         let later = SheetModel::new("Later", 4, 4, 2);
@@ -674,14 +701,8 @@ mod tests {
             width_px: 480.0, height_px: 280.0,
         });
         assert!(content_a_save_drops(None, &sheets).features.is_empty(), "a later sheet's chart is kept");
-        sheets[1].cond_rules.push(CondRule { range: (0, 0, 1, 0), op: CondOp::Less, value: 2.0, value2: 0.0, fill: "FFEB9C".into() });
-        let report = content_a_save_drops(None, &sheets);
-        assert_eq!(ids(&report), ["rule-later-sheet"]);
-        for feature in &report.features {
-            assert!(!feature.location.is_empty(), "every loss names its location");
-            assert!(!feature.detail.is_empty(), "every loss names its consequence");
-        }
-        assert!(report.features.iter().any(|f| f.location.contains("Later")), "the owner sheet is named: {:?}", report.features);
+        sheets[1].cond_rules.push(CondRule { range: (0, 0, 1, 0), op: CondOp::Less, value: 2.0, value2: 0.0, fill: "FFEB9C".into(), priority: 1 });
+        assert!(content_a_save_drops(None, &sheets).features.is_empty(), "a later sheet's rule is kept: {:?}", content_a_save_drops(None, &sheets).features);
     }
 
     #[test]
@@ -734,20 +755,27 @@ mod tests {
         let path = dir.path().join("foreign.xlsx");
         package(&path, &[
             ("xl/workbook.xml", "<workbook><definedNames><definedName name=\"Local\" localSheetId=\"1\">Sheet1!$A$1</definedName></definedNames></workbook>"),
-            ("xl/worksheets/sheet1.xml", "<worksheet><sheetData/><autoFilter ref=\"A1:B3\"/><sheetData><row><c><f t=\"array\" ref=\"C1:C3\">SUM(A1:B3)</f><v>6</v></c></row></sheetData><conditionalFormatting sqref=\"A1:A3\"><cfRule type=\"colorScale\"/></conditionalFormatting></worksheet>"),
+            ("xl/worksheets/sheet1.xml", "<worksheet><sheetData/><autoFilter ref=\"A1:B3\"><filterColumn colId=\"0\"><filters blank=\"0\"><filter val=\"kept\"/></filters></filterColumn><filterColumn colId=\"1\"><customFilters><customFilter operator=\"greaterThan\" val=\"5\"/></customFilters></filterColumn></autoFilter><sheetData><row><c><f t=\"array\" ref=\"C1:C3\">SUM(A1:B3)</f><v>6</v></c></row></sheetData><conditionalFormatting sqref=\"A1:A3\"><cfRule type=\"colorScale\"/></conditionalFormatting></worksheet>"),
             ("xl/worksheets/sheet2.xml", "<worksheet><conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" operator=\"greaterThan\"><formula>1</formula></cfRule></conditionalFormatting></worksheet>"),
+            ("xl/tables/table1.xml", "<table><autoFilter ref=\"A1:B3\"/></table>"),
             ("xl/charts/chart1.xml", "<chart><plotArea><stockChart><ser><val><numRef><f>Sheet1!$A$1:$A$3</f></numRef></val></ser><ser><val><numRef><f>Sheet1!$B$1:$B$3</f></numRef></val></ser></stockChart></plotArea></chart>"),
         ]);
         let before = std::fs::read(&path).unwrap();
         let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
         assert_eq!(
             ids(&report),
-            ["array-formulas", "filter-criteria", "rule-later-sheet", "scoped-names", "unsupported-charts", "unsupported-rules"]
+            ["array-formulas", "filter-criteria", "scoped-names", "unsupported-charts", "unsupported-rules"]
         );
         for feature in &report.features {
             assert!(!feature.location.is_empty(), "every loss names its location");
             assert!(!feature.detail.is_empty(), "every loss names its consequence");
         }
+        // The admitted value column and the later sheet's admitted rule
+        // warn about nothing; the custom column, the table filter, the
+        // colorScale rule and the stock chart each warn specifically.
+        let details: Vec<&str> = report.features.iter().map(|f| f.detail.as_str()).collect();
+        assert!(details.iter().any(|d| d.contains("custom filters")), "custom filter loss: {details:?}");
+        assert!(details.iter().any(|d| d.contains("Excel-table filter")), "table filter loss: {details:?}");
         assert!(report.requires_confirmation());
         assert_eq!(std::fs::read(&path).unwrap(), before, "preflight must not modify the source");
     }
@@ -768,6 +796,65 @@ mod tests {
         let report2 = content_a_save_drops(Some(path2.to_str().unwrap()), &[sheet()]);
         assert_eq!(ids(&report2), ["unsupported-rules"]);
         assert!(report2.features[0].detail.contains("top10"));
+    }
+
+    #[test]
+    fn admitted_value_filters_and_later_sheet_rules_stay_silent() {
+        // TBL-003: a value-list autoFilter is read (range and criteria),
+        // and admitted rules resolve on every sheet — neither warns.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admitted.xlsx");
+        package(&path, &[
+            ("xl/workbook.xml", "<workbook><sheets><sheet name=\"One\" r:id=\"rId1\"/><sheet name=\"Two\" r:id=\"rId2\"/></sheets></workbook>"),
+            ("xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Target=\"worksheets/sheet2.xml\"/></Relationships>"),
+            ("xl/worksheets/sheet1.xml", "<worksheet><autoFilter ref=\"A1:B3\"><filterColumn colId=\"0\"><filters blank=\"1\"><filter val=\"a\"/></filters></filterColumn></autoFilter></worksheet>"),
+            ("xl/worksheets/sheet2.xml", "<worksheet><conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" operator=\"greaterThan\" priority=\"1\" dxfId=\"0\"><formula>1</formula></cfRule></conditionalFormatting></worksheet>"),
+            ("xl/styles.xml", "<styleSheet><dxfs count=\"1\"><dxf><fill><fgColor rgb=\"FFFF00\"/></fill></dxf></dxfs></styleSheet>"),
+        ]);
+        let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+        assert!(report.features.is_empty(), "admitted content warns: {:?}", report.features);
+    }
+
+    #[test]
+    fn each_unsupported_filter_construct_warns_specifically() {
+        // TBL-003: top-N, date, color and custom filters must not be
+        // reported as preserved — each names itself in the report.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filters.xlsx");
+        package(&path, &[("xl/worksheets/sheet1.xml",
+            "<worksheet><autoFilter ref=\"A1:F5\">\
+             <filterColumn colId=\"0\"><customFilters><customFilter operator=\"greaterThan\" val=\"5\"/></customFilters></filterColumn>\
+             <filterColumn colId=\"1\"><filters><top10 val=\"3\"/></filters></filterColumn>\
+             <filterColumn colId=\"2\"><filters><dateGroupItem dateTimeGrouping=\"year\" year=\"2024\"/></filters></filterColumn>\
+             <filterColumn colId=\"3\"><colorFilter dxfId=\"0\"/></filterColumn>\
+             <filterColumn colId=\"4\"><dynamicFilter type=\"aboveAverage\"/></filterColumn>\
+             <filterColumn colId=\"5\"><iconFilter iconSet=\"3Arrows\" iconId=\"0\"/></filterColumn>\
+             </autoFilter></worksheet>")]);
+        let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+        assert_eq!(ids(&report), ["filter-criteria"]);
+        let details: Vec<&str> = report.features.iter().map(|f| f.detail.as_str()).collect();
+        for needle in ["custom filters", "top-N filters", "date-group filters", "color filters", "dynamic filters", "icon filters"] {
+            assert!(details.iter().any(|d| d.contains(needle)), "no loss for {needle}: {details:?}");
+        }
+        assert!(report.requires_confirmation());
+    }
+
+    #[test]
+    fn stop_if_true_and_missing_styles_warn() {
+        // TBL-003: stop-if-true behavior and unresolvable styles are
+        // reported, never silently approximated.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stop.xlsx");
+        package(&path, &[("xl/worksheets/sheet1.xml",
+            "<worksheet><conditionalFormatting sqref=\"A1:A2\">\
+             <cfRule type=\"cellIs\" operator=\"greaterThan\" priority=\"1\" dxfId=\"0\" stopIfTrue=\"1\"><formula>1</formula></cfRule>\
+             <cfRule type=\"cellIs\" operator=\"lessThan\" priority=\"2\"><formula>0</formula></cfRule>\
+             </conditionalFormatting></worksheet>")]);
+        let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+        assert_eq!(ids(&report), ["unsupported-rules"]);
+        let details: Vec<&str> = report.features.iter().map(|f| f.detail.as_str()).collect();
+        assert!(details.iter().any(|d| d.contains("stop")), "no stop-if-true loss: {details:?}");
+        assert!(details.iter().any(|d| d.contains("no style")), "no missing-style loss: {details:?}");
     }
 
     #[test]
