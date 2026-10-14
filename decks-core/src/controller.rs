@@ -1853,8 +1853,10 @@ mod tests {
         }
         assert_eq!(c.duplicate_slide(u64::MAX), None);
         assert!(c.undo());
-        let s = c.slides.borrow();
-        assert_eq!(s.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["One", "Two"], "one undo removes the copy");
+        {
+            let s = c.slides.borrow();
+            assert_eq!(s.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["One", "Two"], "one undo removes the copy");
+        }
         assert!(c.redo());
         // Redo keeps the copy's identity: it is the same slide, not a new one.
         assert_eq!(c.slide_id_at(1), Some(copy));
