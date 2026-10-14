@@ -325,6 +325,8 @@ fn rebuild_session(mut snapshot: SnapshotV1) -> RecoveredSession {
     // recorded (an unreadable picture).
     debug_assert!(snapshot.package.is_some() || !snapshot.unresolved.is_empty());
     crate::ops::ensure_all_ids(&mut snapshot.deck.slides, &mut snapshot.deck.masters);
+    let mut unresolved = std::mem::take(&mut snapshot.unresolved);
+    restage_assets(&mut snapshot.deck, &snapshot.assets, &mut unresolved);
     let context = snapshot.context.as_ref().and_then(|stored| {
         let source = stored.source_path()?;
         Some(DeckSourceContext::recovered(
