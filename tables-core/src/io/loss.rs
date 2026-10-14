@@ -374,36 +374,42 @@ fn scan_sheet_content(xml: &str, location: &str, report: &mut CompatibilityRepor
     }
     for block in xml.split("<conditionalFormatting").skip(1) {
         let block = block.split("</conditionalFormatting>").next().unwrap_or(block);
+        // One entry per block: the report dedupes by feature id, so
+        // separate records would collapse to the first issue.
+        let mut issues: Vec<String> = Vec::new();
         let sqref = block.split("sqref=\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or("");
         if sqref.split_whitespace().count() > 1 {
-            record(report, UNSUPPORTED_RULES, location, "a rule spans several ranges, of which only the first is read; the others lose their formatting");
-            continue;
+            issues.push("a rule spans several ranges, of which only the first is read; the others lose their formatting".to_string());
+        } else {
+            for rule in block.split("<cfRule").skip(1) {
+                let attr = |name: &str| -> Option<String> {
+                    rule.split(&format!("{name}=\"")).nth(1).and_then(|t| t.split('"').next()).map(str::to_string)
+                        .or_else(|| rule.split(&format!("{name}='")).nth(1).and_then(|t| t.split('\'').next()).map(str::to_string))
+                };
+                let kind = attr("type");
+                if kind.as_deref() != Some("cellIs") {
+                    issues.push(format!(
+                        "a '{}' rule is not read (only value comparisons are); its cells keep their values but not the formatting",
+                        kind.as_deref().unwrap_or("untyped"),
+                    ));
+                    continue;
+                }
+                if !matches!(attr("operator").as_deref(), Some("greaterThan" | "lessThan" | "equal" | "between")) {
+                    issues.push(format!(
+                        "a value rule with operator '{}' is not read; its cells keep their values but not the formatting",
+                        attr("operator").as_deref().unwrap_or("missing"),
+                    ));
+                }
+                if attr("dxfId").is_none() {
+                    issues.push("a value rule names no style Tables resolves, so it paints Tables' default highlight rather than the file's".to_string());
+                }
+                if matches!(attr("stopIfTrue").as_deref(), Some("1") | Some("true")) {
+                    issues.push("a rule stops lower-priority rules when it matches; Tables paints the first matching rule and does not model stop-if-true separately".to_string());
+                }
+            }
         }
-        for rule in block.split("<cfRule").skip(1) {
-            let attr = |name: &str| -> Option<String> {
-                rule.split(&format!("{name}=\"")).nth(1).and_then(|t| t.split('"').next()).map(str::to_string)
-                    .or_else(|| rule.split(&format!("{name}='")).nth(1).and_then(|t| t.split('\'').next()).map(str::to_string))
-            };
-            let kind = attr("type");
-            if kind.as_deref() != Some("cellIs") {
-                record(report, UNSUPPORTED_RULES, location, &format!(
-                    "a '{}' rule is not read (only value comparisons are); its cells keep their values but not the formatting",
-                    kind.as_deref().unwrap_or("untyped"),
-                ));
-                continue;
-            }
-            if !matches!(attr("operator").as_deref(), Some("greaterThan" | "lessThan" | "equal" | "between")) {
-                record(report, UNSUPPORTED_RULES, location, &format!(
-                    "a value rule with operator '{}' is not read; its cells keep their values but not the formatting",
-                    attr("operator").as_deref().unwrap_or("missing"),
-                ));
-            }
-            if attr("dxfId").is_none() {
-                record(report, UNSUPPORTED_RULES, location, "a value rule names no style Tables resolves, so it paints Tables' default highlight rather than the file's");
-            }
-            if matches!(attr("stopIfTrue").as_deref(), Some("1") | Some("true")) {
-                record(report, UNSUPPORTED_RULES, location, "a rule stops lower-priority rules when it matches; Tables paints the first matching rule and does not model stop-if-true separately");
-            }
+        if !issues.is_empty() {
+            record(report, UNSUPPORTED_RULES, location, &issues.join(" "));
         }
     }
 }
@@ -771,7 +777,7 @@ mod tests {
         let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
         assert_eq!(
             ids(&report),
-            ["array-formulas", "filter-criteria", "scoped-names", "unsupported-charts", "unsupported-rules"]
+            ["array-formulas", "excel-tables", "filter-criteria", "scoped-names", "unsupported-charts", "unsupported-rules"]
         );
         for feature in &report.features {
             assert!(!feature.location.is_empty(), "every loss names its location");
