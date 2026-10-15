@@ -174,12 +174,16 @@ pub(crate) fn show_conditional_format_dialog(
             );
             crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Conditional Formatting", move |sheet| {
                 let (r0, c0, r1, c1) = sheet.selection_rect();
+                // Priority past every existing rule: the dialog appends,
+                // and rules evaluate in priority order (TBL-003).
+                let priority = sheet.cond_rules.iter().map(|r| r.priority).max().unwrap_or(0) + 1;
                 sheet.cond_rules.push(CondRule {
                     range: (r0, c0, r1, c1),
                     op,
                     value,
                     value2,
                     fill,
+                    priority,
                 });
             }));
             da.queue_draw();
@@ -310,17 +314,30 @@ fn setup_of(page: &suite_common::page_setup::Page, scale: f64) -> suite_common::
 
 /// Filter rows by a substring match against the currently selected
 /// column (#113). Hiding non-matching rows, not deleting them — see
-/// `WorkbookController::filter_by_value`.
+/// `WorkbookController::filter_by_value`. A session-only filter: it
+/// replaces any explicit definition (TBL-003), which the dialog names.
 pub(crate) fn show_filter_dialog(
     controller: &Rc<RefCell<WorkbookController>>,
     da: &gtk4::DrawingArea,
     parent: Option<&adw::ApplicationWindow>,
 ) {
-    let col = controller.borrow().state.borrow().sheet().selected_col;
+    let (col, active) = {
+        let borrowed = controller.borrow();
+        let state = borrowed.state.borrow();
+        let sheet = state.sheet();
+        (sheet.selected_col, sheet.filter.as_ref().map(|def| def.description()))
+    };
     let col_label = tables_core::sheet::col_label(col);
+    // A session substring filter replaces any explicit definition, so say
+    // what it replaces (TBL-003); the column menu clears one or all.
+    let message = match active {
+        Some(summary) => suite_common::i18n("Show only the rows whose value in column %s contains (replacing filter %f):")
+            .replace("%s", &col_label).replace("%f", &summary),
+        None => suite_common::i18n("Show only the rows whose value in column %s contains:").replace("%s", &col_label),
+    };
     let prompt = suite_common::dialogs::prompt(
         &suite_common::i18n("Filter by Column"),
-        Some(&suite_common::i18n("Show only the rows whose value in column %s contains:").replace("%s", &col_label)),
+        Some(&message),
         &suite_common::i18n("Filter value"),
         "",
         &suite_common::i18n("_Filter"),

@@ -205,10 +205,12 @@ pub fn save_sheets_to_xlsx_bytes(
             }
         }
 
-        // Row/column hiding (#113): filter- and manually-hidden rows are
-        // indistinguishable once written — a reopened file has no filter
-        // state to restore, just hidden rows, same as real Excel/Sheets
-        // after a filter is "applied" and the file is saved.
+        // Row/column hiding (#113): every hidden row is written hidden,
+        // whether a filter or a manual hide put it there. A ranged filter
+        // additionally writes its autoFilter range and value criteria
+        // below, so reopening restores the definition (and Clear Filter
+        // works); a rangeless session filter has no autoFilter form and
+        // reopens as manual hides, which the loss ledger reports.
         for r in 0..sh.rows {
             if sh.is_row_hidden(r) {
                 sheet
@@ -221,6 +223,39 @@ pub fn save_sheets_to_xlsx_bytes(
                 sheet
                     .set_column_hidden(c as u16)
                     .map_err(|e| format!("Hide column error: {}", e))?;
+            }
+        }
+
+        // Explicit filter persistence (TBL-003): the autoFilter range plus
+        // one value-list column per criterion, listing the values shown.
+        // The header row is the range's top row by OOXML semantics, and
+        // the reader excludes it the same way.
+        if let Some(def) = &sh.filter {
+            if let Some((r0, c0, r1, c1)) = def.range {
+                sheet
+                    .autofilter(r0 as u32, c0 as u16, r1 as u32, c1 as u16)
+                    .map_err(|e| format!("Filter error: {e}"))?;
+                for criterion in &def.columns {
+                    if criterion.col < c0 || criterion.col > c1 {
+                        continue;
+                    }
+                    let mut shown: Vec<String> = def
+                        .distinct_values(sh, criterion.col)
+                        .into_iter()
+                        .filter(|v| !criterion.hidden.contains(v))
+                        .collect();
+                    shown.sort();
+                    let mut condition = rust_xlsxwriter::FilterCondition::new();
+                    if shown.iter().any(|v| v.is_empty()) {
+                        condition = condition.add_list_blanks_filter();
+                    }
+                    for value in shown.iter().filter(|v| !v.is_empty()) {
+                        condition = condition.add_list_filter(value.as_str());
+                    }
+                    sheet
+                        .filter_column(criterion.col as u16, &condition)
+                        .map_err(|e| format!("Filter error: {e}"))?;
+                }
             }
         }
 
@@ -262,7 +297,11 @@ pub fn save_sheets_to_xlsx_bytes(
             );
         }
 
-        for rule in &sh.cond_rules {
+        // Priority order (TBL-003): the writer numbers rules in the order
+        // they are added, so a stored priority must be written first.
+        let mut rules: Vec<&crate::sheet::CondRule> = sh.cond_rules.iter().collect();
+        rules.sort_by_key(|rule| rule.priority);
+        for rule in rules {
             use crate::sheet::CondOp;
             use rust_xlsxwriter::{ConditionalFormatCell, ConditionalFormatCellRule as R, Format};
             let cf_rule = match rule.op {

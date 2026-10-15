@@ -37,14 +37,18 @@ fn menu_button(icon: Option<&str>, label: &str) -> gtk::Button {
 
 /// Open the menu for column `col` under its header.
 fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dyn Fn()>, col: usize) {
-    let (values, x, w) = {
+    let (values, x, w, filter_summary, column_filtered) = {
         let c = ctl.borrow();
         let state = c.state.borrow();
         let sheet = state.sheet();
         if col >= sheet.cols {
             return;
         }
-        (sheet.column_values(col), tables_core::sheet::col_x(col, h.value(), &sheet), sheet.col_width(col))
+        // The explicit definition (TBL-003) is what the menu edits: its
+        // range caption and whether this column carries a criterion.
+        let filter_summary = sheet.filter.as_ref().map(|def| def.description());
+        let column_filtered = sheet.filter.as_ref().is_some_and(|def| def.columns.iter().any(|criterion| criterion.col == col));
+        (sheet.column_values(col), tables_core::sheet::col_x(col, h.value(), &sheet), sheet.col_width(col), filter_summary, column_filtered)
     };
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -55,6 +59,17 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
     title.set_margin_top(6);
     title.set_margin_bottom(6);
     content.append(&title);
+    // The active definition's range, so a filtered sheet says where its
+    // filter applies (TBL-003) rather than just listing values.
+    if let Some(summary) = filter_summary {
+        let caption = gtk::Label::new(Some(&format!("Filter: {summary}")));
+        caption.add_css_class("caption");
+        caption.add_css_class("dim-label");
+        caption.set_xalign(0.0);
+        caption.set_margin_start(12);
+        caption.set_margin_bottom(6);
+        content.append(&caption);
+    }
 
     // Parented beside the grid, not on it: the grid's accessible children
     // are its cells (grid_area.rs), so a popover inside it was invisible to
@@ -134,6 +149,24 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
             .max_content_height(280)
             .build();
         content.append(&scroll);
+        // Clear one column's criterion, leaving every other column's in
+        // place (TBL-003); the existing button below clears them all.
+        if column_filtered {
+            let clear_one = menu_button(None, "Clear Filter in This Column");
+            let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
+            clear_one.connect_clicked(move |_| {
+                popover.popdown();
+                crate::sheet_actions::apply(&ctl, &grid, |c| c.clear_column_filter(col));
+                refresh();
+                grid.queue_draw();
+                // The menu held keyboard focus while open; hand it back to
+                // the grid so grid shortcuts (Ctrl+G and typing) work at
+                // once instead of waiting on whatever focus limbo popdown
+                // leaves behind.
+                grid.grab_focus();
+            });
+            content.append(&clear_one);
+        }
         let clear = menu_button(None, "Clear Filter");
         let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
         clear.connect_clicked(move |_| {

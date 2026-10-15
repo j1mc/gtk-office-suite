@@ -3682,6 +3682,26 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIn("Min 10", line)
         self.assertIn("Max 30", line)
         self.assertIn("Count 2", line)
+
+        # TBL-003: the menu offers clearing this column only — the row
+        # comes back and the summary counts three again.
+        self._to_grid("A1")
+        rawinput.keyCombo("<Alt>Down")
+        self.wait_until(lambda: self._button("Clear Filter in This Column"), bool,
+                        description="the per-column clear button")
+        self._button("Clear Filter in This Column").do_action(0)
+        # Make sure the menu is dismissed before driving the grid again:
+        # Escape closes any lingering popover and otherwise hands focus
+        # back to the grid, where Ctrl+G is heard.
+        rawinput.keyCombo("Escape")
+        self._to_grid("A1")
+        rawinput.keyCombo("<Shift>Down")
+        rawinput.keyCombo("<Shift>Down")
+        stats = self.wait_until(labels, lambda ls: any("Count 3" in l for l in ls),
+                                description="the quick summary to count every row again")
+        line = next(l for l in stats if "Sum" in l)
+        self.assertIn("Sum 60", line)
+        self.assertIn("Count 3", line)
         self.assertIsNone(self.process.poll(), "tables crashed in the column menu")
 
 
@@ -5024,6 +5044,68 @@ class TablesFilterSmoke(TablesCellEntryMixin, BaseGUITestCase):
         )
         self.assertIsNone(self.process.poll(), "tables crashed during filter/clear-filter")
 
+    def test_clear_filter_keeps_manual_hides(self):
+        # TBL-003: filter hides and manual hides are independent — clearing
+        # the filter brings back only what the filter hid.
+        import json
+        import subprocess
+        from dogtail import rawinput, tree
+
+        aid = "org.tunaos.tables"
+        subprocess.run(["gapplication", "action", aid, "new-document"])
+        self._wait_for_a_new_document()
+
+        for row, value in enumerate(["apple", "banana", "apple", "cherry"]):
+            self._put(f"A{row + 1}", value)
+
+        def snapshot():
+            subprocess.run(["gapplication", "action", aid, "test-snapshot"])
+            with open(self._snapshot_path) as f:
+                return json.load(f)
+
+        subprocess.run(["gapplication", "action", aid, "filter-by-column"])
+        value_entry = self.wait_until(
+            lambda: tree.root.findChild(
+                lambda n: n.name == "Filter value" and n.roleName == "text"),
+            lambda node: node is not None,
+            description="the Filter by Column dialog",
+        )
+        value_entry.text = "apple"
+        tree.root.findChild(
+            lambda n: n.name == "Filter" and n.roleName == "push button").do_action(0)
+        self.wait_until(
+            snapshot,
+            lambda snap: set(snap["sheet"]["hidden_rows"]) == {1, 3},
+            interval=0.3,
+            description="the filter to hide the non-matching rows",
+        )
+
+        # Manually hide A3, a row the filter leaves visible.
+        rawinput.keyCombo("<Control>g")
+        self.wait_until(lambda: self._focused("Cell reference"), bool,
+                        description="the name box to take focus")
+        rawinput.typeText("A3")
+        rawinput.keyCombo("Return")
+        self.wait_until(lambda: self._focused("Formula input"), bool,
+                        description="the jump to A3")
+        rawinput.keyCombo("Escape")
+        subprocess.run(["gapplication", "action", aid, "hide-selected-rows"])
+        self.wait_until(
+            snapshot,
+            lambda snap: set(snap["sheet"]["hidden_rows"]) == {1, 2, 3},
+            interval=0.3,
+            description="the manual hide to join the filter hides",
+        )
+
+        subprocess.run(["gapplication", "action", aid, "clear-filter"])
+        self.wait_until(
+            snapshot,
+            lambda snap: snap["sheet"]["hidden_rows"] == [2],
+            interval=0.3,
+            description="clear-filter to bring back only the filtered rows",
+        )
+        self.assertIsNone(self.process.poll(), "tables crashed during filter/clear-filter")
+
 
 class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
     """Rows and columns inserted and deleted, a sort under a frozen header,
@@ -5297,6 +5379,41 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self._act("undo")
         self._wait_cells(lambda c: c == original, "one undo to restore the complete cleared range")
         self.assertIsNone(self.process.poll(), "tables crashed during protected compound operations")
+
+    def test_filter_undo_and_redo_restore_visibility(self):
+        # TBL-003: the Filter by Column dialog hides non-matching rows as
+        # one undo step; undo brings them back and redo hides them again.
+        from dogtail import tree
+        self._put("A1", "apple")
+        self._put("A2", "banana")
+        self._act("filter-by-column")
+        value_entry = self.wait_until(
+            lambda: tree.root.findChild(
+                lambda n: n.name == "Filter value" and n.roleName == "text"),
+            lambda node: node is not None,
+            description="the Filter by Column dialog",
+        )
+        value_entry.text = "apple"
+        tree.root.findChild(
+            lambda n: n.name == "Filter" and n.roleName == "push button").do_action(0)
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [1],
+            description="the filter to hide the non-matching row",
+        )
+        self._act("undo")
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [],
+            description="one undo to unhide every row",
+        )
+        self._act("redo")
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [1],
+            description="redo to hide the non-matching row again",
+        )
+        self.assertIsNone(self.process.poll(), "tables crashed during filter undo/redo")
 
 
 class TablesNamedRangeSmoke(BaseGUITestCase):

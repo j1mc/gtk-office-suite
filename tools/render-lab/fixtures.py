@@ -665,6 +665,27 @@ def tables():
     )
     save(wb, "conditional", "A6:A10 (values > 50) are pink; A1:A5 are not")
 
+    # TBL-003: a value filter over a labeled column (only North shows;
+    # South/East rows are hidden by the filter, not by hand) plus a
+    # conditional rule owned by the later sheet — the visible
+    # filtered/cleared comparison for worksheet-scoped rules and
+    # persistent filters.
+    wb, ws = book()
+    for r, (region, amount) in enumerate(
+        (("Region", "Amount"), ("North", 10), ("South", 20), ("North", 30), ("East", 40)), start=1
+    ):
+        ws.cell(r, 1, region)
+        ws.cell(r, 2, amount)
+    ws.auto_filter.ref = "A1:B5"
+    ws.auto_filter.add_filter_column(0, ["North"])
+    later = wb.create_sheet("Later")
+    for i in range(1, 6):
+        later.cell(i, 1, i * 10)
+    later.conditional_formatting.add(
+        "A1:A5", CellIsRule(operator="greaterThan", formula=["25"], fill=PatternFill("solid", bgColor="FFC7CE"))
+    )
+    save(wb, "filtered", "Only the North rows show (South/East filtered out); the Later sheet carries its own pink rule")
+
     wb, ws = book()
     for r in range(1, 40):
         for c in range(1, 10):

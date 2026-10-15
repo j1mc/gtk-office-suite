@@ -133,6 +133,7 @@ fn encode_props(s: &SheetModel) -> Vec<(&'static str, String)> {
     vec![
         ("p.sorted", json(&s.sorted_col)),
         ("p.filtered", json(&sorted(&s.hidden_rows))),
+        ("p.filter", json(&s.filter)),
         ("p.hidden_rows", json(&sorted(&s.hidden_rows_manual))),
         ("p.hidden_cols", json(&sorted(&s.hidden_cols))),
         ("p.cond_rules", json(&s.cond_rules)),
@@ -158,6 +159,12 @@ fn decode_prop(s: &mut SheetModel, key: &str, text: &str) {
     match key {
         "p.sorted" => set(&mut s.sorted_col, text),
         "p.filtered" => set_of(&mut s.hidden_rows, text),
+        "p.filter" => {
+            // The definition arrives separately from its derived rows;
+            // recompute so the two agree whatever order they land in.
+            set(&mut s.filter, text);
+            s.recompute_filter();
+        }
         "p.hidden_rows" => set_of(&mut s.hidden_rows_manual, text),
         "p.hidden_cols" => set_of(&mut s.hidden_cols, text),
         "p.cond_rules" => set(&mut s.cond_rules, text),

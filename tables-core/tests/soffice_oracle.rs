@@ -622,6 +622,7 @@ fn cond_rule_survives_calc_rewrite() {
         value: 25.0,
         value2: 25.0,
         fill: "FFC0C0".into(),
+        priority: 1,
     });
     tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[sh]).unwrap();
 
@@ -1049,4 +1050,44 @@ fn cell_styles_survive_calc_into_its_xlsx() {
     assert_eq!(head.h_align, HAlign::Center);
     assert_eq!(s.borders[1][1].top, BorderStyle::Thick, "{:?}", s.borders[1][1]);
     assert!(s.styles[2][2].is_default() && s.borders[2][2].is_none());
+}
+
+// ── Worksheet-scoped rules and persistent filters (TBL-003) ──────────
+
+/// A ranged value filter and a later sheet's rule must survive a Calc
+/// rewrite — the autoFilter still in the XML for every reader, and the
+/// range, derived hides and rule intact when read back by our importer.
+#[test]
+fn filter_and_later_rule_survive_calc_rewrite() {
+    if !require_or_skip() { return; }
+    use tables_core::sheet::{CondOp, CondRule, FilterColumn, FilterDef};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("filter.xlsx");
+    let mut first = SheetModel::new("Sheet1", 8, 4, 0);
+    for (r, v) in ["Region", "North", "South", "North"].iter().enumerate() {
+        first.data[r][0] = v.to_string();
+    }
+    first.filter = Some(FilterDef {
+        range: Some((0, 0, 3, 0)),
+        columns: vec![FilterColumn { col: 0, hidden: ["South".to_string()].into_iter().collect() }],
+    });
+    first.recompute_filter();
+    let mut later = SheetModel::new("Later", 8, 4, 1);
+    later.data[0][1] = "5".into();
+    later.cond_rules.push(CondRule {
+        range: (0, 1, 2, 1), op: CondOp::Greater, value: 1.0, value2: 1.0,
+        fill: "C6EFCE".into(), priority: 1,
+    });
+    tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[first, later]).unwrap();
+
+    let rewritten = calc_rewrite(&path);
+    let xml = xlsx_member(&rewritten, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("autoFilter"), "Calc dropped the autoFilter: {xml}");
+    let (_e, sheets) = load_workbook(rewritten.to_str().unwrap()).expect("open");
+    let def = sheets[0].filter.as_ref().expect("the filter survives Calc");
+    assert_eq!(def.range, Some((0, 0, 3, 0)), "the range survives Calc: {def:?}");
+    assert!(sheets[0].hidden_rows.contains(&2), "South stays hidden: {:?}", sheets[0].hidden_rows);
+    assert!(!sheets[0].hidden_rows.contains(&0), "the header stays out");
+    let rule = sheets[1].cond_rules.iter().find(|r| r.op == CondOp::Greater).expect("the later rule survives Calc");
+    assert_eq!(rule.range, (0, 1, 2, 1), "the later rule's range survives Calc: {rule:?}");
 }

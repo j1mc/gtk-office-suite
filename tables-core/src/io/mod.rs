@@ -32,6 +32,7 @@ pub use format::{is_writable_format, xlsx_save_as_name, FORMATS};
 pub use numfmt::{code_for_kind, kind_for_code};
 pub use xlsx_styles::{parse_cell_styles, XfStyle};
 pub use condrules::read_cond_rules_from_xlsx;
+pub use condrules::{read_cond_rules_detailed, CondRuleIssue};
 pub use load::{load_file_into_engine, load_ods_workbook, load_workbook, load_xls_workbook,
     load_xlsx_workbook, load_xlsx_workbook_with_report};
 pub use props::{read_sheet_props_from_ods, read_sheet_props_from_xlsx, SheetXlsxProps};
