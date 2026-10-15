@@ -1427,7 +1427,7 @@ mod structured_editing_tests {
         )
         .expect("older snapshots stored bare positions");
         assert_eq!(style.tab_stops_pt, vec![TabStop::left(72.0), TabStop::left(144.0)]);
-        assert_eq!(style.keep_lines, false);
+        assert!(!style.keep_lines);
         assert_eq!(style.widow_control, None);
         assert_eq!(style.line_height, None);
         assert_eq!(style.shading, None);

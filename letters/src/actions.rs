@@ -209,7 +209,7 @@ pub(crate) fn cycle_line_spacing_in(buf: &gtk::TextBuffer) -> Option<f32> {
 pub(crate) fn toggle_keep_lines_in(buf: &gtk::TextBuffer) -> bool {
     let Some(live) = crate::live::of(buf) else { return false };
     let from = caret_or_selection(buf).0;
-    let keeping = live.borrow_mut().paragraph_style_at(from).map_or(false, |s| s.keep_lines);
+    let keeping = live.borrow_mut().paragraph_style_at(from).is_some_and(|s| s.keep_lines);
     restyle_here(buf, |style| letters_core::ParaStyle { keep_lines: !keeping, ..style.clone() })
 }
 
@@ -221,7 +221,7 @@ pub(crate) fn toggle_keep_lines_in(buf: &gtk::TextBuffer) -> bool {
 pub(crate) fn toggle_widow_control_in(buf: &gtk::TextBuffer) -> bool {
     let Some(live) = crate::live::of(buf) else { return false };
     let from = caret_or_selection(buf).0;
-    let free = live.borrow_mut().paragraph_style_at(from).map_or(false, |s| s.widow_control == Some(false));
+    let free = live.borrow_mut().paragraph_style_at(from).is_some_and(|s| s.widow_control == Some(false));
     restyle_here(buf, |style| letters_core::ParaStyle {
         widow_control: if free { None } else { Some(false) },
         ..style.clone()
