@@ -527,6 +527,33 @@ def letters(img):
         x.add_paragraph(LOREM * 2)
     save(x, "columns", "Text in two columns half an inch apart, filling the left column before the right")
 
+    # LET-005S: a document of two sections. A portrait part with its own
+    # header, then a next-page section break into a landscape part with
+    # narrower margins, two columns and a header of its own (unlinked from
+    # the first, as Word's "Link to Previous" off writes it).
+    from docx.enum.section import WD_SECTION
+    x = doc()
+    first = x.sections[0]
+    first.header.paragraphs[0].text = "PORTRAIT PART"
+    for i in range(3):
+        x.add_paragraph(f"Portrait paragraph {i + 1}. " + LOREM)
+    second = x.add_section(WD_SECTION.NEW_PAGE)
+    second.orientation = WD_ORIENT.LANDSCAPE
+    second.page_width, second.page_height = first.page_height, first.page_width
+    second.left_margin = second.right_margin = Inches(0.75)
+    second.top_margin = second.bottom_margin = Inches(0.75)
+    second.header.is_linked_to_previous = False
+    second.header.paragraphs[0].text = "LANDSCAPE APPENDIX"
+    cols = second._sectPr.find(qn("w:cols"))
+    if cols is None:
+        cols = OxmlElement("w:cols")
+        second._sectPr.append(cols)
+    cols.set(qn("w:num"), "2")
+    cols.set(qn("w:space"), "480")
+    for i in range(6):
+        x.add_paragraph(f"Landscape paragraph {i + 1}. " + LOREM * 2)
+    save(x, "mixed-sections", "Page 1 portrait under 'PORTRAIT PART'; page 2 landscape with 0.75in margins, two columns and 'LANDSCAPE APPENDIX' above them")
+
     x = doc()
     x.add_paragraph("Page one.")
     x.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
