@@ -91,19 +91,27 @@ impl WorkbookController {
     /// `SetFormat`, `SetStyle`, `SetProp`… ops (`super::ops::diff_ops`).
     /// Cell values and the sheet's size don't change this way: those go
     /// through `edit_cell`, paste, fill and the row/column ops.
+    ///
+    /// Returns whether the mutation was applied. A closure that touches
+    /// values, formula flags or the size is refused — in every build, not
+    /// just debug ones — with no history step: `diff_ops` cannot express
+    /// those fields, so applying them would silently bypass the content
+    /// contract the ops enforce (typed ops per field, undoable, redoable).
     pub fn mutate_sheet(
         &mut self,
         description: &'static str,
         mutation: impl FnOnce(&mut SheetModel),
-    ) {
+    ) -> bool {
         let before = self.state.borrow().sheet().clone();
         let mut after = before.clone();
         mutation(&mut after);
-        debug_assert!(
-            after.data == before.data && (after.rows, after.cols) == (before.rows, before.cols),
-            "mutate_sheet can't change values or size"
-        );
-        self.apply_ops(description, super::ops::diff_ops(&before, &after));
+        if after.data != before.data
+            || after.formulas != before.formulas
+            || (after.rows, after.cols) != (before.rows, before.cols)
+        {
+            return false;
+        }
+        self.apply_ops(description, super::ops::diff_ops(&before, &after))
     }
 
     pub fn paste_fragment(&mut self, row: usize, col: usize, fragment: &Fragment) {
@@ -232,7 +240,14 @@ impl WorkbookController {
             let mut state = self.state.borrow_mut();
             for (row, col, input, from) in cells.iter_mut() {
                 if let Some(from) = *from {
-                    *input = state.engine.extend_input(input, from, (*row, *col));
+                    // The translation touches nothing in the workbook —
+                    // these strings become the op below — so a rejection
+                    // aborts the fill with no history step rather than
+                    // filling stale references that look intentional.
+                    match state.engine.extend_input(input, from, (*row, *col)) {
+                        Ok(translated) => *input = translated,
+                        Err(_) => return,
+                    }
                 }
             }
         }

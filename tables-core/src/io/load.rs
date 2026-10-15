@@ -44,29 +44,39 @@ fn range_extent<T: calamine::CellType>(range: &calamine::Range<T>) -> (usize, us
     }
 }
 
+/// Import a value-only range (xls, or an xlsx without formulas) into the
+/// engine at its own coordinates. A cell the engine rejects fails the
+/// import with its coordinates rather than landing a workbook that is
+/// silently missing content.
 fn load_range_into_engine(
     range: &calamine::Range<Data>,
     engine: &mut TablesEngine,
-) -> (usize, usize) {
+) -> Result<(usize, usize), String> {
     // `rows()` yields the range's own rows, so its indices are relative to
     // `start()`. Writing them straight to the engine would shift a sheet whose
     // content begins at B2 up and left into A1.
     let (row0, col0) = range.start().unwrap_or((0, 0));
     for (r, row) in range.rows().enumerate() {
         for (c, cell) in row.iter().enumerate() {
-            engine.put_cell_text(row0 as usize + r, col0 as usize + c, &data_to_string(cell));
+            let (row, col) = (row0 as usize + r, col0 as usize + c);
+            engine.put_cell_text(row, col, &data_to_string(cell))
+                .map_err(|e| format!("import {e}"))?;
         }
     }
     engine.evaluate();
     let (rows, cols) = range_extent(range);
-    (rows.max(1), cols.max(1))
+    Ok((rows.max(1), cols.max(1)))
 }
 
+/// Import values plus formulas into the engine: formulas (with the `=`
+/// IronCalc parses) as inputs, plain values as text. Same failure
+/// contract as [`load_range_into_engine`]: a rejected cell fails the
+/// import rather than landing partial content.
 fn load_xlsx_ranges_into_engine(
     values: &calamine::Range<Data>,
     formulas: &calamine::Range<String>,
     engine: &mut TablesEngine,
-) -> (usize, usize) {
+) -> Result<(usize, usize), String> {
     // Absolute extents, not range sizes — `get_value` below is addressed in
     // absolute sheet coordinates, so the bounds must be too.
     let (value_rows, value_cols) = range_extent(values);
@@ -84,19 +94,21 @@ fn load_xlsx_ranges_into_engine(
                     .get_value((row as u32, col as u32))
                     .map(data_to_string)
                     .unwrap_or_default();
-                engine.put_cell_text(row, col, &value);
+                engine.put_cell_text(row, col, &value)
+                    .map_err(|e| format!("import {e}"))?;
             } else {
                 let input = if formula.starts_with('=') {
                     formula.to_string()
                 } else {
                     format!("={formula}")
                 };
-                engine.put_cell_text(row, col, &input);
+                engine.put_cell_text(row, col, &input)
+                    .map_err(|e| format!("import {e}"))?;
             }
         }
     }
     engine.evaluate();
-    (rows.max(1), cols.max(1))
+    Ok((rows.max(1), cols.max(1)))
 }
 
 /// `.xlsb` is a binary container, not the XML package the xlsx reader
@@ -129,7 +141,7 @@ pub fn load_file_into_engine(
             let range = wb
                 .worksheet_range(&sheet_names[0])
                 .map_err(|e| format!("Cannot read sheet: {}", e))?;
-            Ok(load_range_into_engine(&range, engine))
+            load_range_into_engine(&range, engine)
         }
         "xlsb" => Err(XLSB_UNSUPPORTED.to_string()),
         "xlsx" | "xlsm" => {
@@ -145,7 +157,7 @@ pub fn load_file_into_engine(
             let range = wb
                 .worksheet_range(&sheet_names[0])
                 .map_err(|e| format!("Cannot read sheet: {}", e))?;
-            Ok(load_xlsx_ranges_into_engine(&range, &formulas, engine))
+            load_xlsx_ranges_into_engine(&range, &formulas, engine)
         }
         "ods" => {
             let mut wb: calamine::Ods<_> =
@@ -160,7 +172,7 @@ pub fn load_file_into_engine(
             let formulas = wb
                 .worksheet_formula(&sheet_names[0])
                 .map_err(|e| format!("Cannot read formulas: {}", e))?;
-            Ok(load_xlsx_ranges_into_engine(&range, &super::odf_formula::a1_formulas(&formulas), engine))
+            load_xlsx_ranges_into_engine(&range, &super::odf_formula::a1_formulas(&formulas), engine)
         }
         "csv" | "tsv" => {
             let content =
@@ -173,7 +185,8 @@ pub fn load_file_into_engine(
                 max_cols = max_cols.max(cols.len());
                 for (c, val) in cols.iter().enumerate() {
                     let trimmed = val.trim().trim_matches('"');
-                    engine.put_cell_text(r, c, trimmed);
+                    engine.put_cell_text(r, c, trimmed)
+                        .map_err(|e| format!("import {e}"))?;
                 }
                 max_rows = r + 1;
             }
@@ -272,7 +285,7 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
     let mut sheets = Vec::with_capacity(names.len());
     for (index, ((values, formulas), name)) in source.into_iter().zip(names.iter()).enumerate() {
         engine.set_active_sheet(index)?;
-        let (rows, cols) = load_xlsx_ranges_into_engine(&values, &formulas, &mut engine);
+        let (rows, cols) = load_xlsx_ranges_into_engine(&values, &formulas, &mut engine)?;
         let (rows, cols) = sheet_props.get(name).map_or((rows, cols), |props| {
             props.cell_styles.iter().fold((rows, cols), |(rows, cols), (r, c, _)| {
                 (rows.max(r + 1), cols.max(c + 1))
@@ -485,8 +498,8 @@ fn build_named_workbook_with_formulas(source: Vec<(String, calamine::Range<Data>
     for (index, (name, range, formulas)) in source.into_iter().enumerate() {
         engine.set_active_sheet(index)?;
         let (rows, cols) = match &formulas {
-            Some(f) => load_xlsx_ranges_into_engine(&range, f, &mut engine),
-            None => load_range_into_engine(&range, &mut engine),
+            Some(f) => load_xlsx_ranges_into_engine(&range, f, &mut engine)?,
+            None => load_range_into_engine(&range, &mut engine)?,
         };
         let sheet_id = engine.sheet_id_at(index).unwrap_or(index as u32);
         let mut sheet = SheetModel::new(&name, rows.max(DEFAULT_ROWS), cols.max(DEFAULT_COLS), sheet_id);
@@ -688,7 +701,7 @@ mod tests {
         assert!(engine.rows >= blank_row);
         engine.set_active_sheet(1).unwrap();
         assert_eq!(engine.input_at(1, 0, 1), "=1+1");
-        engine.set_cell_text(blank_row - 1, 1, "blank input");
+        engine.set_cell_text(blank_row - 1, 1, "blank input").unwrap();
         assert_eq!(engine.cell(blank_row - 1, 1), "blank input");
     }
 
@@ -1104,7 +1117,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sparse.xlsx");
         let mut engine = TablesEngine::new(4, 4).unwrap();
-        engine.set_cell_text(3, 3, "e");
+        engine.set_cell_text(3, 3, "e").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 4, 0);
         sheet.sync_from_engine(&engine);
@@ -1126,9 +1139,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("offset.xlsx");
         let mut engine = TablesEngine::new(4, 4).unwrap();
-        engine.set_cell_text(1, 1, "corner");
-        engine.set_cell_text(1, 2, "right");
-        engine.set_cell_text(2, 1, "below");
+        engine.set_cell_text(1, 1, "corner").unwrap();
+        engine.set_cell_text(1, 2, "right").unwrap();
+        engine.set_cell_text(2, 1, "below").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 4, 0);
         sheet.sync_from_engine(&engine);
@@ -1229,7 +1242,7 @@ mod tests {
         let (mut engine, sheets) = load_xlsx_workbook(&path).expect("load");
         assert!(sheets[0].rows > 9, "row 10 does not exist: {} rows", sheets[0].rows);
         engine.set_active_sheet(0).unwrap();
-        engine.set_cell_text(9, 0, "typed into A10");
+        engine.set_cell_text(9, 0, "typed into A10").unwrap();
         assert_eq!(engine.cell(9, 0), "typed into A10");
     }
 

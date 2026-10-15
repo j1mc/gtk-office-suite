@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use loro::{ExportMode, LoroDoc, LoroList, LoroMap, LoroMovableList, LoroValue, ValueOrContainer};
 use serde::{de::DeserializeOwned, Serialize};
 
-use super::ops::{cell_content, resync, Axis, CellContent, Op};
+use super::ops::{cell_content, Axis, CellContent, Op};
 use super::state::WorkbookState;
 use crate::sheet::SheetModel;
 
@@ -702,7 +702,7 @@ fn build(view: &DocView) -> Result<WorkbookState, String> {
         state.set_cell_inputs_on_sheet(
             index,
             placed.iter().filter(|(_, _, cell)| !cell.input.is_empty()).map(|(r, c, cell)| (*r, *c, cell.input.as_str())),
-        );
+        )?;
         let mut s = state.sheets[index].borrow_mut();
         for (r, c, cell) in &placed {
             s.formats[*r][*c] = cell.format.clone();
@@ -732,8 +732,6 @@ fn build(view: &DocView) -> Result<WorkbookState, String> {
         }
     }
     state.engine.evaluate();
-    for index in 0..state.sheets.len() {
-        resync(&mut state, index);
-    }
+    state.sync_all_sheets();
     Ok(state)
 }

@@ -14,6 +14,10 @@
     "B": "green",
     "C": "green"
   },
+  "decks/delegated-authorities-reduced-dark-mode-window": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/edited-journey": {
     "A": "green",
     "B": "green"
@@ -27,6 +31,14 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "decks/pay-centre-reduced-line-breaks": {
+    "A": "amber",
+    "B": "amber"
+  },
+  "decks/pay-centre-reduced-picture-background": {
+    "A": "green",
+    "B": "green"
   },
   "decks/preset-shapes": {
     "A": "green",
@@ -87,9 +99,17 @@
     "B": "green",
     "C": "green"
   },
+  "letters/combining-marks": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/edited-journey": {
     "A": "green",
     "B": "green"
+  },
+  "letters/exact-line-spacing": {
+    "A": "amber",
+    "B": "amber"
   },
   "letters/font-families": {
     "A": "green",
@@ -141,6 +161,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/keep-widow": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/landscape": {
     "A": "green",
     "B": "green",
@@ -186,6 +210,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/para-shading-borders": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/paragraph-spacing": {
     "A": "green",
     "B": "green",
@@ -200,6 +228,10 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/tab-leaders": {
+    "A": "green",
+    "B": "green"
   },
   "letters/table": {
     "A": "amber",

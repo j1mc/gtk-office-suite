@@ -66,9 +66,9 @@ fn calc_recalculates_our_formulas() {
     let path = dir.path().join("formula.xlsx");
 
     let mut e = tables_core::engine::TablesEngine::new(5, 5).unwrap();
-    e.set_cell_text(0, 0, "2");
-    e.set_cell_text(0, 1, "3");
-    e.set_cell_text(1, 0, "=A1*B1");
+    e.set_cell_text(0, 0, "2").unwrap();
+    e.set_cell_text(0, 1, "3").unwrap();
+    e.set_cell_text(1, 0, "=A1*B1").unwrap();
     e.evaluate();
     let mut sheet = SheetModel::new("F", 3, 3, 0);
     sheet.data[0][0] = "2".into();
@@ -127,7 +127,7 @@ fn calc_csv_of(cells: &[(usize, usize, &str)], rows: usize, cols: usize) -> Opti
     let mut e = TablesEngine::new(rows, cols).unwrap();
     let mut sheet = SheetModel::new("S", rows, cols, 0);
     for (r, c, v) in cells {
-        e.set_cell_text(*r, *c, v);
+        e.set_cell_text(*r, *c, v).unwrap();
         if !v.starts_with('=') {
             sheet.data[*r][*c] = v.to_string();
         }
@@ -333,9 +333,9 @@ fn formula_strings_survive_calc_rewrite_as_formulas() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.xlsx");
     let mut e = TablesEngine::new(4, 4).unwrap();
-    e.set_cell_text(0, 0, "3");
-    e.set_cell_text(0, 1, "4");
-    e.set_cell_text(1, 0, "=A1+B1");
+    e.set_cell_text(0, 0, "3").unwrap();
+    e.set_cell_text(0, 1, "4").unwrap();
+    e.set_cell_text(1, 0, "=A1+B1").unwrap();
     e.evaluate();
     let mut sheet = SheetModel::new("F", 4, 4, 0);
     sheet.data[0][0] = "3".into();
@@ -476,8 +476,8 @@ fn cross_sheet_reference_recalculated_by_calc() {
     // model the cross-ref with two of OUR sheets and formulas from the
     // engine on sheet 1 only referencing its own grid — then assert the
     // multi-sheet file keeps both grids through Calc.
-    e.set_cell_text(0, 0, "7");
-    e.set_cell_text(1, 0, "=A1*3");
+    e.set_cell_text(0, 0, "7").unwrap();
+    e.set_cell_text(1, 0, "=A1*3").unwrap();
     e.evaluate();
     let mut s1 = SheetModel::new("Data", 4, 4, 0);
     s1.data[0][0] = "7".into();
@@ -929,7 +929,7 @@ fn custom_format_codes_draw_as_calc_draws_them() {
     let mut e = TablesEngine::new(cases.len(), 1).unwrap();
     let mut sheet = SheetModel::new("S", cases.len(), 1, 0);
     for (r, (code, value)) in cases.iter().enumerate() {
-        e.set_cell_text(r, 0, value);
+        e.set_cell_text(r, 0, value).unwrap();
         sheet.data[r][0] = value.to_string();
         sheet.formats[r][0] = NumberFormat::new(NumberFormatKind::Custom(code.to_string()));
     }
@@ -969,9 +969,9 @@ fn a_cross_sheet_formula_survives_calc_both_ways() {
     let mut e = TablesEngine::new(3, 3).unwrap();
     e.add_sheet("My rates").unwrap();
     e.set_active_sheet(1).unwrap();
-    e.set_cell_text(0, 0, "3");
+    e.set_cell_text(0, 0, "3").unwrap();
     e.set_active_sheet(0).unwrap();
-    e.set_cell_text(0, 0, "='My rates'!A1*2");
+    e.set_cell_text(0, 0, "='My rates'!A1*2").unwrap();
     assert_eq!(e.cell(0, 0), "6", "we evaluate the quoted reference ourselves");
     let mut sheets = Vec::new();
     for (i, name) in ["Sheet1", "My rates"].into_iter().enumerate() {
@@ -991,7 +991,7 @@ fn a_cross_sheet_formula_survives_calc_both_ways() {
         let formula = loaded.formula(0, 0).unwrap_or_default();
         assert!(formula.contains("My rates") && formula.contains("A1"), "still a reference to the other sheet after {what}: {formula:?}");
         loaded.set_active_sheet(1).unwrap();
-        loaded.set_cell_text(0, 0, "10");
+        loaded.set_cell_text(0, 0, "10").unwrap();
         loaded.set_active_sheet(0).unwrap();
         assert_eq!(loaded.cell(0, 0), "20", "the formula is live after {what}");
     };

@@ -49,6 +49,7 @@ fn build_deck(slides: &[Vec<String>]) -> Deck {
         .map(|texts| Slide {
             title: "Slide".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: texts
                 .iter()
                 .map(|t| SlideObject::TextBox {
@@ -67,7 +68,7 @@ fn build_deck(slides: &[Vec<String>]) -> Deck {
             layout_id: None,
         })
         .collect();
-    Deck { slides, masters: vec![] }
+    Deck { slides, masters: vec![], page_size: None, themes: Vec::new() }
 }
 
 proptest! {

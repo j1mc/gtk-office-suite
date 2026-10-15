@@ -36,7 +36,7 @@ fn carried_safe_parts_survive_a_tables_save() {
     use std::io::{Read, Write};
     let dir = tempfile::tempdir().unwrap();
     let mut engine = tables_core::TablesEngine::new(8, 4).expect("engine");
-    engine.set_cell_text(1, 1, "1274");
+    engine.set_cell_text(1, 1, "1274").unwrap();
     let mut sheet = tables_core::sheet::SheetModel::new("Sheet1", 8, 4, engine.sheet_id_at(0).unwrap());
     sheet.sync_from_engine(&engine);
     let source = dir.path().join("source.xlsx");

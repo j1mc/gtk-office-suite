@@ -83,16 +83,16 @@ mod tests {
     #[test]
     fn to_typst_range_with_none_matches_the_whole_grid() {
         let mut e = TablesEngine::new(3, 3).unwrap();
-        e.set_cell_text(0, 0, "a");
-        e.set_cell_text(2, 2, "z");
+        e.set_cell_text(0, 0, "a").unwrap();
+        e.set_cell_text(2, 2, "z").unwrap();
         assert_eq!(to_typst_range(&e, None), to_typst(&e));
     }
 
     #[test]
     fn to_typst_range_bounds_to_the_print_area() {
         let mut e = TablesEngine::new(4, 4).unwrap();
-        e.set_cell_text(0, 0, "in");
-        e.set_cell_text(3, 3, "out");
+        e.set_cell_text(0, 0, "in").unwrap();
+        e.set_cell_text(3, 3, "out").unwrap();
         let bounded = to_typst_range(&e, Some((0, 0, 1, 1)));
         assert!(bounded.contains("in"));
         assert!(!bounded.contains("out"));
@@ -104,7 +104,7 @@ mod tests {
     fn to_typst_with_setup_prepends_a_page_directive() {
         use suite_common_core::print::{Orientation, PageSetup};
         let mut e = TablesEngine::new(2, 2).unwrap();
-        e.set_cell_text(0, 0, "hi");
+        e.set_cell_text(0, 0, "hi").unwrap();
         let landscape = PageSetup { orientation: Orientation::Landscape, ..PageSetup::default() };
         let out = to_typst_with_setup(&e, None, &landscape);
         assert!(out.starts_with("#set page("));
@@ -117,10 +117,10 @@ mod tests {
     #[test]
     fn typst_table_emits_cells_in_row_major_order() {
         let mut e = TablesEngine::new(2, 2).unwrap();
-        e.set_cell_text(0, 0, "r1c1");
-        e.set_cell_text(0, 1, "r1c2");
-        e.set_cell_text(1, 0, "r2c1");
-        e.set_cell_text(1, 1, "r2c2");
+        e.set_cell_text(0, 0, "r1c1").unwrap();
+        e.set_cell_text(0, 1, "r1c2").unwrap();
+        e.set_cell_text(1, 0, "r2c1").unwrap();
+        e.set_cell_text(1, 1, "r2c2").unwrap();
         let out = to_typst(&e);
         // Cells stay in row-major order even though the column count is
         // currently wrong (see issue #176).
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn typst_table_single_cell_grid_is_a_valid_table() {
         let mut e = TablesEngine::new(1, 1).unwrap();
-        e.set_cell_text(0, 0, "solo");
+        e.set_cell_text(0, 0, "solo").unwrap();
         let out = to_typst(&e);
         assert!(out.starts_with("#table("), "missing table header: {out}");
         assert!(out.contains("[solo]"), "cell missing: {out}");
@@ -156,10 +156,10 @@ mod tests {
     #[should_panic(expected = "typst export bug #176: multi-column grid emitted as single column")]
     fn typst_table_multi_column_grid_declares_real_column_count() {
         let mut e = TablesEngine::new(2, 3).unwrap();
-        e.set_cell_text(0, 0, "r1c1");
-        e.set_cell_text(0, 1, "r1c2");
-        e.set_cell_text(0, 2, "r1c3");
-        e.set_cell_text(1, 0, "r2c1");
+        e.set_cell_text(0, 0, "r1c1").unwrap();
+        e.set_cell_text(0, 1, "r1c2").unwrap();
+        e.set_cell_text(0, 2, "r1c3").unwrap();
+        e.set_cell_text(1, 0, "r2c1").unwrap();
         let out = to_typst(&e);
         assert!(
             out.contains("columns: 3"),

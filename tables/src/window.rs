@@ -544,7 +544,9 @@ impl TablesWindow {
                         } else {
                             sh.select_cell(row, col);
                         }
-                        let val = sh.data[row][col].clone();
+                        // The formula bar edits inputs, not displayed
+                        // results: a formula cell shows its formula here.
+                        let val = st.cell_input(row, col);
                         // fx.set_text() fires `changed` synchronously, and
                         // for formula text that handler re-borrows this
                         // same per-sheet RefCell -- drop before calling it.
@@ -1200,16 +1202,13 @@ impl TablesWindow {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, wr2.borrow().as_ref()) {
                                 let path_str = path.to_string_lossy().to_string();
-                                let mut st = s2.borrow_mut();
-                                // Sync sheet data to engine first
-                                let active = st.active_sheet;
-                                let sheet_model = st.sheets[active].borrow().clone();
-                                for r in 0..sheet_model.rows {
-                                    for c in 0..sheet_model.cols {
-                                        st.engine.put_cell_text(r, c, &sheet_model.data[r][c]);
-                                    }
-                                }
-                                st.engine.evaluate();
+                                let st = s2.borrow();
+                                // The engine is the calculation authority;
+                                // the sheet is its projection. Export reads
+                                // the engine — writing displayed values back
+                                // as inputs here used to flatten every
+                                // formula into its current result.
+                                let sheet_model = st.sheets[st.active_sheet].borrow().clone();
                                 let parent_win = wr2.borrow().clone();
                                 if let Err(err_msg) = tables_core::export::to_pdf_with_setup(&st.engine, sheet_model.print_area, &sheet_model.page_setup, &path_str).and_then(|()| suite_common::locations::commit_save(&path)) {
                                     let alert = adw::AlertDialog::builder()
@@ -1232,7 +1231,7 @@ impl TablesWindow {
             let ctl = controller.clone();
             let da = drawing_area.clone();
             Box::new(move || {
-                crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Change Number Format", |sh| {
+                crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Change Number Format", |sh| {
                     let r = sh.selected_row;
                     let c = sh.selected_col;
                     let current = &sh.formats[r][c].kind;
@@ -1246,7 +1245,7 @@ impl TablesWindow {
                         _ => NumberFormatKind::General,
                     };
                     sh.formats[r][c] = NumberFormat::new(next);
-                }));
+                }); });
                 da.queue_draw();
             })
         };
@@ -1255,7 +1254,7 @@ impl TablesWindow {
             let ctl = controller.clone();
             let da = drawing_area.clone();
             Box::new(move || {
-                crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Change Cell Border", |sh| {
+                crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Change Cell Border", |sh| {
                     let r = sh.selected_row;
                     let c = sh.selected_col;
                     let current = &sh.borders[r][c].top;
@@ -1267,7 +1266,7 @@ impl TablesWindow {
                         _ => BorderStyle::None,
                     };
                     sh.borders[r][c] = CellBorder::outline(next, (0.0, 0.0, 0.0));
-                }));
+                }); });
                 da.queue_draw();
             })
         };
@@ -1978,7 +1977,7 @@ impl TablesWindow {
                             None
                         } else {
                             sh.select_cell(nr, nc);
-                            Some(sh.data[nr][nc].clone())
+                            Some(st.cell_input(nr, nc))
                         }
                     };
                     // fx.set_text() fires `changed` synchronously, and for

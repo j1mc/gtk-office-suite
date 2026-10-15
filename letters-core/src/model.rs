@@ -186,6 +186,119 @@ fn is_left(a: &Alignment) -> bool {
     *a == Alignment::Left
 }
 
+/// Where the text after a tab stop sits relative to the stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TabAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+    /// On the decimal separator (OOXML `decimal`, ODF `char`).
+    Decimal,
+}
+
+/// What fills the gap a tab jump leaves (OOXML `w:leader`, ODF
+/// `style:leader-style`/`style:leader-text`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TabLeader {
+    #[default]
+    None,
+    Dot,
+    Hyphen,
+    Underscore,
+    MiddleDot,
+}
+
+/// One tab stop: where the text after a tab goes, how it aligns there,
+/// and what fills the gap. Positions are points from the paragraph's
+/// left edge, as `ParaStyle::tab_stops_pt` keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TabStop {
+    pub pos_pt: f64,
+    #[serde(default)]
+    pub align: TabAlign,
+    #[serde(default)]
+    pub leader: TabLeader,
+}
+
+impl TabStop {
+    /// A plain left-aligned stop with no leader, as the ruler and older
+    /// documents (which stored bare positions) mean.
+    pub fn left(pos_pt: f64) -> Self {
+        Self { pos_pt, align: TabAlign::Left, leader: TabLeader::None }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TabStop {
+    /// Older documents stored bare positions (`[72.0, 144.0]`); those
+    /// read as plain left-aligned stops.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            Pos(f64),
+            Full { pos_pt: f64, #[serde(default)] align: TabAlign, #[serde(default)] leader: TabLeader },
+        }
+        Ok(match Compat::deserialize(deserializer)? {
+            Compat::Pos(pos_pt) => TabStop::left(pos_pt),
+            Compat::Full { pos_pt, align, leader } => TabStop { pos_pt, align, leader },
+        })
+    }
+}
+
+/// A paragraph's line height beyond the proportional multiple
+/// (`ParaStyle::line_spacing`): OOXML's `w:lineRule="exact"` and
+/// `"atLeast"`, in points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LineHeight {
+    /// Every line is exactly this tall; taller content overflows into
+    /// the next line, as Word and Writer draw it.
+    Exact(f64),
+    /// Every line is at least this tall, and taller when its content
+    /// needs it.
+    Minimum(f64),
+}
+
+/// One side of a paragraph's border (OOXML `w:pBdr`, ODF `fo:border-*`):
+/// its look, its colour as RRGGBB hex, and its width in points.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParaBorder {
+    pub style: BorderStyle,
+    pub color: String,
+    pub width_pt: f64,
+}
+
+/// A paragraph border's look. Only the looks both formats name the same
+/// way are modelled; anything else (wave, triple, inset) is a loss the
+/// save dialog reports (`crate::loss`), never a silent restyle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BorderStyle {
+    Single,
+    Dashed,
+    Dotted,
+    Double,
+}
+
+/// A paragraph's borders, one optional edge each (OOXML `w:pBdr`,
+/// ODF `fo:border-top` and its siblings). Empty is no border.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParaBorders {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<ParaBorder>,
+}
+
+impl ParaBorders {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none() && self.left.is_none() && self.bottom.is_none() && self.right.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Alignment {
     #[default]
@@ -247,8 +360,14 @@ pub struct ParaStyle {
     /// "(%1)", ODF's num-prefix and num-suffix. `None` is "N.".
     #[serde(default)]
     pub list_label: Option<ListLabel>,
-    /// Line spacing multiplier (1.0, 1.15, 1.5, 2.0).
+    /// Line spacing multiplier (1.0, 1.15, 1.5, 2.0). Applies to every
+    /// line unless `line_height` fixes the height.
     pub line_spacing: f32,
+    /// A fixed or minimum line height, in points (OOXML `w:lineRule`
+    /// exact/atLeast, ODF `fo:line-height` length /
+    /// `style:line-height-at-least`). `None` is purely proportional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<LineHeight>,
     /// Paragraph layout values in points. Tabs are absolute stops from the
     /// paragraph's left edge, also in points.
     #[serde(default)]
@@ -262,7 +381,7 @@ pub struct ParaStyle {
     #[serde(default)]
     pub first_line_indent_pt: f64,
     #[serde(default)]
-    pub tab_stops_pt: Vec<f64>,
+    pub tab_stops_pt: Vec<TabStop>,
     /// Code-block membership: Some(language) marks this paragraph as a line
     /// of a code block ("" = no language). Consecutive code paragraphs with
     /// the same language form one block; paragraphs never contain newlines,
@@ -289,6 +408,25 @@ pub struct ParaStyle {
     /// Headings are kept with what follows whatever this says.
     #[serde(default)]
     pub keep_with_next: bool,
+    /// Keep this paragraph's lines on one page (Word's keepLines, ODF's
+    /// fo:keep-together): a paragraph that fits a page never splits. One
+    /// taller than a page still splits, as Word splits it.
+    #[serde(default)]
+    pub keep_lines: bool,
+    /// Widow/orphan control for this paragraph alone: `None` is the
+    /// document default (controlled, two and two), `Some(false)` lets a
+    /// split strand single lines (Word's widowControl off, ODF
+    /// fo:widows/fo:orphans of one), `Some(true)` controls explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widow_control: Option<bool>,
+    /// Paragraph shading fill as RRGGBB hex (OOXML `w:shd`, ODF
+    /// fo:background-color on the paragraph style). `None` is unshaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shading: Option<String>,
+    /// Paragraph borders, one edge each (OOXML `w:pBdr`, ODF
+    /// `fo:border-*`). Empty is no border.
+    #[serde(default, skip_serializing_if = "ParaBorders::is_empty")]
+    pub borders: ParaBorders,
     /// A table of contents entry for a heading of this level (1..=9): its
     /// title, a tab and its page number, as `crate::toc` generates it.
     /// Consecutive entries form one table of contents, which is a field in
@@ -306,7 +444,7 @@ pub struct TableCell {
 
 impl Default for ParaStyle {
     fn default() -> Self {
-        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, table_cell: None, keep_with_next: false, toc: None }
+        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, line_height: None, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, table_cell: None, keep_with_next: false, keep_lines: false, widow_control: None, shading: None, borders: ParaBorders::default(), toc: None }
     }
 }
 
@@ -1129,7 +1267,7 @@ pub struct ParagraphLayout {
     pub left_indent_pt: f64,
     pub right_indent_pt: f64,
     pub first_line_indent_pt: f64,
-    pub tab_stops_pt: Vec<f64>,
+    pub tab_stops_pt: Vec<TabStop>,
 }
 
 // ── Cursor style readout (status bar) ─────────────────────────────────
@@ -1273,13 +1411,44 @@ mod structured_editing_tests {
         let mut doc = Document::from_plain_text("layout");
         doc.set_paragraph_layout(0, ParagraphLayout {
             space_before_pt: -2.0, space_after_pt: 8.0, left_indent_pt: 24.0,
-            right_indent_pt: 12.0, first_line_indent_pt: -18.0, tab_stops_pt: vec![72.0, 144.0],
+            right_indent_pt: 12.0, first_line_indent_pt: -18.0, tab_stops_pt: vec![TabStop::left(72.0), TabStop::left(144.0)],
         });
         let style = &doc.paragraphs[0].style;
         assert_eq!(style.space_before_pt, 0.0);
         assert_eq!(style.left_indent_pt, 24.0);
         assert_eq!(style.first_line_indent_pt, -18.0);
-        assert_eq!(style.tab_stops_pt, vec![72.0, 144.0]);
+        assert_eq!(style.tab_stops_pt, vec![TabStop::left(72.0), TabStop::left(144.0)]);
+    }
+
+    #[test]
+    fn legacy_bare_tab_positions_read_as_plain_left_stops() {
+        let style: ParaStyle = serde_json::from_str(
+            r#"{"alignment":"Left","list":"None","line_spacing":1.0,"tab_stops_pt":[72.0,144.0],"block_quote":false,"page_break_before":false}"#,
+        )
+        .expect("older snapshots stored bare positions");
+        assert_eq!(style.tab_stops_pt, vec![TabStop::left(72.0), TabStop::left(144.0)]);
+        assert!(!style.keep_lines);
+        assert_eq!(style.widow_control, None);
+        assert_eq!(style.line_height, None);
+        assert_eq!(style.shading, None);
+        assert!(style.borders.is_empty());
+    }
+
+    #[test]
+    fn new_typography_fields_round_trip_through_json() {
+        let mut style = ParaStyle::default();
+        style.keep_lines = true;
+        style.widow_control = Some(false);
+        style.line_height = Some(LineHeight::Minimum(18.0));
+        style.shading = Some("D9D9D9".to_string());
+        style.borders = ParaBorders {
+            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75 }),
+            ..ParaBorders::default()
+        };
+        style.tab_stops_pt = vec![TabStop { pos_pt: 72.0, align: TabAlign::Right, leader: TabLeader::Dot }];
+        let json = serde_json::to_string(&style).expect("style serializes");
+        let back: ParaStyle = serde_json::from_str(&json).expect("style deserializes");
+        assert_eq!(back, style);
     }
 }
 

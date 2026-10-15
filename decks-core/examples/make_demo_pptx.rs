@@ -7,6 +7,7 @@ fn slide(title: &str, objects: Vec<SlideObject>, notes: &str) -> Slide {
     Slide {
         title: title.to_string(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects,
         notes: notes.to_string(),
         master_id: None,

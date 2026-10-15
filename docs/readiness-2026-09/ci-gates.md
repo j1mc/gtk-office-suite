@@ -53,6 +53,12 @@ Reuse this issue for validator-test wiring, coordinated with #241 (GTK execution
       RustSec gate required would intentionally block non-admin merges until
       #1549 is resolved. The existing `test` requirement was also observed
       directly, not inferred from the repository's YAML.
+      **2026-10-15 (SH-001):** the proposal is no longer prose. It is
+      generated from the workflows' real job names and checked on every
+      pull request — see [the required-check boundary](#the-required-check-boundary-sh-001)
+      below, which also records the API output observed that day (still only
+      `test`). The item stays open until an administrator applies the list;
+      the validator cannot check off a repository setting.
       That list used to omit the very files the gate polices. It enforces
       per-module line ceilings — `letters/src/window.rs`,
       `tables/src/window.rs`, `decks/src/window.rs`,
@@ -305,3 +311,183 @@ One bare `#[ignore]` existed when this was written: `dump_failures` in
 `letters-core/tests/corpus_debug.rs`, a diagnostic printer with no
 assertions. It now says so, and says what gates instead — the
 `markdown_corpus.rs` round-trip ratchet it prints the failures of.
+
+## The required-check boundary (SH-001)
+
+A passing pull request is only as strong as what branch protection requires,
+and on 2026-10-13 that was `test` alone. Re-inspected on **2026-10-15** at
+`main` = `d550048c2931d6a5910d7c42cfbf378f08b28944`:
+
+```
+$ gh api repos/tuna-os/gtk-office-suite/branches/main/protection
+required_status_checks: {"strict": false, "contexts": ["test"],
+                         "checks": [{"context": "test", "app_id": 15368}]}
+enforce_admins: false          required_signatures: false
+required_linear_history: false allow_force_pushes: false
+required_conversation_resolution: true
+(no required_pull_request_reviews; GET repos/.../rulesets returns [])
+```
+
+**Nothing was changed.** Applying a list is a repository-administrator
+decision and a separate settings change from the validator that proposes it
+(SH-001's acceptance keeps them apart). The account that produced this page
+can read the setting; it was deliberately not used to write it.
+
+### Lane evidence, not lane exit codes
+
+Each lane now records *what ran and how it ended*, at *which revision*, and
+the ledger is judged against that record:
+
+| Lane | Workflow → job | Outcomes now read from | Notes |
+|---|---|---|---|
+| `test` | `ci.yml` → `test` | nextest JUnit | unchanged source; now stamped with the revision |
+| `python-checks` | `ci.yml` → `python-checks` | pytest `--junitxml` plus the collection | previously collection only |
+| `smoke` | `gui-tests.yml` → `smoke` | pytest `--junitxml` of the journeys and the harness run | previously collection only; the change-based selection (#108) is recorded as `deselected` and printed, never counted |
+| `oracle` | `nightly.yml` → `oracle` | nextest JUnit (was `cargo test`, whose outcomes nothing could read back) | previously no ledger check at all |
+
+`validate_capabilities.py --lane <job> --collected … --results … --candidate <sha>`
+rejects, for that lane's own namespaces only:
+
+- an inventory with no tests in the lane's namespaces, or a report with no
+  outcomes — a missing result, not a successful empty set;
+- a collected test with no outcome (the run stopped early), unless the lane
+  declares `selective` and the inventory lists it as deselected — and a
+  "deselected" test that did report an outcome, which means the selection
+  listing is not the one that ran;
+- a cited test in the lane's namespaces the run did not collect, whatever the
+  inventory claims to cover;
+- an inventory recorded at another revision, or at none (`--candidate`): an
+  older nightly is evidence about older code.
+
+Statically, on every pull request (`--lanes`):
+
+- **Per-layer namespaces** (`lanes.json` `layers`): a `letters-core::` unit
+  test filed as `gui` evidence is refused even though a lane collects and
+  passes it; the `gui`/`a11y` layers may not share a prefix with
+  `model`/`format`/`persistence`/`bridge`.
+- **Release-critical evidence runs on the candidate**: every test a
+  release-critical capability cites must be in a lane marked
+  `runs_on_candidate` (`test`, `smoke`) — the lanes `release-revision.yml`
+  re-runs at the tag. There, `--every-release-critical-result` treats a
+  release-critical test missing from the reports as never run, rather than
+  as another lane's business, and the journeys step no longer ends in
+  `|| true`.
+
+Each rule has a negative test in `tests/test_validate_capabilities.py`
+(`LayerNamespaces`, `ReleaseCriticalLanes`, `LaneInventories`,
+`LaneScopedEvidence`, `EveryReleaseCriticalResult`,
+`CollectorRecordsRevisionAndSelection`, `MainWithLaneReports`), and
+`TheWorkflowsWireTheChecks` fails if a lane's own job stops passing
+`--results`, `--candidate` or `--revision` — a flag nothing passes is how
+`--require-coverage` and `--head` went dead.
+
+### Failure semantics a required list has to respect
+
+- A required context that **never reports** — a path-filtered workflow, a job
+  skipped by `if:`, PR activity `types` that omit `synchronize` — leaves the
+  check pending and blocks every pull request it did not run on.
+- A job **skipped because a job it needs failed** reports *skipped*, which
+  branch protection counts as passing. Requiring it proves nothing unless
+  what it needs is required too.
+- **One check name from two jobs** satisfies one rule with either.
+- `continue-on-error` marks a job advisory by design.
+- Contexts are pinned to GitHub Actions (`app_id` 15368), as `test` already
+  is, so another app cannot satisfy them by posting a status of that name.
+
+`conformance/required-checks.json` classifies every job a pull request can
+start as `required`, `pending` (should be required; a named issue blocks it)
+or `optional` with a reason, and `conformance/required_checks.py` (run in
+`python-checks`) refuses a classification the workflows contradict: an
+unclassified or vanished job, a required job with any of the gaps above, a
+duplicated or underivable name, or a lane `lanes.json` says runs on every
+revision that is not required. `tests/test_required_checks.py` holds the
+mutation tests and asserts the table below is the generated one.
+
+### The proposal for administrator review
+
+Generated by `python3 conformance/required_checks.py --markdown` — do not edit
+by hand:
+
+<!-- required-checks:begin (generated by conformance/required_checks.py --markdown) -->
+
+| Check name | Workflow → job | Policy | Why |
+|---|---|---|---|
+| `Python validators and their tests` | `ci.yml` → `python-checks` | required | Reports on every pull request; a failure blocks the merge. |
+| `flatpak (decks)` | `ci.yml` → `flatpak` | required | Reports on every pull request; a failure blocks the merge. |
+| `flatpak (letters)` | `ci.yml` → `flatpak` | required | Reports on every pull request; a failure blocks the merge. |
+| `flatpak (tables)` | `ci.yml` → `flatpak` | required | Reports on every pull request; a failure blocks the merge. |
+| `interop-corpus` | `ci.yml` → `interop-corpus` | required | Reports on every pull request; a failure blocks the merge. |
+| `test` | `ci.yml` → `test` | required | Reports on every pull request; a failure blocks the merge. |
+| `smoke` | `gui-tests.yml` → `smoke` | required | Reports on every pull request; a failure blocks the merge. |
+| `Export PDF vs LibreOffice PDF` | `render-parity.yml` → `export-report` | required | Reports on every pull request; a failure blocks the merge. |
+| `Export lab (decks)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Export lab (letters)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Export lab (tables)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Render lab (decks)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Render lab (letters)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Render lab (tables)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Tiers A+B vs LibreOffice` | `render-parity.yml` → `report` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (decks)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (letters)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (tables)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `RustSec advisory gate` | `ci.yml` → `advisories` | pending | #1549: Fails on main today: Typst's direct serde_yaml pulls in unsafe-libyaml (RUSTSEC-2024-0449). Required now, it would block every merge until SH-007 removes or waives the path; the failure must stay visible, not be suppressed. |
+| `drop` | `drop-bot-review-requests.yml` → `drop` | optional | Bot-authored pull requests only, and only on open/reopen/ready: housekeeping, not a check of the change. |
+| `gate` | `feature-verification.yml` → `gate` | optional | Decides whether a verify-video label asked for a recording; it is orchestration, not a verdict about the change. |
+| `image` | `feature-verification.yml` → `image` | optional | Runs only when the verify-video label asks for a recording. |
+| `publish` | `feature-verification.yml` → `publish` | optional | Posts the recorded clips; runs only after a recording. |
+| `record` | `feature-verification.yml` → `record` | optional | Needs the label-gated image job; skipped otherwise. Recording never decides a verdict (docs/CI-VIDEO-EVIDENCE.md). |
+| `corpus (decks)` | `file-corpus.yml` → `corpus` | optional | Path-filtered to the corpus and GUI harness; it reports nothing on other pull requests, so requiring it would block them forever. |
+| `corpus (letters)` | `file-corpus.yml` → `corpus` | optional | Path-filtered to the corpus and GUI harness; it reports nothing on other pull requests, so requiring it would block them forever. |
+| `corpus (tables)` | `file-corpus.yml` → `corpus` | optional | Path-filtered to the corpus and GUI harness; it reports nothing on other pull requests, so requiring it would block them forever. |
+| `build` | `gui-container.yml` → `build` | optional | Path-filtered to the test container's own files. |
+| `vlm-audit (decks)` | `gui-tests.yml` → `vlm-audit` | optional | Scheduled/dispatch only and continue-on-error: model judgments flake and need API keys, so they inform rather than gate (AGENTS.md). |
+| `vlm-audit (letters)` | `gui-tests.yml` → `vlm-audit` | optional | Scheduled/dispatch only and continue-on-error: model judgments flake and need API keys, so they inform rather than gate (AGENTS.md). |
+| `vlm-audit (tables)` | `gui-tests.yml` → `vlm-audit` | optional | Scheduled/dispatch only and continue-on-error: model judgments flake and need API keys, so they inform rather than gate (AGENTS.md). |
+| `Fuzz importer smoke tests` | `nightly.yml` → `fuzz-smoke` | optional | Skipped on pull requests by design (nightly cost). |
+| `coverage` | `nightly.yml` → `coverage` | optional | Skipped on pull requests by design (nightly cost). |
+| `oracle` | `nightly.yml` → `oracle` | optional | Path-filtered to format/model code (runs_on_every_revision: false). release-revision.yml refuses a release whose oracle evidence was recorded at another revision instead. |
+| `Reproducible build (compare)` | `release-gate.yml` → `reproducible-compare` | optional | Path-filtered to release inputs; compares the two reproducible builds. |
+| `Reproducible build (first)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered to release inputs; two full builds per run. |
+| `Reproducible build (second)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered to release inputs; two full builds per run. |
+| `aarch64-tests` | `release-gate.yml` → `aarch64-tests` | optional | Path-filtered to release inputs. |
+| `contract` | `release-gate.yml` → `contract` | optional | Path-filtered to release inputs and the module-ceiling files. Requiring the release contract needs it to report on every pull request first (an unfiltered trigger for this job), which is a cost decision for the administrator. |
+| `offline-flatpak (aarch64, ubuntu-24.04-arm)` | `release-gate.yml` → `offline-flatpak` | optional | Path-filtered to release inputs; offline Flatpak builds on both architectures. |
+| `offline-flatpak (x86_64, ubuntu-24.04)` | `release-gate.yml` → `offline-flatpak` | optional | Path-filtered to release inputs; offline Flatpak builds on both architectures. |
+| `source-archive` | `release-gate.yml` → `source-archive` | optional | Path-filtered to release inputs. |
+| `Flatpak bundle (decks)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Flatpak bundle (letters)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Flatpak bundle (tables)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Prior-release bundle (decks)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Prior-release bundle (letters)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Prior-release bundle (tables)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
+| `Tier C (Flatpak in a GNOME VM)` | `render-parity.yml` → `vm` | optional | Tier C needs the bundles above and is continue-on-error; it never runs on an ordinary pull request. |
+
+<!-- required-checks:end -->
+
+To apply it, an administrator reviews the list and then runs:
+
+```sh
+python3 conformance/required_checks.py --payload > required.json
+gh api -X PATCH repos/tuna-os/gtk-office-suite/branches/main/protection/required_status_checks \
+  --input required.json
+gh api repos/tuna-os/gtk-office-suite/branches/main/protection > protection.json
+python3 conformance/required_checks.py --compare protection.json   # must print MATCHES
+```
+
+Against the 2026-10-15 API output, `--compare` reports the seventeen proposed
+contexts other than `test` as *proposed but not required*. The three
+`Real documents (<app>)` contexts joined the proposal when `render-real.yml`
+stopped being path-filtered: it now starts on every pull request, and an app
+the change cannot reach (`tools/render-lab/real_scope.py`, derived from the
+Cargo manifests) passes in seconds rather than going unreported. Before that,
+DCK-006 (#1574) changed only `decks-core`, the lab did not run, and a real deck
+went from amber to red on `main`. Decisions left to the administrator, not
+made here:
+
+- `RustSec advisory gate` is `pending` on #1549 (SH-007): it fails on `main`,
+  and requiring it now would block every merge. Its failure stays visible.
+- The release contract (`release-gate.yml` → `contract`) cannot be required
+  while its workflow is path-filtered; requiring it means letting it report
+  on every pull request first, which is a runner-cost decision.
+- `smoke` has needed reruns (one on PR #1573's head); requiring it makes a
+  journey flake block merges until it is rerun.

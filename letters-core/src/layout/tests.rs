@@ -2,7 +2,7 @@
 // line, so an A4 page with 1in margins holds 75 chars × 46 lines.
 
 use super::*;
-use crate::model::{Alignment, CellFill, ParaStyle, RowHeight, TableCell};
+use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell};
 
 const LINE: f64 = 15.0;
 const LINES_PER_PAGE: usize = 46;
@@ -774,4 +774,105 @@ fn a_merged_cell_spans_its_columns_and_rows() {
     // Its text is all there, in its column.
     let words: usize = t.pages[0].items.iter().filter_map(|i| match i { Item::Line { text, .. } => Some(text.matches("word").count()), _ => None }).sum();
     assert_eq!(words, 25);
+}
+
+#[test]
+fn a_paragraph_that_keeps_its_lines_moves_whole() {
+    let long = "abcd ".repeat(75); // 5 lines of 75 chars
+    // Room for 2 of 5 lines: orphan control puts 2 here and 3 over.
+    let mut d = doc_of(44, "x");
+    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain(long.trim_end())] });
+    assert_eq!(lines_per_page(&lay(&d)), vec![46, 3]);
+    // Kept together, the whole paragraph moves instead.
+    let mut d = doc_of(44, "x");
+    d.paragraphs.push(Paragraph {
+        style: ParaStyle { keep_lines: true, ..Default::default() },
+        runs: vec![Run::plain(long.trim_end())],
+    });
+    assert_eq!(lines_per_page(&lay(&d)), vec![44, 5]);
+}
+
+#[test]
+fn a_paragraph_without_widow_control_may_strand_single_lines() {
+    let long = "abcd ".repeat(75); // 5 lines of 75 chars
+    // Room for one line: an orphan, so the whole paragraph moves.
+    let mut d = doc_of(45, "x");
+    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain(long.trim_end())] });
+    assert_eq!(lines_per_page(&lay(&d)), vec![45, 5]);
+    // Uncontrolled, the one line stays and four go over.
+    let mut d = doc_of(45, "x");
+    d.paragraphs.push(Paragraph {
+        style: ParaStyle { widow_control: Some(false), ..Default::default() },
+        runs: vec![Run::plain(long.trim_end())],
+    });
+    assert_eq!(lines_per_page(&lay(&d)), vec![46, 4]);
+}
+
+#[test]
+fn exact_and_minimum_line_heights_size_lines() {
+    let mut d = doc_of(3, "x");
+    d.paragraphs[0].style.line_height = Some(LineHeight::Exact(30.0));
+    d.paragraphs[1].style.line_height = Some(LineHeight::Minimum(30.0));
+    d.paragraphs[2].style.line_height = Some(LineHeight::Minimum(5.0));
+    let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
+    // A fixed 30pt line, a 30pt minimum, and a 5pt minimum the 15pt
+    // natural line outgrows.
+    assert_eq!(tops, vec![72.0, 102.0, 132.0]);
+}
+
+#[test]
+fn tab_requests_carry_alignment_and_default_grid() {
+    let mut d = doc_of(1, "a\tb");
+    d.paragraphs[0].style.tab_stops_pt =
+        vec![TabStop { pos_pt: 100.0, align: TabAlign::Right, leader: TabLeader::Dot }];
+    let o = opts();
+    let req = paragraph_request(&d.paragraphs[0], 400.0, &o);
+    assert_eq!(req.tab_stops[0], TabStop { pos_pt: 100.0, align: TabAlign::Right, leader: TabLeader::Dot });
+    // Word's default grid resumes past the paragraph's own stops.
+    assert_eq!(req.tab_stops[1], TabStop::left(108.0));
+    assert!(req.tab_stops.windows(2).all(|w| w[0].pos_pt < w[1].pos_pt), "stops in order: {:?}", req.tab_stops);
+    assert!(req.tab_stops.iter().all(|t| t.pos_pt > 0.0 && t.pos_pt < 400.0));
+}
+
+/// A paragraph's shading/border boxes: (paragraph, fill, top edge,
+/// bottom edge), in page order.
+fn para_boxes(t: &RenderTree) -> Vec<(usize, Option<String>, bool, bool)> {
+    t.pages
+        .iter()
+        .flat_map(|p| &p.items)
+        .filter_map(|i| match i {
+            Item::ParaBox { para, fill, top_edge, bottom_edge, .. } => Some((*para, fill.clone(), *top_edge, *bottom_edge)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn shaded_paragraphs_draw_one_box_per_page() {
+    let mut d = doc_of(46, "x");
+    d.paragraphs[0].style.shading = Some("D9D9D9".into());
+    assert_eq!(
+        para_boxes(&lay(&d)),
+        vec![(0, Some("D9D9D9".into()), true, true)],
+        "one box under the shaded paragraph's lines"
+    );
+}
+
+#[test]
+fn bordered_paragraphs_open_their_box_where_they_split() {
+    let long = "abcd ".repeat(75); // 5 lines: 2 here, 3 over
+    let mut d = doc_of(44, "x");
+    d.paragraphs.push(Paragraph {
+        style: ParaStyle {
+            borders: ParaBorders {
+                bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 0.75 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        runs: vec![Run::plain(long.trim_end())],
+    });
+    let t = lay(&d);
+    assert_eq!(lines_per_page(&t), vec![46, 3]);
+    assert_eq!(para_boxes(&t).iter().map(|b| (b.2, b.3)).collect::<Vec<_>>(), vec![(true, false), (false, true)]);
 }

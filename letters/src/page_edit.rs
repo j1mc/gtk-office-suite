@@ -647,7 +647,7 @@ mod tests {
             let styles = |buf: &gtk::TextBuffer| -> Vec<(f32, Vec<f64>)> {
                 let live = crate::live::of(buf).unwrap();
                 let m = live.borrow();
-                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.clone())).collect()
+                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.iter().map(|t| t.pos_pt).collect())).collect()
             };
             let before = { let m = live.borrow(); m.foreign_edits };
 
@@ -666,6 +666,32 @@ mod tests {
             assert_eq!(styles(&buf).iter().map(|s| s.0).collect::<Vec<_>>(), vec![1.15, 1.15, 1.15]);
             crate::live::undo(&buf, false);
             assert_eq!(styles(&buf).iter().map(|s| s.0).collect::<Vec<_>>(), vec![1.0, 1.5, 1.0]);
+        });
+    }
+
+    /// Keep-lines and widow-control toggles are the caret's paragraph
+    /// as model ops: each toggle is one history transaction, and one
+    /// undo takes each back.
+    #[test]
+    fn keep_lines_and_widow_control_are_model_ops_with_undo() {
+        gtk_test(|| {
+            let (_view, buf) = editable("one\ntwo");
+            let style = |buf: &gtk::TextBuffer| {
+                let live = crate::live::of(buf).unwrap();
+                let m = live.borrow();
+                let s = &m.document().paragraphs[1].style;
+                (s.keep_lines, s.widow_control)
+            };
+            // The caret inside "two".
+            buf.place_cursor(&buf.iter_at_offset(5));
+            assert!(crate::actions::toggle_keep_lines_in(&buf));
+            assert_eq!(style(&buf), (true, None));
+            assert!(crate::actions::toggle_widow_control_in(&buf));
+            assert_eq!(style(&buf), (true, Some(false)));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (true, None));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (false, None));
         });
     }
 

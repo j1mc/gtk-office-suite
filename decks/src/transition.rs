@@ -354,12 +354,13 @@ mod tests {
             w: 100.0,
             h: 100.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let (red, blue) = (Color(220, 0, 0), Color(0, 0, 220));
         let slide = |objects| Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects,
             notes: String::new(),
             master_id: None,

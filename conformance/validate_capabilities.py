@@ -30,6 +30,21 @@ claims are real:
       the namespaces the report covers must have passed. A release whose
       release-critical test was skipped, failed or never ran is refused
       (#1207). `release_critical` must be a boolean wherever it appears.
+      With --every-release-critical-result the report has to hold *every*
+      release-critical test: one it does not cover is missing, not another
+      lane's business (SH-001). And with --lanes, every release-critical
+      test has to sit in a lane that runs on the release candidate
+      (`runs_on_candidate`), or nothing at the candidate could prove it.
+  C8  (with --lanes) Each evidence layer has its own namespaces
+      (lanes.json `layers`): a core-crate test cannot be filed as `gui`
+      evidence, nor a journey as `model`, and the GUI-facing layers may not
+      share a namespace with the core layers (SH-001).
+  C9  (with --lane and --collected) A lane's inventory is a record of one
+      run at one revision. It must contain tests in the lane's namespaces,
+      every collected test needs an outcome (unless the lane declares
+      change-based selection and the inventory lists it as deselected), and
+      with --candidate it must have been recorded at that revision. Missing,
+      empty and stale inventories are errors, not successful empty sets.
 
 Exit code is non-zero on any violation, so CI can gate on it.
 
@@ -41,6 +56,10 @@ Usage:
   python3 conformance/validate_capabilities.py --results results.json  # + C4
   python3 conformance/validate_capabilities.py --release-critical \\
       --collected inventory.json --results results.json              # + C7
+  python3 conformance/validate_capabilities.py --lanes conformance/lanes.json  # + C3b, C7, C8
+  python3 conformance/validate_capabilities.py --lanes conformance/lanes.json \\
+      --lane test --collected inventory.json --results results.json \\
+      --candidate SHA                                                  # + C9
 """
 
 import argparse
@@ -60,6 +79,11 @@ STATUSES = {"verified", "implemented-unverified", "failing", "deferred"}
 # checkpoints): kept apart from `format` so a green round trip cannot stand
 # in for an unproven save (#1207).
 LAYERS = ("model", "format", "persistence", "bridge", "gui", "a11y", "performance")
+# C8: evidence for the layers a user sees (an AT-SPI journey) may never share
+# a namespace with the layers that run without a window, or a passing unit
+# test would satisfy a journey requirement.
+UI_LAYERS = ("gui", "a11y")
+CORE_LAYERS = ("model", "format", "persistence", "bridge")
 # Tests of the save transaction itself — the atomic replace, the autosave
 # snapshot and its recovery. Filed under `model` or `format` they would let a
 # green round trip stand in for an unproven save, which is why `persistence`
@@ -157,8 +181,30 @@ def lane_row(lanes: dict, job: str) -> dict:
     return {}
 
 
+def in_lane(row: dict, test: str) -> bool:
+    """Whether `test` is in the lane's namespaces and not in its excludes."""
+    excludes = tuple(row.get("excludes", []))
+    return (test.startswith(tuple(row.get("namespaces", [])))
+            and not (excludes and test.startswith(excludes)))
+
+
+def lane_scope(lanes: dict, jobs) -> tuple:
+    """The namespaces the named lanes collect, and the ones they exclude.
+
+    A lane speaks for exactly its own namespaces: a crate-level `covers` in
+    an inventory does not let the oracle's report pass judgement on the
+    model tests in the same crate, and a test in the lane's namespace that
+    the run did not collect is the lane's to answer for, whatever the
+    inventory says it covers.
+    """
+    rows = [lane_row(lanes, job) for job in jobs]
+    namespaces = tuple(n for row in rows for n in row.get("namespaces", []))
+    excludes = tuple(n for row in rows for n in row.get("excludes", []))
+    return namespaces, excludes
+
+
 def check_collected(ledger: dict, inventory: dict, require_coverage: bool,
-                    excluded=()) -> list:
+                    excluded=(), scope=None) -> list:
     """C3: every referenced test exists in what CI collected.
 
     An inventory declares the id namespaces it covers, so the job that ran
@@ -166,6 +212,12 @@ def check_collected(ledger: dict, inventory: dict, require_coverage: bool,
     anything about the pytest ones. `require_coverage` is for the job that
     holds every inventory: there, an id nobody covers is itself a finding —
     a claim resting on a test no lane runs.
+
+    `scope` is the namespaces of the lane(s) being validated (lane_scope).
+    With it, a cited test in those namespaces must have been collected
+    whatever the inventory claims to cover — a run whose inventory quietly
+    omits a file the lane is declared to collect would otherwise vouch for
+    it by silence — and a test outside them is another lane's to judge.
     """
     errors = []
     collected = set(inventory.get("tests", []))
@@ -181,6 +233,16 @@ def check_collected(ledger: dict, inventory: dict, require_coverage: bool,
                 # skipped, when LibreOffice is absent — would count as
                 # evidence here.
                 if excluded and test.startswith(excluded):
+                    continue
+                if scope is not None:
+                    if not test.startswith(tuple(scope)):
+                        continue
+                    if test not in collected:
+                        errors.append(
+                            f"{feature.get('id')}: {layer} names {test!r}, which is in this "
+                            "lane's namespaces but its run did not collect it (renamed, "
+                            "deleted, or the lane stopped collecting it)"
+                        )
                     continue
                 covered = not covers or test.startswith(covers)
                 if not covered:
@@ -233,6 +295,99 @@ def check_lane_coverage(ledger: dict, lanes: dict) -> list:
     return errors
 
 
+def cited_tests(ledger: dict):
+    """(feature, layer, test) for every test the ledger cites."""
+    for feature in ledger.get("features", []):
+        for layer, tests in (feature.get("evidence") or {}).items():
+            for test in tests:
+                yield feature, layer, test
+
+
+def check_layer_namespaces(ledger: dict, lanes: dict) -> list:
+    """C8: each layer is satisfied only by tests of that layer's kind.
+
+    A layer is a label on the claim; without a namespace behind it a
+    `letters-core::` unit test filed under `gui` satisfied a journey
+    requirement, and every lane accepted it because the id was collected
+    and passed. The lane map's `layers` names the id prefixes each layer
+    may cite, and the GUI-facing layers may not share one with the core
+    layers — otherwise the separation is a matter of which prefix happened
+    to be listed first.
+    """
+    layers = (lanes or {}).get("layers")
+    if not isinstance(layers, dict) or not layers:
+        return ["lane map declares no per-layer namespaces (conformance/lanes.json "
+                "`layers`), so a core test could stand in for a journey"]
+    errors = []
+    for layer in LAYERS:
+        prefixes = layers.get(layer)
+        if (not isinstance(prefixes, list) or not prefixes
+                or any(not str(p).strip() for p in prefixes)):
+            errors.append(f"layer {layer!r} declares no namespaces in the lane map, so "
+                          "nothing could tell its evidence from another layer's")
+    for layer in layers:
+        if layer not in LAYERS:
+            errors.append(f"lane map declares namespaces for unknown layer {layer!r}")
+    for ui in UI_LAYERS:
+        for core in CORE_LAYERS:
+            for a in layers.get(ui) or []:
+                for b in layers.get(core) or []:
+                    if a.startswith(b) or b.startswith(a):
+                        errors.append(
+                            f"layer {ui!r} shares namespace {a!r} with {core!r} ({b!r}) — "
+                            f"a {core} test could satisfy a {ui} requirement"
+                        )
+    if errors:
+        return errors
+    for feature, layer, test in cited_tests(ledger):
+        prefixes = tuple(layers.get(layer) or ())
+        if prefixes and not test.startswith(prefixes):
+            errors.append(
+                f"{feature.get('id')}: {test!r} is filed as {layer} evidence but is not in "
+                f"that layer's namespaces {list(prefixes)} — a test of another layer "
+                "cannot satisfy it"
+            )
+    return errors
+
+
+def check_release_critical_lanes(ledger: dict, lanes: dict) -> list:
+    """C7, statically: release-critical evidence runs on the candidate.
+
+    `release-revision.yml` re-runs the lanes marked `runs_on_candidate` at
+    the revision being released. A release-critical capability citing a
+    test in any other lane — the scheduled oracle, or a validator test no
+    release job runs — can only be "proven" by a result from some other
+    revision, so it is refused here, on every pull request, rather than at
+    tag time.
+    """
+    rows = (lanes or {}).get("lanes", [])
+    undeclared = [row.get("job") for row in rows
+                  if not isinstance(row.get("runs_on_candidate"), bool)]
+    if undeclared:
+        return [
+            f"lane {job!r} does not say whether it runs on the release candidate "
+            "(conformance/lanes.json: runs_on_candidate)"
+            for job in undeclared
+        ]
+    candidate = [row for row in rows if row["runs_on_candidate"]]
+    if not candidate:
+        return ["no lane runs on the release candidate, so nothing release-critical "
+                "could be proven at the revision being released"]
+    errors = []
+    for feature in ledger.get("features", []):
+        if feature.get("release_critical") is not True or feature.get("status") == "deferred":
+            continue
+        for layer, tests in (feature.get("evidence") or {}).items():
+            for test in tests:
+                if not any(in_lane(row, test) for row in candidate):
+                    errors.append(
+                        f"{feature.get('id')}: release-critical, but {layer} test {test!r} "
+                        "is in no lane that runs on the release candidate — no result at "
+                        "the released revision could prove it"
+                    )
+    return errors
+
+
 def check_lane_declaration(lanes: dict, job: str, inventory: dict) -> list:
     """The lane map has to match what the lane really collected.
 
@@ -253,6 +408,101 @@ def check_lane_declaration(lanes: dict, job: str, inventory: dict) -> list:
                     f"collected {list(actual)!r} — the lane map is out of date"
                 )
     return errors
+
+
+def check_lane_inventory(lanes: dict, jobs, inventory: dict, results: dict | None,
+                         candidate: str | None) -> list:
+    """C9: a lane's inventory is a record of one complete run at one revision.
+
+    Everything else here judges cited tests against an inventory, and holds
+    vacuously when the inventory is empty: a lane whose collector found
+    nothing, or whose run died before writing outcomes, offered "no failing
+    evidence" and passed. So:
+
+    - the run must have collected tests in the lane's namespaces;
+    - with results, every collected test needs an outcome — a test that was
+      collected and never reported did not run, whatever the step's exit
+      code says. The one exception is a lane that declares change-based
+      selection (`selective`), whose inventory names the tests it
+      deliberately left out (`deselected`); those are reported, never
+      counted as passing;
+    - with a candidate revision, the inventory must say it was recorded at
+      that revision. An older nightly's inventory is evidence about older
+      code, not about the candidate.
+    """
+    jobs = list(jobs)
+    rows = [lane_row(lanes, job) for job in jobs]
+    label = "+".join(jobs)
+
+    def in_scope(test):
+        return any(in_lane(row, test) for row in rows)
+
+    errors = []
+    collected = sorted(t for t in inventory.get("tests", []) if in_scope(t))
+    if not collected:
+        errors.append(
+            f"lane {label!r} collected no tests in its namespaces — an empty inventory "
+            "is a missing result, not a pass"
+        )
+    deselected = set(inventory.get("deselected", []))
+    if deselected:
+        if not all(row.get("selective") is True for row in rows):
+            errors.append(
+                f"lane {label!r} lists {len(deselected)} deselected tests but does not "
+                "declare change-based selection (conformance/lanes.json: selective), so "
+                "an unrun test cannot be excused"
+            )
+        stray = sorted(deselected - set(inventory.get("tests", [])))
+        if stray:
+            errors.append(
+                f"lane {label!r} deselected {len(stray)} tests it never collected, e.g. "
+                f"{stray[0]!r} — a selection has to be taken from the collection"
+            )
+    if results is not None and collected:
+        reported = [t for t in collected if t in results]
+        if not reported:
+            errors.append(
+                f"lane {label!r} recorded no outcome for any of its {len(collected)} "
+                "collected tests — a run that reported nothing is missing, not passing"
+            )
+        else:
+            contradicted = sorted(deselected & set(results))
+            if contradicted:
+                errors.append(
+                    f"lane {label!r} reported outcomes for {len(contradicted)} tests its "
+                    f"selection says it left out, e.g. {contradicted[0]!r} — the selection "
+                    "listing is not the one that ran"
+                )
+            unreported = [t for t in collected if t not in results and t not in deselected]
+            if unreported:
+                errors.append(
+                    f"lane {label!r}: {len(unreported)} collected tests have no recorded "
+                    f"outcome (the run stopped early or never ran them), e.g. "
+                    f"{', '.join(repr(t) for t in unreported[:3])}"
+                )
+    if candidate is not None:
+        errors += check_inventory_revision(inventory, candidate, f"lane {label!r}")
+    return errors
+
+
+def check_inventory_revision(inventory: dict, candidate: str, label: str) -> list:
+    """An inventory certifies only the revision it was recorded at."""
+    recorded = str(inventory.get("revision", "")).strip()
+    if not recorded:
+        return [f"{label}: the inventory does not say which revision it was recorded "
+                f"at, so it cannot certify {candidate[:12]}"]
+    if not _same_revision(recorded, candidate):
+        return [f"{label}: the inventory was recorded at {recorded[:12]}, validating "
+                f"{candidate[:12]} — results from another revision are stale, not "
+                "evidence for this one"]
+    return []
+
+
+def deselected_citations(ledger: dict, inventory: dict) -> list:
+    """Cited tests the lane's selection deliberately did not run here."""
+    deselected = set(inventory.get("deselected", []))
+    return sorted({(feature.get("id"), test)
+                   for feature, _, test in cited_tests(ledger) if test in deselected})
 
 
 def check_release_revision(ledger: dict, lanes: dict, revision: str) -> list:
@@ -338,16 +588,21 @@ def check_release_revision(ledger: dict, lanes: dict, revision: str) -> list:
 
 
 def check_results(ledger: dict, results: dict, layers: set, covers=(),
-                  excluded=()) -> list:
+                  excluded=(), scope=None, deselected=()) -> list:
     """C4: a skipped or failing test is not evidence.
 
     `covers` scopes the check to the namespaces the report speaks for, the
     same way check_collected does: a Rust report saying nothing about a
-    pytest id means "not mine", not "never ran".
+    pytest id means "not mine", not "never ran". `scope` (lane_scope) is
+    stricter and replaces it: inside the lane's namespaces a missing result
+    is an error whatever the report claims to cover. `deselected` are the
+    tests a selective lane's inventory says it deliberately did not run;
+    they are reported by the caller, and are never a pass.
     """
     errors = []
     covers = tuple(covers)
     excluded = tuple(excluded)
+    deselected = set(deselected)
     for feature in ledger.get("features", []):
         if feature.get("status") != "verified":
             continue
@@ -355,9 +610,14 @@ def check_results(ledger: dict, results: dict, layers: set, covers=(),
             if layers and layer not in layers:
                 continue
             for test in tests:
-                if covers and not test.startswith(covers):
+                if scope is not None:
+                    if not test.startswith(tuple(scope)):
+                        continue
+                elif covers and not test.startswith(covers):
                     continue
                 if excluded and test.startswith(excluded):
+                    continue
+                if test in deselected and test not in results:
                     continue
                 outcome = results.get(test)
                 if outcome is None:
@@ -398,13 +658,20 @@ def check_waivers(ledger: dict, today: date) -> list:
     return errors
 
 
-def check_release_critical(ledger: dict, results: dict | None, covers=(), excluded=()) -> list:
+def check_release_critical(ledger: dict, results: dict | None, covers=(), excluded=(),
+                           scope=None, complete=False) -> list:
     """C7: nothing release-critical ships unproven.
 
     A release-critical capability is verified, or deferred under a waiver
     (whose fields and date C5 checks). With *results*, every test it cites
     in the namespaces the report covers must have passed: a skipped test is
     a refused release, not a footnote.
+
+    `complete` is for the job that runs every release-critical lane at the
+    candidate (release-revision.yml): there no test is another lane's
+    business. A test the report lacks never ran, and one in a namespace
+    this run excludes reported an outcome that is not evidence — the
+    oracle targets "pass" by returning early without LibreOffice.
     """
     errors = []
     critical = [f for f in ledger.get("features", []) if f.get("release_critical") is True]
@@ -422,8 +689,25 @@ def check_release_critical(ledger: dict, results: dict | None, covers=(), exclud
             continue
         if results is None:
             continue
+        if complete:
+            for layer, tests in (feature.get("evidence") or {}).items():
+                for test in tests:
+                    if excluded and test.startswith(tuple(excluded)):
+                        errors.append(
+                            f"release-critical {fid}: {test} is in a namespace this run "
+                            "excludes, so its outcome here is not evidence"
+                        )
+                        continue
+                    outcome = results.get(test)
+                    if outcome is None:
+                        errors.append(f"release-critical {fid}: {test} has no recorded result "
+                                      "at this revision — it never ran")
+                    elif str(outcome).lower() not in PASSING:
+                        errors.append(f"release-critical {fid}: {test} was {outcome}")
+            continue
         sub = {"schema": 1, "features": [feature], "waivers": []}
-        errors += [f"release-critical {e}" for e in check_results(sub, results, set(), covers, excluded)]
+        errors += [f"release-critical {e}"
+                   for e in check_results(sub, results, set(), covers, excluded, scope)]
     return errors
 
 
@@ -475,6 +759,22 @@ def load_inventory(path: Path) -> dict:
     return data
 
 
+def load_report(path: Path, loader, errors: list):
+    """Load a lane's report, or record that the lane never wrote it.
+
+    A report that is not there is a run that did not finish, so it is a
+    finding rather than a traceback — and certainly not an empty set.
+    """
+    try:
+        return loader(path)
+    except FileNotFoundError:
+        errors.append(f"{path}: no such report — a lane that did not write its results "
+                      "has not passed")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        errors.append(f"{path}: unreadable report ({e})")
+    return None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -491,18 +791,34 @@ def main(argv=None) -> int:
     parser.add_argument("--gui-test-dir", type=Path, default=GUI_TEST_DIR)
     parser.add_argument("--lanes", type=Path,
                         help="lane map (conformance/lanes.json): every cited test must "
-                             "be in a namespace some CI lane collects")
-    parser.add_argument("--lane",
-                        help="with --lanes and --collected: also assert this job's "
-                             "declared namespaces match what it actually collected")
+                             "be in a namespace some CI lane collects, in its layer's "
+                             "namespaces, and release-critical ones in a candidate lane")
+    parser.add_argument("--lane", action="append", default=[],
+                        help="with --lanes and --collected: judge exactly this job's "
+                             "namespaces, assert its declaration matches what it collected, "
+                             "and require a complete inventory (repeatable)")
+    parser.add_argument("--candidate",
+                        help="with --collected: the revision this run is evidence for; an "
+                             "inventory recorded at another revision, or at none, is stale")
     parser.add_argument("--release-critical", action="store_true",
                         help="C7: refuse unless every release-critical capability is verified "
                              "(or waived) and, with --results, every one of its tests passed")
+    parser.add_argument("--every-release-critical-result", action="store_true",
+                        help="with --release-critical and --results: every release-critical "
+                             "test must have passed in this report; none is another lane's")
     parser.add_argument("--release-revision",
                         help="with --lanes: refuse to certify this revision with claims "
                              "whose evidence comes from a lane that does not run on "
                              "pull requests unless it was recorded at this revision")
     args = parser.parse_args(argv)
+    if args.lane and (args.lanes is None or args.collected is None):
+        parser.error("--lane needs --lanes and --collected: a lane judged without its map "
+                     "or its inventory proves nothing")
+    if args.candidate and args.collected is None:
+        parser.error("--candidate needs --collected: it is the inventory's revision that "
+                     "is checked")
+    if args.every_release_critical_result and not (args.release_critical and args.results):
+        parser.error("--every-release-critical-result needs --release-critical and --results")
 
     ledger = load_ledger(args.ledger)
     layers = set(args.layer)
@@ -515,25 +831,44 @@ def main(argv=None) -> int:
     lanes = json.loads(args.lanes.read_text()) if args.lanes else None
     if lanes is not None:
         errors += check_lane_coverage(ledger, lanes)
+        errors += check_layer_namespaces(ledger, lanes)
+        errors += check_release_critical_lanes(ledger, lanes)
     if args.release_revision:
         if lanes is None:
             parser.error("--release-revision needs --lanes to know which lanes are scheduled")
         errors += check_release_revision(ledger, lanes, args.release_revision)
-    excluded = tuple(lane_row(lanes, args.lane).get("excludes", [])) if args.lane else ()
+    scope, excluded = lane_scope(lanes, args.lane) if args.lane else (None, ())
+    inventory = None
     if args.collected:
-        inventory = load_inventory(args.collected)
-        errors += check_collected(ledger, inventory, args.require_coverage, excluded)
-        if lanes is not None and args.lane:
-            errors += check_lane_declaration(lanes, args.lane, inventory)
+        inventory = load_report(args.collected, load_inventory, errors)
     results = None
-    covers = load_inventory(args.collected).get("covers", []) if args.collected else []
     if args.results:
-        with open(args.results) as f:
-            results = json.load(f)
-        errors += check_results(ledger, results, layers, covers, excluded)
+        results = load_report(args.results, lambda p: json.loads(Path(p).read_text()), errors)
+    covers = inventory.get("covers", []) if inventory else []
+    deselected = inventory.get("deselected", []) if inventory else []
+    if inventory is not None:
+        errors += check_collected(ledger, inventory, args.require_coverage, excluded, scope)
+        for job in args.lane:
+            errors += check_lane_declaration(lanes, job, inventory)
+        if args.lane:
+            errors += check_lane_inventory(lanes, args.lane, inventory, results,
+                                           args.candidate)
+        elif args.candidate:
+            errors += check_inventory_revision(inventory, args.candidate, "inventory")
+    if results is not None:
+        errors += check_results(ledger, results, layers, covers, excluded, scope, deselected)
     if args.release_critical:
-        errors += check_release_critical(ledger, results, covers, excluded)
+        errors += check_release_critical(ledger, results, covers, excluded, scope,
+                                         complete=args.every_release_critical_result)
 
+    if inventory is not None:
+        unrun = deselected_citations(ledger, inventory)
+        if unrun:
+            print(f"Not selected on this revision ({len(unrun)} cited tests; the lane's "
+                  "change-based selection left them out, so this run is not evidence "
+                  "for them):")
+            for fid, test in unrun:
+                print(f"  - {fid}: {test}")
     if errors:
         print("CAPABILITY LEDGER VALIDATION FAILED")
         for e in errors:
@@ -542,23 +877,29 @@ def main(argv=None) -> int:
 
     features = ledger.get("features", [])
     verified = [f for f in features if f.get("status") == "verified"]
-    scope = f" ({', '.join(sorted(layers))} layers)" if layers else ""
+    layer_scope = f" ({', '.join(sorted(layers))} layers)" if layers else ""
     checked = "structure"
     if args.head:
         checked += ", revisions"
     if lanes is not None:
-        checked += ", lane coverage"
+        checked += ", lane coverage, layer namespaces, candidate lanes"
     if args.release_revision:
         checked += f", release revision {args.release_revision[:12]}"
     if args.collected:
         checked += ", collected tests"
+    if args.lane:
+        checked += f", {'+'.join(args.lane)} lane inventory"
+    if args.candidate:
+        checked += f" at {args.candidate[:12]}"
     if args.results:
         checked += ", results"
     if args.release_critical:
         critical = sum(1 for f in features if f.get("release_critical") is True)
         checked += f", {critical} release-critical"
+        if args.every_release_critical_result:
+            checked += " (every result required)"
     print(f"CAPABILITY LEDGER OK: {len(verified)}/{len(features)} verified; "
-          f"checked {checked}{scope}")
+          f"checked {checked}{layer_scope}")
     return 0
 
 

@@ -110,6 +110,8 @@ impl LettersWindow {
             ("app.list-restart-numbering", &suite_common::i18n("Restart Numbering")),
             ("app.insert-page-break", &suite_common::i18n("Insert Page Break")),
             ("app.cycle-line-spacing", &suite_common::i18n("Cycle Line Spacing")),
+            ("app.keep-lines-together", &suite_common::i18n("Keep Lines Together")),
+            ("app.widow-control", &suite_common::i18n("Widow and Orphan Control")),
             ("app.cycle-columns", &suite_common::i18n("Cycle Column Layout")),
             ("app.increase-font", &suite_common::i18n("Increase Font Size")),
             ("app.decrease-font", &suite_common::i18n("Decrease Font Size")),
@@ -511,6 +513,20 @@ impl LettersWindow {
             app.add_action(&a);
         }
 
+        // ── Keep-lines-together and widow-control toggles ──────────
+        for (name, toggle) in [
+            ("keep-lines-together", crate::actions::toggle_keep_lines_in as fn(&gtk::TextBuffer) -> bool),
+            ("widow-control", crate::actions::toggle_widow_control_in as fn(&gtk::TextBuffer) -> bool),
+        ] {
+            let tv = tab_view.clone();
+            let a = gtk::gio::SimpleAction::new(name, None);
+            a.connect_activate(move |_, _| {
+                if let Some(buf) = active_buffer(&tv) {
+                    toggle(&buf);
+                }
+            });
+            app.add_action(&a);
+        }
         // ── Columns action ────────────────────────────────────────
         {
             let a = gtk::gio::SimpleAction::new("cycle-columns", None);

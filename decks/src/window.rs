@@ -54,6 +54,7 @@ impl DecksWindow {
             vec![Slide {
                 title: "Slide 1".into(),
                 background: "#ffffff".into(),
+                background_picture: None,
                 objects: vec![],
                 notes: String::new(),
                 master_id: None,
@@ -68,7 +69,8 @@ impl DecksWindow {
                 background: "#ffffff".into(),
                 default_font: MasterSlide::DEFAULT_FONT.into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
         ));
@@ -773,6 +775,7 @@ impl DecksWindow {
                 let new_slide = Slide {
                     title: format!("Slide {}", idx + 1),
                     background: "#ffffff".into(),
+                    background_picture: None,
                     objects: vec![],
                     notes: String::new(),
                     master_id: None,
@@ -1112,6 +1115,7 @@ impl DecksWindow {
                     *slides = vec![Slide {
                         title: "Slide 1".into(),
                         background: "#ffffff".into(),
+                        background_picture: None,
                         objects: vec![],
                         notes: String::new(),
                         master_id: None,

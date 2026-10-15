@@ -60,7 +60,7 @@ proptest! {
         let mut engine = TablesEngine::new(ROWS, COLS).unwrap();
         for (r, row) in grid.iter().enumerate() {
             for (c, val) in row.iter().enumerate() {
-                engine.set_cell_text(r, c, val);
+                engine.set_cell_text(r, c, val).unwrap();
             }
         }
         engine.evaluate();
@@ -95,7 +95,7 @@ proptest! {
 
         for (r, row) in grid.iter().enumerate() {
             for (c, value) in row.iter().enumerate() {
-                engine.set_cell_text(r, c, value);
+                engine.set_cell_text(r, c, value).unwrap();
             }
         }
         engine.evaluate();

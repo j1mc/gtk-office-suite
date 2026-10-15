@@ -4,7 +4,7 @@
 use gtk4::cairo;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use decks_core::engine::{Slide, SlideObject, MasterSlide};
+use decks_core::engine::{BackgroundPicture, Slide, SlideObject, MasterSlide};
 use decks_core::engine::Run;
 
 // ── Image loading with cache ─────────────────────────────────────────
@@ -12,6 +12,72 @@ use decks_core::engine::Run;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, cairo::ImageSurface>> =
         RefCell::new(HashMap::new());
+    /// Each background picture's mean colour, by path: what text drawn
+    /// over it contrasts with. Read once from a small resample.
+    static MEAN_CACHE: RefCell<HashMap<String, (f64, f64, f64)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// A picture's mean colour, 0..1 per channel, from a 16×16 resample of
+/// it composited over white (a transparent picture shows the slide).
+fn mean_rgb(path: &str, surf: &cairo::ImageSurface) -> Option<(f64, f64, f64)> {
+    if let Some(m) = MEAN_CACHE.with(|c| c.borrow().get(path).copied()) {
+        return Some(m);
+    }
+    const N: i32 = 16;
+    let (iw, ih) = (f64::from(surf.width()), f64::from(surf.height()));
+    if iw < 1.0 || ih < 1.0 {
+        return None;
+    }
+    let mut small = cairo::ImageSurface::create(cairo::Format::ARgb32, N, N).ok()?;
+    {
+        let cr = cairo::Context::new(&small).ok()?;
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.paint().ok()?;
+        cr.scale(f64::from(N) / iw, f64::from(N) / ih);
+        cr.set_source_surface(surf, 0.0, 0.0).ok()?;
+        cr.paint().ok()?;
+    }
+    let stride = small.stride() as usize;
+    let data = small.data().ok()?;
+    let mut sum = (0.0, 0.0, 0.0);
+    for y in 0..N as usize {
+        for x in 0..N as usize {
+            // Opaque ARGB32: BGRA in memory on little-endian.
+            let px = &data[y * stride + x * 4..y * stride + x * 4 + 4];
+            let (b, g, r) = if cfg!(target_endian = "little") { (px[0], px[1], px[2]) } else { (px[3], px[2], px[1]) };
+            sum = (sum.0 + f64::from(r), sum.1 + f64::from(g), sum.2 + f64::from(b));
+        }
+    }
+    let n = f64::from(N * N) * 255.0;
+    let mean = (sum.0 / n, sum.1 / n, sum.2 / n);
+    MEAN_CACHE.with(|c| c.borrow_mut().insert(path.to_string(), mean));
+    Some(mean)
+}
+
+/// Draw `picture` stretched over the slide frame (`ox`, `oy`, `w`, `h`),
+/// at its `a:fillRect` and clipped to the slide, as PowerPoint and
+/// Impress stretch a background picture. Returns its mean colour, which
+/// text over it contrasts with; `None` when the picture cannot be loaded
+/// (the background colour under it then stays what is seen).
+pub fn draw_background_picture(cr: &cairo::Context, picture: &BackgroundPicture, (ox, oy, w, h): (f64, f64, f64, f64)) -> Option<(f64, f64, f64)> {
+    let surf = load_image(&picture.path)?;
+    let (iw, ih) = (f64::from(surf.width()).max(1.0), f64::from(surf.height()).max(1.0));
+    let (px, py, pw, ph) = picture.fill.place(ox, oy, w, h);
+    cr.save().ok()?;
+    cr.rectangle(ox, oy, w, h);
+    cr.clip();
+    cr.translate(px, py);
+    cr.scale(pw / iw, ph / ih);
+    let painted = cr.set_source_surface(&surf, 0.0, 0.0).is_ok() && {
+        // Edge pixels reach the edge: scaled up, the picture would
+        // otherwise fade into what lies beyond it.
+        cr.source().set_extend(cairo::Extend::Pad);
+        cr.rectangle(0.0, 0.0, iw, ih);
+        cr.fill().is_ok()
+    };
+    cr.restore().ok()?;
+    if painted { mean_rgb(&picture.path, &surf) } else { None }
 }
 
 pub fn load_image(path: &str) -> Option<cairo::ImageSurface> {
@@ -543,23 +609,19 @@ pub fn draw_slide_base(
         cr.fill().unwrap();
     }
 
-    // Slide background — an unset (white) slide inherits its master's.
+    // Slide background: the slide's own when it states one, else its
+    // layout's and master's (folded into the effective master above),
+    // else the documented fallback. An explicit white slide on a coloured
+    // master stays white (DCK-006).
     // Captured for the text-color contrast check below
     // (tuna-os/gtk-office-suite#78).
     let mut slide_bg_rgb: (f64, f64, f64) = (1.0, 1.0, 1.0);
     if slide < slides.len() {
         let slide_bg = &slides[slide].background;
         let master = master_for(slides, slide, masters);
-        let master_bg = master
-            .as_deref()
-            .map(|m| m.background.as_str())
-            .filter(|b| !b.is_empty() && *b != "#ffffff");
-        let bg: &str = if slide_bg == "#ffffff" || slide_bg.is_empty() {
-            master_bg.unwrap_or(slide_bg)
-        } else {
-            slide_bg
-        };
-        let resolved_bg = if bg == "#ffffff" || bg.is_empty() {
+        let master_bg = master.as_deref().map(|m| m.background.as_str()).unwrap_or("");
+        let bg: &str = decks_core::layouts::resolve_background(slide_bg, None, master_bg);
+        let resolved_bg = if bg == "#ffffff" {
             (1.0, 1.0, 1.0)
         } else if bg.starts_with('#') && bg.len() >= 7 {
             let r = u8::from_str_radix(&bg[1..3], 16).unwrap_or(255) as f64 / 255.0;
@@ -572,6 +634,12 @@ pub fn draw_slide_base(
     } else { cr.set_source_rgb(1.0, 1.0, 1.0); }
     cr.rectangle(ox, oy, slide_w, slide_h);
     cr.fill().unwrap();
+    // A picture the slide's background is filled with, over its colour.
+    if let Some(picture) = slides.get(slide).and_then(|s| s.background_picture.as_ref()) {
+        if let Some(mean) = draw_background_picture(cr, picture, (ox, oy, slide_w, slide_h)) {
+            slide_bg_rgb = mean;
+        }
+    }
 
     if chrome == Chrome::Editor || chrome == Chrome::Preview {
         // Border
@@ -1158,11 +1226,12 @@ mod font_tests {
             w: 200.0,
             h: 100.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let slide = Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![sq(400.0, 100.0, Color(220, 0, 0)), sq(400.0, 300.0, Color(0, 0, 220))],
             notes: String::new(),
             master_id: None,
@@ -1249,7 +1318,8 @@ mod font_tests {
             background: "#ffffff".into(),
             default_font: font.into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }
     }
@@ -1258,6 +1328,7 @@ mod font_tests {
         Slide {
             title: "S".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id,
@@ -1266,6 +1337,73 @@ mod font_tests {
             ids: Default::default(),
             layout_id: None,
         }
+    }
+
+    /// A navy-left, yellow-right picture saved as a PNG in `dir`.
+    fn two_tone_png(dir: &std::path::Path) -> String {
+        let path = dir.join("bg.png");
+        let pic = cairo::ImageSurface::create(cairo::Format::Rgb24, 8, 4).unwrap();
+        {
+            let cr = cairo::Context::new(&pic).unwrap();
+            cr.set_source_rgb(23.0 / 255.0, 42.0 / 255.0, 69.0 / 255.0);
+            cr.rectangle(0.0, 0.0, 4.0, 4.0);
+            cr.fill().unwrap();
+            cr.set_source_rgb(1.0, 0.85, 0.0);
+            cr.rectangle(4.0, 0.0, 4.0, 4.0);
+            cr.fill().unwrap();
+        }
+        pic.write_to_png(&mut std::fs::File::create(&path).unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// The pixels at `at` of a slide drawn for export, and the colour its
+    /// text contrasts with.
+    fn export_pixels(slide: Slide, at: &[(usize, usize)]) -> (Vec<[u8; 3]>, (f64, f64, f64)) {
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 540).unwrap();
+        let bg = {
+            let cr = cairo::Context::new(&surface).unwrap();
+            draw_slide_base(&cr, 960.0, 540.0, &[slide], 0, &[], Chrome::Export).1
+        };
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = at.iter().map(|&(x, y)| {
+            let p = &data[y * stride + x * 4..y * stride + x * 4 + 4];
+            [p[2], p[1], p[0]]
+        });
+        (px.collect(), bg)
+    }
+
+    fn near(px: [u8; 3], rgb: [u8; 3]) -> bool {
+        px.iter().zip(rgb).all(|(a, b)| a.abs_diff(b) < 6)
+    }
+
+    /// DCK-004 (#1397): the pay centre title slide is a picture under white
+    /// text. The picture fills the slide over its colour, and text over it
+    /// contrasts with the picture, not the white slide colour beneath.
+    #[test]
+    fn a_background_picture_fills_the_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = slide(None);
+        s.background_picture = Some(BackgroundPicture { path: two_tone_png(dir.path()), fill: Default::default() });
+        let (px, bg) = export_pixels(s, &[(20, 20), (200, 270), (760, 270), (940, 520)]);
+        let (navy, yellow) = ([23, 42, 69], [255, 217, 0]);
+        assert!(near(px[0], navy) && near(px[1], navy), "left half navy: {px:?}");
+        assert!(near(px[2], yellow) && near(px[3], yellow), "right half yellow: {px:?}");
+        assert!(bg.2 < 0.5, "the contrast colour is the picture's mean, not white: {bg:?}");
+    }
+
+    /// `a:fillRect` places the stretched picture: a left inset of -100%
+    /// doubles its width leftwards, so only its yellow half is on the slide.
+    /// (Sampled clear of the slide's left edge, where the navy half's
+    /// last column is filtered into the first yellow one.)
+    #[test]
+    fn a_background_picture_honours_its_fill_rect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = slide(None);
+        let fill = decks_core::engine::FillRect { left: -1.0, ..Default::default() };
+        s.background_picture = Some(BackgroundPicture { path: two_tone_png(dir.path()), fill });
+        let (px, _) = export_pixels(s, &[(300, 20), (940, 520)]);
+        assert!(px.iter().all(|p| near(*p, [255, 217, 0])), "all yellow: {px:?}");
     }
 
     /// Pictures imported from a pptx live in extensionless temp files

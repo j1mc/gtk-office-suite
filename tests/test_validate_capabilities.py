@@ -610,10 +610,6 @@ class TheRealReleaseRule(unittest.TestCase):
             vc.check_release_revision(ledger, lanes, recorded.pop()), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReleaseCritical(unittest.TestCase):
     """C7 (#1207): a release with a skipped release-critical test is refused."""
 
@@ -669,3 +665,432 @@ class ReleaseCritical(unittest.TestCase):
         real = vc.load_ledger(vc.LEDGER)
         self.assertEqual(vc.check_release_critical(real, None), [])
         self.assertTrue(any(f.get("release_critical") for f in real["features"]))
+
+
+# --- SH-001: per-layer namespaces, candidate lanes, complete lane inventories ---
+
+LAYERS_MAP = {
+    "model": ["letters-core::", "tests/test_"],
+    "format": ["letters-core::"],
+    "persistence": ["letters-core::", "suite-common-core::"],
+    "bridge": ["letters::"],
+    "gui": ["tests/gui/"],
+    "a11y": ["tests/gui/"],
+    "performance": ["letters-core::", "tests/gui/"],
+}
+
+SH_LANES = {
+    "layers": LAYERS_MAP,
+    "lanes": [
+        {"job": "test", "namespaces": ["letters-core::", "letters::"],
+         "excludes": ["letters-core::soffice_oracle::"],
+         "runs_on_every_revision": True, "runs_on_candidate": True},
+        {"job": "smoke", "namespaces": ["tests/gui/"], "selective": True,
+         "runs_on_every_revision": True, "runs_on_candidate": True},
+        {"job": "python-checks", "namespaces": ["tests/test_validate_capabilities.py::"],
+         "runs_on_every_revision": True, "runs_on_candidate": False},
+        {"job": "oracle", "namespaces": ["letters-core::soffice_oracle::"],
+         "runs_on_every_revision": False, "runs_on_candidate": False},
+    ],
+}
+
+RUST = "letters-core::mod::tests::name"
+JOURNEY = "tests/gui/test_smoke.py::Class::test_name"
+
+
+class LayerNamespaces(unittest.TestCase):
+    """C8: a layer is satisfied only by a test of that layer's kind. A core
+    unit test that is collected and passes is still not a journey."""
+
+    def test_the_honest_ledger_passes(self):
+        self.assertEqual(vc.check_layer_namespaces(ledger(feature()), SH_LANES), [])
+
+    def test_a_core_test_cannot_satisfy_a_gui_requirement(self):
+        f = feature()
+        f["evidence"]["gui"] = [RUST]
+        errors = vc.check_layer_namespaces(ledger(f), SH_LANES)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"{RUST!r} is filed as gui evidence", errors[0])
+
+    def test_a_journey_cannot_satisfy_a_model_requirement(self):
+        f = feature()
+        f["evidence"]["model"] = [JOURNEY]
+        self.assertIn("is filed as model evidence",
+                      messages(vc.check_layer_namespaces(ledger(f), SH_LANES)))
+
+    def test_an_app_crate_test_is_bridge_not_model(self):
+        f = feature(requires=["model"],
+                    evidence={"model": ["letters::bin/letters::bridge::tests::x"]})
+        self.assertIn("is filed as model evidence",
+                      messages(vc.check_layer_namespaces(ledger(f), SH_LANES)))
+
+    def test_a_map_without_layers_is_rejected(self):
+        lanes = {k: v for k, v in SH_LANES.items() if k != "layers"}
+        self.assertIn("declares no per-layer namespaces",
+                      messages(vc.check_layer_namespaces(ledger(feature()), lanes)))
+
+    def test_a_layer_without_namespaces_is_rejected(self):
+        lanes = copy.deepcopy(SH_LANES)
+        del lanes["layers"]["a11y"]
+        self.assertIn("layer 'a11y' declares no namespaces",
+                      messages(vc.check_layer_namespaces(ledger(feature()), lanes)))
+
+    def test_an_unknown_layer_is_rejected(self):
+        lanes = copy.deepcopy(SH_LANES)
+        lanes["layers"]["vibes"] = ["tests/"]
+        self.assertIn("unknown layer 'vibes'",
+                      messages(vc.check_layer_namespaces(ledger(feature()), lanes)))
+
+    def test_a_gui_layer_sharing_a_core_namespace_is_rejected(self):
+        """Otherwise the separation depends on which prefix is listed."""
+        lanes = copy.deepcopy(SH_LANES)
+        lanes["layers"]["gui"].append("letters-core::")
+        self.assertIn("a model test could satisfy a gui requirement",
+                      messages(vc.check_layer_namespaces(ledger(feature()), lanes)))
+
+    def test_the_real_ledger_files_every_test_in_its_layer(self):
+        real = vc.load_ledger(vc.LEDGER)
+        lanes = json.loads((REPO_ROOT / "conformance/lanes.json").read_text())
+        self.assertEqual(vc.check_layer_namespaces(real, lanes), [])
+
+    def test_the_real_ui_layers_name_no_rust_namespace(self):
+        lanes = json.loads((REPO_ROOT / "conformance/lanes.json").read_text())
+        for layer in vc.UI_LAYERS:
+            for prefix in lanes["layers"][layer]:
+                self.assertFalse(prefix.endswith("::"),
+                                 f"{layer} layer names Rust namespace {prefix!r}")
+
+
+class ReleaseCriticalLanes(unittest.TestCase):
+    """C7, statically: every release-critical test sits in a lane the
+    release job re-runs at the candidate."""
+
+    def critical(self, **overrides):
+        return feature(release_critical=True, **overrides)
+
+    def test_evidence_in_candidate_lanes_passes(self):
+        self.assertEqual(vc.check_release_critical_lanes(ledger(self.critical()), SH_LANES), [])
+
+    def test_a_scheduled_lanes_test_cannot_prove_a_release(self):
+        f = self.critical(requires=["format"],
+                          evidence={"format": ["letters-core::soffice_oracle::round_trip"]})
+        errors = vc.check_release_critical_lanes(ledger(f), SH_LANES)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("is in no lane that runs on the release candidate", errors[0])
+
+    def test_a_validator_test_no_release_job_runs_is_refused(self):
+        f = self.critical(requires=["model"], evidence={
+            "model": ["tests/test_validate_capabilities.py::StructureTests::test_x"]})
+        self.assertIn("in no lane that runs on the release candidate",
+                      messages(vc.check_release_critical_lanes(ledger(f), SH_LANES)))
+
+    def test_a_lane_that_does_not_declare_the_property_is_refused(self):
+        lanes = copy.deepcopy(SH_LANES)
+        del lanes["lanes"][0]["runs_on_candidate"]
+        self.assertIn("does not say whether it runs on the release candidate",
+                      messages(vc.check_release_critical_lanes(ledger(self.critical()), lanes)))
+
+    def test_a_map_with_no_candidate_lane_is_refused(self):
+        lanes = copy.deepcopy(SH_LANES)
+        for lane in lanes["lanes"]:
+            lane["runs_on_candidate"] = False
+        self.assertIn("no lane runs on the release candidate",
+                      messages(vc.check_release_critical_lanes(ledger(self.critical()), lanes)))
+
+    def test_a_waived_deferral_is_not_asked(self):
+        f = self.critical(status="deferred", evidence={
+            "model": ["letters-core::soffice_oracle::x"], "gui": [JOURNEY]})
+        self.assertEqual(vc.check_release_critical_lanes(ledger(f), SH_LANES), [])
+
+    def test_the_real_ledger_and_map_pass(self):
+        real = vc.load_ledger(vc.LEDGER)
+        lanes = json.loads((REPO_ROOT / "conformance/lanes.json").read_text())
+        self.assertEqual(vc.check_release_critical_lanes(real, lanes), [])
+
+
+class LaneInventories(unittest.TestCase):
+    """C9: missing, empty, incomplete and stale lane reports are errors,
+    not successful empty sets."""
+
+    REV = "c" * 40
+
+    def inventory(self, tests=(RUST,), **extra):
+        inv = {"covers": ["letters-core::"], "tests": list(tests), "revision": self.REV}
+        inv.update(extra)
+        return inv
+
+    def check(self, inventory, results, jobs=("test",), candidate=REV):
+        return vc.check_lane_inventory(SH_LANES, jobs, inventory, results, candidate)
+
+    def test_a_complete_current_inventory_passes(self):
+        self.assertEqual(self.check(self.inventory(), {RUST: "passed"}), [])
+
+    def test_an_empty_inventory_is_a_missing_result(self):
+        errors = self.check(self.inventory(tests=()), {})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("collected no tests in its namespaces", errors[0])
+
+    def test_an_inventory_of_only_other_lanes_tests_is_empty_for_this_lane(self):
+        """The oracle's targets are excluded from `test`: a report holding
+        only them is no evidence about the `test` lane at all."""
+        oracle = "letters-core::soffice_oracle::round_trip"
+        errors = self.check(self.inventory(tests=(oracle,)), {oracle: "passed"})
+        self.assertIn("collected no tests in its namespaces", messages(errors))
+
+    def test_a_run_that_reported_no_outcomes_is_refused(self):
+        errors = self.check(self.inventory(), {})
+        self.assertIn("recorded no outcome for any of its 1 collected tests", messages(errors))
+
+    def test_a_collected_test_without_an_outcome_did_not_run(self):
+        other = "letters-core::mod::tests::other"
+        errors = self.check(self.inventory(tests=(RUST, other)), {RUST: "passed"})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("1 collected tests have no recorded outcome", errors[0])
+        self.assertIn(other, errors[0])
+
+    def test_a_selective_lane_may_list_what_it_left_out(self):
+        other = "tests/gui/test_smoke.py::Other::test_x"
+        inv = self.inventory(tests=(JOURNEY, other), deselected=[other])
+        self.assertEqual(self.check(inv, {JOURNEY: "passed"}, jobs=("smoke",)), [])
+
+    def test_a_lane_that_does_not_select_cannot_excuse_an_unrun_test(self):
+        other = "letters-core::mod::tests::other"
+        inv = self.inventory(tests=(RUST, other), deselected=[other])
+        self.assertIn("does not declare change-based selection",
+                      messages(self.check(inv, {RUST: "passed"})))
+
+    def test_a_deselected_test_that_ran_contradicts_the_selection(self):
+        other = "tests/gui/test_smoke.py::Other::test_x"
+        inv = self.inventory(tests=(JOURNEY, other), deselected=[other])
+        errors = self.check(inv, {JOURNEY: "passed", other: "passed"}, jobs=("smoke",))
+        self.assertIn("its selection says it left out", messages(errors))
+
+    def test_deselecting_a_test_never_collected_is_refused(self):
+        inv = self.inventory(tests=(JOURNEY,), deselected=["tests/gui/x.py::A::b"])
+        errors = self.check(inv, {JOURNEY: "passed"}, jobs=("smoke",))
+        self.assertIn("deselected 1 tests it never collected", messages(errors))
+
+    def test_an_inventory_from_another_revision_is_stale(self):
+        errors = self.check(self.inventory(revision="d" * 40), {RUST: "passed"})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("stale, not evidence for this one", errors[0])
+
+    def test_an_inventory_that_names_no_revision_cannot_certify_one(self):
+        inv = self.inventory()
+        del inv["revision"]
+        self.assertIn("does not say which revision",
+                      messages(self.check(inv, {RUST: "passed"})))
+
+    def test_a_short_candidate_revision_still_matches(self):
+        self.assertEqual(self.check(self.inventory(), {RUST: "passed"},
+                                    candidate=self.REV[:12]), [])
+
+
+class LaneScopedEvidence(unittest.TestCase):
+    """With --lane, a lane judges exactly its own namespaces."""
+
+    SCOPE = ("tests/gui/",)
+
+    def test_a_cited_test_in_the_lane_that_it_did_not_collect_is_refused(self):
+        """Even when the inventory's `covers` would have let it slip: a run
+        whose collection quietly lost a file the lane is declared to run."""
+        inv = {"covers": ["tests/gui/test_other.py::"], "tests": []}
+        errors = vc.check_collected(ledger(feature()), inv, False, scope=self.SCOPE)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("in this lane's namespaces but its run did not collect it", errors[0])
+
+    def test_without_the_lane_scope_the_same_hole_passes(self):
+        inv = {"covers": ["tests/gui/test_other.py::"], "tests": []}
+        self.assertEqual(vc.check_collected(ledger(feature(requires=["gui"], evidence={
+            "gui": [JOURNEY]})), inv, False), [])
+
+    def test_another_lanes_test_is_not_judged(self):
+        inv = {"covers": [], "tests": [JOURNEY]}
+        self.assertEqual(vc.check_collected(ledger(feature()), inv, False, scope=self.SCOPE), [])
+
+    def test_a_missing_result_in_scope_is_an_error(self):
+        errors = vc.check_results(ledger(feature()), {}, set(), covers=["x::"],
+                                  scope=self.SCOPE)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"{JOURNEY} has no recorded result", errors[0])
+
+    def test_a_deselected_cited_test_is_not_counted_either_way(self):
+        self.assertEqual(vc.check_results(ledger(feature()), {}, set(), scope=self.SCOPE,
+                                          deselected=[JOURNEY]), [])
+        listed = vc.deselected_citations(ledger(feature()), {"deselected": [JOURNEY]})
+        self.assertEqual(listed, [("app.thing", JOURNEY)])
+
+
+class EveryReleaseCriticalResult(unittest.TestCase):
+    """`complete` (release-revision.yml): no release-critical test is
+    another lane's business."""
+
+    def critical(self):
+        return ledger(feature(release_critical=True))
+
+    def test_a_journey_missing_from_the_report_refuses_the_release(self):
+        errors = vc.check_release_critical(self.critical(), {RUST: "passed"},
+                                           covers=("letters-core::",), complete=True)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"{JOURNEY} has no recorded result at this revision", errors[0])
+
+    def test_an_excluded_namespace_pass_is_not_evidence(self):
+        oracle = "letters-core::soffice_oracle::round_trip"
+        f = feature(release_critical=True, requires=["format"], evidence={"format": [oracle]})
+        errors = vc.check_release_critical(ledger(f), {oracle: "passed"},
+                                           excluded=("letters-core::soffice_oracle::",),
+                                           complete=True)
+        self.assertIn("in a namespace this run excludes", messages(errors))
+
+    def test_a_skipped_journey_refuses_the_release(self):
+        errors = vc.check_release_critical(self.critical(), {RUST: "passed", JOURNEY: "skipped"},
+                                           complete=True)
+        self.assertIn(f"{JOURNEY} was skipped", messages(errors))
+
+    def test_every_result_passing_is_accepted(self):
+        self.assertEqual(vc.check_release_critical(
+            self.critical(), {RUST: "passed", JOURNEY: "passed"}, complete=True), [])
+
+
+class CollectorRecordsRevisionAndSelection(unittest.TestCase):
+    def run_collector(self, d, *args):
+        out = os.path.join(d, "inventory.json")
+        collect_test_inventory.main([*args, "--out", out])
+        with open(out) as f:
+            return json.load(f)
+
+    def write(self, d, name, text):
+        path = os.path.join(d, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_the_inventory_is_stamped_with_its_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            listing = self.write(d, "c.txt", "test_smoke.py::A::test_b\n")
+            inv = self.run_collector(d, "--pytest", f"tests/gui={listing}", "--revision", "abc123")
+        self.assertEqual(inv["revision"], "abc123")
+
+    def test_the_selection_records_what_was_left_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            listing = self.write(d, "c.txt", "test_smoke.py::A::test_b\ntest_smoke.py::B::test_c\n")
+            selected = self.write(d, "s.txt", "test_smoke.py::A::test_b\n")
+            inv = self.run_collector(d, "--pytest", f"tests/gui={listing}",
+                                     "--pytest-selected", f"tests/gui={selected}")
+        self.assertEqual(inv["deselected"], ["tests/gui/test_smoke.py::B::test_c"])
+
+    def test_an_empty_selection_would_excuse_everything_and_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            listing = self.write(d, "c.txt", "test_smoke.py::A::test_b\n")
+            selected = self.write(d, "s.txt", "\n0 tests collected\n")
+            with self.assertRaises(SystemExit):
+                self.run_collector(d, "--pytest", f"tests/gui={listing}",
+                                   "--pytest-selected", f"tests/gui={selected}")
+
+    def test_a_report_that_was_never_written_is_an_error_not_an_empty_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                self.run_collector(d, "--pytest-junit", f"tests/gui={d}/missing.xml")
+
+    def test_a_root_run_pytest_report_keeps_repo_relative_ids(self):
+        report = ('<testsuites><testsuite name="pytest">'
+                  '<testcase classname="tests.test_x.Suite" name="test_y"/>'
+                  '</testsuite></testsuites>')
+        outcomes, _ = collect_test_inventory.parse_pytest_junit(report, "")
+        self.assertEqual(outcomes, {"tests/test_x.py::Suite::test_y": "passed"})
+
+
+class MainWithLaneReports(unittest.TestCase):
+    """End to end through the CLI the workflows call."""
+
+    REV = "e" * 40
+    COVERS = ["letters-core::", "letters::"]
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        f = feature(requires=["model"], evidence={"model": [RUST]})
+        self.ledger = self.write("ledger.json", ledger(f))
+        self.lanes = self.write("lanes.json", SH_LANES)
+
+    def write(self, name, data):
+        path = os.path.join(self.dir.name, name)
+        with open(path, "w") as handle:
+            json.dump(data, handle)
+        return path
+
+    def run_main(self, inventory, results, candidate=REV, extra=()):
+        args = ["--ledger", self.ledger, "--gui-test-dir", self.dir.name,
+                "--lanes", self.lanes, "--lane", "test",
+                "--collected", self.write("inv.json", inventory),
+                "--candidate", candidate]
+        if results is not None:
+            args += ["--results", self.write("res.json", results)]
+        return vc.main(args + list(extra))
+
+    def test_a_complete_current_lane_passes(self):
+        inv = {"covers": self.COVERS, "tests": [RUST], "revision": self.REV}
+        self.assertEqual(self.run_main(inv, {RUST: "passed"}), 0)
+
+    def test_a_stale_lane_fails(self):
+        inv = {"covers": self.COVERS, "tests": [RUST], "revision": "f" * 40}
+        self.assertEqual(self.run_main(inv, {RUST: "passed"}), 1)
+
+    def test_a_skipped_cited_test_fails(self):
+        inv = {"covers": self.COVERS, "tests": [RUST], "revision": self.REV}
+        self.assertEqual(self.run_main(inv, {RUST: "skipped"}), 1)
+
+    def test_a_results_file_that_was_never_written_fails_without_a_traceback(self):
+        inv = {"covers": self.COVERS, "tests": [RUST], "revision": self.REV}
+        args = ["--ledger", self.ledger, "--gui-test-dir", self.dir.name,
+                "--lanes", self.lanes, "--lane", "test",
+                "--collected", self.write("inv.json", inv),
+                "--results", os.path.join(self.dir.name, "never-written.json")]
+        self.assertEqual(vc.main(args), 1)
+
+    def test_a_lane_without_its_inventory_is_a_usage_error(self):
+        with self.assertRaises(SystemExit):
+            vc.main(["--ledger", self.ledger, "--lanes", self.lanes, "--lane", "test"])
+
+
+class TheWorkflowsWireTheChecks(unittest.TestCase):
+    """A flag nothing passes is dead code (`--require-coverage` and `--head`
+    both were). Every lane's own job has to record outcomes and the
+    revision, and the release job has to demand every release-critical
+    result from the lanes it re-runs."""
+
+    def workflow(self, path):
+        import yaml
+        with open(REPO_ROOT / path, encoding="utf-8") as handle:
+            return yaml.safe_load(handle)
+
+    def runs(self, path, job):
+        return [str(step.get("run", ""))
+                for step in self.workflow(path)["jobs"][job].get("steps", [])]
+
+    def test_every_lane_validates_outcomes_at_its_revision(self):
+        lanes = json.loads((REPO_ROOT / "conformance/lanes.json").read_text())
+        for lane in lanes["lanes"]:
+            steps = [run for run in self.runs(lane["workflow"], lane["job"])
+                     if "validate_capabilities.py" in run and f"--lane {lane['job']}" in run]
+            self.assertEqual(len(steps), 1, f"{lane['job']}: no ledger step names the lane")
+            for flag in ("--results", "--candidate", "--revision"):
+                self.assertIn(flag, steps[0], f"{lane['job']}: ledger step lacks {flag}")
+
+    def test_the_release_job_reruns_every_candidate_lane_and_demands_every_result(self):
+        runners = {"test": "cargo nextest run --workspace",
+                   "smoke": "tests/gui/run_gui_tests.sh"}
+        lanes = json.loads((REPO_ROOT / "conformance/lanes.json").read_text())
+        candidate = {lane["job"] for lane in lanes["lanes"] if lane["runs_on_candidate"]}
+        self.assertEqual(candidate, set(runners),
+                         "a new candidate lane needs its release-job runner named here")
+        text = "\n".join(self.runs(".github/workflows/release-revision.yml",
+                                   "release-critical-tests"))
+        for job in candidate:
+            self.assertIn(runners[job], text)
+        self.assertIn("--every-release-critical-result", text)
+        self.assertIn("--candidate", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

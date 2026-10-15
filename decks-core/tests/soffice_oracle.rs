@@ -92,6 +92,7 @@ fn impress_survives_multi_slide_deck() {
         deck.slides.push(decks_core::engine::Slide {
             title: format!("Slide {}", i),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![SlideObject::TextBox {
                 text: format!("content {}", i),
                 x: 80.0, y: 120.0, w: 300.0, h: 50.0,
@@ -144,6 +145,7 @@ fn text_slide(title: &str, text: &str, notes: &str) -> Slide {
     Slide {
         title: title.into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: text.into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -250,6 +252,7 @@ fn shape_kinds_survive_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "shapes".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![
             SlideObject::Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0, rotation: 0.0 },
             SlideObject::Circle { x: 500.0, y: 300.0, r: 80.0, rotation: 0.0 },
@@ -274,6 +277,7 @@ fn positions_approx_survive_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "pos".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Rect { x: 240.0, y: 180.0, w: 320.0, h: 120.0, rotation: 0.0 }],
         notes: String::new(),
         master_id: None,
@@ -318,6 +322,7 @@ fn empty_slide_survives_impress_rewrite() {
         Slide {
             title: "empty".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id: None,
@@ -339,6 +344,7 @@ fn bold_run_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: "plain bolded".into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -425,6 +431,7 @@ fn styled_run_slide(runs: Vec<Run>) -> Slide {
     Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text,
             x: 100.0, y: 100.0, w: 600.0, h: 80.0,
@@ -525,6 +532,7 @@ fn image_object_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "img".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Image {
             path: png_path.to_string_lossy().to_string(),
             x: 100.0, y: 100.0, w: 200.0, h: 150.0,
@@ -620,6 +628,7 @@ fn odp_geometry_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "g".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Rect { x: 240.0, y: 180.0, w: 320.0, h: 120.0, rotation: 0.0 }],
         notes: String::new(),
         master_id: None,
@@ -676,6 +685,7 @@ fn odp_bold_run_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: "plain bolded".into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -1077,6 +1087,7 @@ fn impress_runs_in_one_paragraph_come_back_as_one_line() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::TextBox {
@@ -1135,6 +1146,7 @@ fn a_styled_multiline_box_keeps_its_break_and_its_styling_through_impress() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::TextBox {
@@ -1270,6 +1282,7 @@ fn geometry_survives_a_conversion_between_the_two_formats() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::Rect {
@@ -1516,7 +1529,7 @@ fn impress_sees_the_slide_size_we_kept() {
     for size in [(9_144_000.0, 6_858_000.0), (7_200_000.0, 7_200_000.0)] {
         let dir = tempfile::tempdir().unwrap();
         let mut deck = Deck::new();
-        deck.masters[0].page_emu = Some(size);
+        deck.page_size = Some(size);
         deck.slides[0].objects = vec![SlideObject::Rect { x: 0.0, y: 0.0, w: 960.0, h: 540.0, rotation: 0.0 }];
         let source = dir.path().join("source.pptx");
         write_pptx(source.to_str().unwrap(), &deck).expect("write the source");
@@ -1531,7 +1544,7 @@ fn impress_sees_the_slide_size_we_kept() {
                 let back = convert(path, kind).unwrap_or_else(|e| panic!("Impress rewrites {path:?} as {kind}: {e}"));
                 let read = decks_core::read_deck(back.to_str().unwrap()).expect("read Impress's file");
                 let geometry = read.slides[0].objects.first().map(|o| format!("{o:?}"));
-                (read.masters[0].page_emu, geometry)
+                (read.page_size, geometry)
             };
             let (from_source, from_saved) = (impress(&source), impress(&saved));
             let (cx, cy) = from_source.0.unwrap_or_else(|| panic!("{kind}: Impress lost the source's own size"));
@@ -1572,10 +1585,10 @@ fn impress_sees_our_odp_on_the_decks_own_page() {
     for size in [(9_144_000.0, 6_858_000.0), (7_200_000.0, 7_200_000.0)] {
         let dir = tempfile::tempdir().unwrap();
         let mut deck = Deck::new();
-        deck.masters[0].page_emu = Some(size);
+        deck.page_size = Some(size);
         // Painted by us, so its look doesn't depend on each format's
         // default style in Impress.
-        let style = decks_core::engine::shape::ShapeStyle { fill: Some(decks_core::engine::shape::Color(0x20, 0x40, 0x60)), gradient: None, stroke: None };
+        let style = decks_core::engine::shape::ShapeStyle { fill: Some(decks_core::engine::shape::Color(0x20, 0x40, 0x60)), gradient: None, stroke: None, fill_src: None, stroke_src: None };
         deck.slides[0].objects = vec![SlideObject::Shape {
             kind: decks_core::engine::shape::ShapeKind::Rect,
             x: 0.0,
@@ -1596,7 +1609,7 @@ fn impress_sees_our_odp_on_the_decks_own_page() {
             let Some(SlideObject::Shape { x, y, w, h, style, .. }) = read.slides[0].objects.first().cloned() else {
                 panic!("{ext}: the shape came back as {:?}", read.slides[0].objects)
             };
-            seen.push((read.masters[0].page_emu, (x, y, w, h), style));
+            seen.push((read.page_size, (x, y, w, h), style));
         }
         let (pptx, odp) = (&seen[0], &seen[1]);
         assert!(pptx.0.is_some(), "{size:?}: Impress lost the pptx's size");
@@ -1634,7 +1647,7 @@ fn impress_keeps_a_themes_decorations_in_both_formats() {
     };
     for (i, t) in decks_core::templates::templates().iter().enumerate() {
         let (slides, masters) = decks_core::templates::deck(i).unwrap();
-        let deck = Deck { slides, masters };
+        let deck = Deck { slides, masters, page_size: None, themes: Vec::new() };
         let want: Vec<String> = deck.masters[0].shapes.iter().map(look).collect();
         for ext in ["pptx", "odp"] {
             let dir = tempfile::tempdir().unwrap();
@@ -1669,7 +1682,7 @@ fn impress_turns_our_odp_gradient_into_the_same_drawingml_gradient() {
             stops: vec![GradientStop { pos: 0.0, color: Color(0x0B, 0x3D, 0x6B) }, GradientStop { pos: 1.0, color: Color(0x13, 0x8D, 0x9C) }],
             angle,
         };
-        let style = ShapeStyle { fill: gradient.mean(), gradient: Some(gradient.clone()), stroke: None };
+        let style = ShapeStyle { fill: gradient.mean(), gradient: Some(gradient.clone()), stroke: None, fill_src: None, stroke_src: None };
         let mut deck = Deck::new();
         deck.slides[0].objects = vec![SlideObject::Shape { kind: ShapeKind::Rect, x: 100.0, y: 100.0, w: 300.0, h: 200.0, rotation: 0.0, style }];
         let dir = tempfile::tempdir().unwrap();
@@ -1702,7 +1715,7 @@ fn impress_keeps_a_master_view_edit() {
     let (slides, masters) = decks_core::templates::deck(3).unwrap();
     let c = decks_core::DecksController::new(slides, masters);
     c.edit_master(c.slide_id_at(0).unwrap()).unwrap();
-    let style = ShapeStyle { fill: Some(Color(0xE0, 0x1B, 0x24)), gradient: None, stroke: None };
+    let style = ShapeStyle { fill: Some(Color(0xE0, 0x1B, 0x24)), gradient: None, stroke: None, fill_src: None, stroke_src: None };
     let mslide = c.slide_id_at(0).unwrap();
     c.add_object(mslide, SlideObject::Shape { kind: ShapeKind::Triangle, x: 860.0, y: 20.0, w: 80.0, h: 80.0, rotation: 0.0, style: style.clone() });
     c.finish_master().unwrap();
@@ -1924,7 +1937,7 @@ fn shape_kind_fill_outline_and_rotation_survive_impress_in_both_formats() {
         w: 160.0,
         h: 100.0,
         rotation,
-        style: ShapeStyle { fill: Some(fill), gradient: None, stroke: Some(Stroke { color: line, width: 3.0 }) },
+        style: ShapeStyle { fill: Some(fill), gradient: None, stroke: Some(Stroke { color: line, width: 3.0 }), fill_src: None, stroke_src: None },
     };
     let mut deck = Deck::new();
     deck.slides[0].objects = vec![

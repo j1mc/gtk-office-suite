@@ -50,6 +50,7 @@ pub struct SlideIds {
 pub struct SlideProps {
     pub title: String,
     pub background: String,
+    pub background_picture: Option<crate::engine::BackgroundPicture>,
     pub notes: String,
     /// The slide's master, by stable master id — never a position in the
     /// deck's masters, which reordering or a master insert invalidates.
@@ -65,6 +66,7 @@ impl SlideProps {
         SlideProps {
             title: s.title.clone(),
             background: s.background.clone(),
+            background_picture: s.background_picture.clone(),
             notes: s.notes.clone(),
             master_id: s.master_id,
             transition: s.transition,
@@ -76,6 +78,7 @@ impl SlideProps {
     fn put(self, s: &mut Slide) {
         s.title = self.title;
         s.background = self.background;
+        s.background_picture = self.background_picture;
         s.notes = self.notes;
         s.master_id = self.master_id;
         s.transition = self.transition;
@@ -227,6 +230,23 @@ pub fn ensure_all_ids(slides: &mut [Slide], masters: &mut [MasterSlide]) {
         s.ids.objects.truncate(s.objects.len());
         while s.ids.objects.len() < s.objects.len() {
             s.ids.objects.push(next);
+            next += 1;
+        }
+    }
+}
+
+/// Give every theme without an id a fresh one, after every slide, object,
+/// master, layout and placeholder id in the session, so the one session
+/// id space stays collision-free. Readers call this once after import
+/// alongside [`ensure_all_ids`]; assigned ids never change. Idempotent.
+pub fn ensure_theme_ids(slides: &[Slide], masters: &[MasterSlide], themes: &mut [crate::engine::theme::Theme]) {
+    let mut next = max_id(slides)
+        .max(max_master_id(masters))
+        .max(themes.iter().map(|t| t.id).max().unwrap_or(0))
+        + 1;
+    for t in themes.iter_mut() {
+        if t.id == 0 {
+            t.id = next;
             next += 1;
         }
     }
@@ -413,6 +433,7 @@ mod tests {
         Slide {
             title: title.into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: (0..n).map(|i| SlideObject::Rect { x: i as f64 * 10.0, y: 0.0, w: 5.0, h: 5.0, rotation: 0.0 }).collect(),
             notes: String::new(),
             master_id: None,
@@ -513,7 +534,8 @@ mod tests {
             background: bg.into(),
             default_font: "Sans".into(),
             shapes: vec![SlideObject::Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0, rotation: 0.0 }],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         };
         let mut doc = DeckDoc { slides: vec![slide("a", 1)], masters: vec![master("#ffffff")] };

@@ -51,16 +51,16 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
         s.data[r + 1][0] = label.to_string();
         s.data[r + 1][1] = n.to_string();
         s.data[r + 1][2] = m.to_string();
-        engine.set_cell_text(r + 1, 0, label);
-        engine.set_cell_text(r + 1, 1, n);
-        engine.set_cell_text(r + 1, 2, m);
+        engine.set_cell_text(r + 1, 0, label).unwrap();
+        engine.set_cell_text(r + 1, 1, n).unwrap();
+        engine.set_cell_text(r + 1, 2, m).unwrap();
     }
     s.data[0][0] = "Region".into();
-    engine.set_cell_text(0, 0, "Region");
+    engine.set_cell_text(0, 0, "Region").unwrap();
     // A formula and its cached value.
     s.data[5][1] = "=SUM(B2:B4)".into();
     s.formulas[5][1] = true;
-    engine.set_cell_text(5, 1, "=SUM(B2:B4)");
+    engine.set_cell_text(5, 1, "=SUM(B2:B4)").unwrap();
     engine.set_defined_name("Total", Some("Data!$B$6")).unwrap();
     engine.evaluate();
     // Styles and number format.
@@ -117,6 +117,12 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     s.print_area = Some((0, 0, 5, 2));
     // A second sheet with a chart and a rule of its own.
     engine.add_sheet("Later").unwrap();
+    // TBL-006: the model is a projection — its content needs the engine
+    // inputs the writer saves, not just display text.
+    engine.set_active_sheet(1).unwrap();
+    engine.set_cell_text(0, 0, "1").unwrap();
+    engine.set_cell_text(1, 0, "2").unwrap();
+    engine.set_active_sheet(0).unwrap();
     let mut t = SheetModel::new("Later", ROWS, COLS, engine.sheet_id_at(1).unwrap());
     t.data[0][0] = "1".into();
     t.data[1][0] = "2".into();
@@ -140,11 +146,11 @@ fn retained_workbook() -> (TablesEngine, Vec<SheetModel>) {
     let mut s = SheetModel::new("Data", ROWS, COLS, engine.sheet_id_at(0).unwrap());
     s.data[1][0] = "North".into();
     s.data[1][1] = "10".into();
-    engine.set_cell_text(1, 0, "North");
-    engine.set_cell_text(1, 1, "10");
+    engine.set_cell_text(1, 0, "North").unwrap();
+    engine.set_cell_text(1, 1, "10").unwrap();
     s.data[5][1] = "=SUM(B2:B4)".into();
     s.formulas[5][1] = true;
-    engine.set_cell_text(5, 1, "=SUM(B2:B4)");
+    engine.set_cell_text(5, 1, "=SUM(B2:B4)").unwrap();
     engine.set_defined_name("Total", Some("Data!$B$6")).unwrap();
     engine.evaluate();
     s.styles[0][0].bold = true;
@@ -355,7 +361,7 @@ fn filtered_workbook() -> (TablesEngine, Vec<SheetModel>) {
     let mut s = SheetModel::new("Data", 8, 4, engine.sheet_id_at(0).unwrap());
     for (r, v) in ["Region", "North", "South", "North", "East"].iter().enumerate() {
         s.data[r][0] = v.to_string();
-        engine.set_cell_text(r, 0, v);
+        engine.set_cell_text(r, 0, v).unwrap();
     }
     s.filter = Some(FilterDef {
         range: Some((0, 0, 4, 0)),
