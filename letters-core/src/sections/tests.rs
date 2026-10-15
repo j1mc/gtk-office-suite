@@ -187,3 +187,44 @@ fn page_setup_sets_the_carets_section() {
     assert!(set_page_at(&doc, 1, landscape()).is_empty());
     assert_eq!(runs(&doc, PageGeometry::default()).iter().map(|r| r.1).collect::<Vec<_>>(), vec![PageGeometry::default(), landscape()]);
 }
+
+/// Copying across a section break carries it (`carried`); pasting puts it
+/// back (`paste`): the text before it takes the copied section's page and
+/// header, the text after keeps the section it was pasted into. One undo
+/// takes out the paste and its break together.
+#[test]
+fn a_copy_carries_its_section_breaks_into_a_paste() {
+    let mut source = Document::from_plain_text("portrait\nlandscape");
+    let ops = insert_break(&source, edit::paragraph_start(&source, 1), PageGeometry::default()).unwrap();
+    apply_all(&mut source, &ops).unwrap();
+    let mut sections = source.sections.clone();
+    sections[0].header = Some("Part one".into());
+    sections[1].geometry = landscape();
+    apply_all(&mut source, &[Op::SetSections { sections }]).unwrap();
+
+    let end = edit::doc_len(&source);
+    let breaks = carried(&source, 0, end);
+    assert_eq!(breaks, vec![CarriedBreak { at: 1, geometry: PageGeometry::default(), header: Some("Part one".into()), footer: None }]);
+    assert!(carried(&source, 0, 3).is_empty(), "a copy inside one section carries none");
+    let json = serde_json::to_string(&breaks).unwrap();
+    assert_eq!(serde_json::from_str::<Vec<CarriedBreak>>(&json).unwrap(), breaks);
+
+    let content = edit::slice(&source, 0, end).unwrap();
+    let mut target = Document::from_plain_text("before\nafter");
+    target.page = Some(landscape());
+    let at = edit::paragraph_start(&target, 1);
+    let mut ops = vec![Op::Insert { at, content: content.clone() }];
+    ops.push(paste(&target, at, &content, &breaks, PageGeometry::default()).unwrap());
+    let original = target.clone();
+    let mut history = History::default();
+    edit(&mut target, &mut history, &ops);
+    assert_eq!(target.to_plain_text(), "before\nportrait\nlandscapeafter");
+    assert_eq!(ranges(&target), vec![(1, 0, 2), (0, 2, 3)], "the part before the break is new; the rest keeps its id");
+    assert_eq!(target.sections[0].geometry, PageGeometry::default());
+    assert_eq!(target.sections[0].header.as_deref(), Some("Part one"));
+    assert_eq!(target.sections[1].geometry, landscape(), "the text after the break keeps the target's page");
+    assert_eq!(target.page, Some(PageGeometry::default()), "the page mirrors the new first section");
+    history.undo(&mut target).unwrap();
+    assert_eq!(target, Document { next_section_id: 2, ..original }, "undo takes the paste and its break out together");
+    assert!(paste(&target, at, &content, &[], PageGeometry::default()).is_none());
+}

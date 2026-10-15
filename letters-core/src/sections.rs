@@ -288,6 +288,90 @@ pub fn remove_break(doc: &Document, index: usize) -> Option<Vec<Op>> {
     Some(vec![Op::SetSections { sections }])
 }
 
+/// The MIME type of the section breaks a Letters copy carries beside its
+/// suite fragment (`fragment::MIME`), as JSON of `Vec<CarriedBreak>`. Only
+/// Letters reads it; the fragment itself stays the suite's shared format.
+pub const CLIPBOARD_MIME: &str = "application/x-tunaos-letters-sections+json";
+
+/// A section break inside copied content: it comes before copied
+/// paragraph `at` (1 or more), and the section it ends had this page,
+/// header and footer. As in Word, a break carries the properties of the
+/// section it ends: pasted, it gives them to the text before it, and the
+/// text after the last one keeps the section it was pasted into.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CarriedBreak {
+    pub at: usize,
+    pub geometry: PageGeometry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
+}
+
+/// The section breaks inside `start..end` (sequence offsets) of `doc`, as
+/// a copy of that range carries them: `at` counts the copied paragraphs
+/// (`edit::slice`), the first being the one holding `start`.
+pub fn carried(doc: &Document, start: usize, end: usize) -> Vec<CarriedBreak> {
+    let (Some((first, _)), Some((last, _))) = (edit::locate(doc, start), edit::locate(doc, end)) else { return Vec::new() };
+    doc.sections
+        .windows(2)
+        .filter(|pair| (first + 1..=last).contains(&pair[1].range.start))
+        .map(|pair| CarriedBreak {
+            at: pair[1].range.start - first,
+            geometry: pair[0].geometry,
+            header: pair[0].header.clone(),
+            footer: pair[0].footer.clone(),
+        })
+        .collect()
+}
+
+/// The `SetSections` that puts copied section breaks back when `content`
+/// is pasted at sequence offset `at` of `doc` (as `Op::Insert` inserts it;
+/// `doc` is the document before the insert). Each break splits the
+/// section it lands in: the part before it is a new section with the
+/// break's page, header and footer; the part after keeps the section's
+/// own, and its id. A break that would land inside a table goes before
+/// it. `None` with no break to put back, or when the insert does not
+/// apply. A document of one section becomes sections, the first on its
+/// page or `default_page`.
+pub fn paste(doc: &Document, at: usize, content: &[crate::model::Paragraph], breaks: &[CarriedBreak], default_page: PageGeometry) -> Option<Op> {
+    let (pi, _) = edit::locate(doc, at)?;
+    let mut after = doc.clone();
+    edit::apply(&mut after, &Op::Insert { at, content: content.to_vec() }).ok()?;
+    let mut sections = if after.sections.is_empty() {
+        vec![DocSection {
+            id: after.next_section_id,
+            range: ParagraphRange::new(0, after.paragraphs.len()),
+            geometry: after.page.unwrap_or(default_page),
+            header: None,
+            footer: None,
+        }]
+    } else {
+        after.sections.clone()
+    };
+    let mut id = next_id(&after, &sections);
+    let mut placed = false;
+    for b in breaks.iter().filter(|b| b.at > 0 && b.at < content.len()) {
+        let start = outside_table(&after, pi + b.at);
+        let Some(k) = sections.iter().position(|s| s.range.contains(start)) else { continue };
+        if sections[k].range.start == start {
+            continue;
+        }
+        let before = DocSection {
+            id,
+            range: ParagraphRange::new(sections[k].range.start, start),
+            geometry: b.geometry,
+            header: b.header.clone(),
+            footer: b.footer.clone(),
+        };
+        id += 1;
+        placed = true;
+        sections[k].range.start = start;
+        sections.insert(k, before);
+    }
+    placed.then_some(Op::SetSections { sections })
+}
+
 /// The ops for Page Setup with the caret in paragraph `para`: the page of
 /// the section holding it becomes `geometry` (`SetSections`), or for a
 /// document of one section the document's page (`SetPage`). None when it
