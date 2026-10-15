@@ -1453,4 +1453,52 @@ mod tests {
             assert!(!rest.contains(&"No Such Family XYZ".to_string()), "no other page asks for it: {missing:?}");
         }
     }
+
+    /// Combining marks shape with their base character through the
+    /// shared shaper: the caret steps over the cluster, never into it.
+    #[test]
+    fn combining_marks_shape_with_their_base_character() {
+        // "e" plus a combining acute: two chars, one cluster.
+        let d = doc(1, "cafe\u{301} au lait");
+        let t = Typeset::new(d, LayoutOptions::default());
+        assert_eq!(t.tree().pages[0].lines().count(), 1);
+        let before = t.caret(TextPos { para: 0, offset: 3 }).expect("caret before the cluster");
+        let after = t.caret(TextPos { para: 0, offset: 5 }).expect("caret after the cluster");
+        assert!(after.x_pt > before.x_pt, "the cluster takes room: {} -> {}", before.x_pt, after.x_pt);
+    }
+
+    /// CJK text shapes through the shared shaper without panic — in a
+    /// face Pango substitutes where none is installed — and the caret
+    /// advances across it.
+    #[test]
+    fn cjk_text_shapes_and_takes_caret_steps() {
+        let d = doc(1, "日本語のテスト");
+        let t = Typeset::new(d, LayoutOptions::default());
+        assert_eq!(t.tree().pages.len(), 1);
+        assert_eq!(t.tree().pages[0].lines().count(), 1);
+        let start = t.caret(TextPos { para: 0, offset: 0 }).expect("caret at the start");
+        let end = t.caret(TextPos { para: 0, offset: 7 }).expect("caret at the end");
+        assert!(end.x_pt > start.x_pt + 10.0, "seven CJK characters take room: {} -> {}", start.x_pt, end.x_pt);
+    }
+
+    /// Tab leaders and paragraph boxes draw without panic: leaders
+    /// across the tab's gap, the box under the text.
+    #[test]
+    fn tab_leaders_and_paragraph_boxes_draw() {
+        let mut d = doc(1, "one\ttwo");
+        d.paragraphs[0].style.tab_stops_pt = vec![crate::model::TabStop {
+            pos_pt: 200.0,
+            align: crate::model::TabAlign::Left,
+            leader: crate::model::TabLeader::Dot,
+        }];
+        d.paragraphs[0].style.shading = Some("D9D9D9".into());
+        let t = Typeset::new(d, LayoutOptions::default());
+        let page = &t.tree().pages[0];
+        assert!(page.items.iter().any(|i| matches!(i, Item::ParaBox { .. })), "a box under the shaded line");
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, page.width_pt as i32, page.height_pt as i32).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.paint().unwrap();
+        t.draw_page(&cr, 0);
+    }
 }
