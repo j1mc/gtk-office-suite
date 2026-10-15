@@ -669,6 +669,32 @@ mod tests {
         });
     }
 
+    /// Keep-lines and widow-control toggles are the caret's paragraph
+    /// as model ops: each toggle is one history transaction, and one
+    /// undo takes each back.
+    #[test]
+    fn keep_lines_and_widow_control_are_model_ops_with_undo() {
+        gtk_test(|| {
+            let (_view, buf) = editable("one\ntwo");
+            let style = |buf: &gtk::TextBuffer| {
+                let live = crate::live::of(buf).unwrap();
+                let m = live.borrow();
+                let s = &m.document().paragraphs[1].style;
+                (s.keep_lines, s.widow_control)
+            };
+            // The caret inside "two".
+            buf.place_cursor(&buf.iter_at_offset(5));
+            assert!(crate::actions::toggle_keep_lines_in(&buf));
+            assert_eq!(style(&buf), (true, None));
+            assert!(crate::actions::toggle_widow_control_in(&buf));
+            assert_eq!(style(&buf), (true, Some(false)));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (true, None));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (false, None));
+        });
+    }
+
     /// A Markdown shortcut ("**hi**" then a space) is one model edit
     /// (#1202 stage 3): no buffer read-back, the formatting the text already
     /// had is kept, the caret stays after the typed space, and one undo

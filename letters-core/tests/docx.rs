@@ -857,11 +857,11 @@ fn single_column_writes_no_cols_element() {
 #[test]
 fn tab_stops_survive() {
     let mut d = Document::from_plain_text("tabbed");
-    d.paragraphs[0].style.tab_stops_pt = vec![36.0, 108.0, 180.0];
+    d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0), TabStop::left(108.0), TabStop::left(180.0)];
     let rt = round_trip(&d);
     assert_eq!(rt.paragraphs[0].style.tab_stops_pt.len(), 3, "stops lost");
     for (got, want) in rt.paragraphs[0].style.tab_stops_pt.iter().zip([36.0, 108.0, 180.0]) {
-        assert!((got - want).abs() < 0.1, "stop {got} != {want}");
+        assert!((got.pos_pt - want).abs() < 0.1, "stop {} != {want}", got.pos_pt);
     }
 }
 
@@ -896,7 +896,7 @@ fn a_tab_character_does_not_become_a_tab_stop() {
 #[test]
 fn a_cleared_or_non_stop_tab_entry_is_not_read_as_a_stop() {
     let mut d = Document::from_plain_text("tabbed");
-    d.paragraphs[0].style.tab_stops_pt = vec![36.0];
+    d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0)];
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("plain.docx");
     docx::write(&d, &src).expect("write docx");
