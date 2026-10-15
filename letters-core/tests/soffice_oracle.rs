@@ -2057,34 +2057,24 @@ fn header_and_footer_alignment_survive_writer_both_ways() {
 /// Keep-lines and widow control across the format boundary, both ways:
 /// our docx converted to odt, and our odt converted to docx.
 ///
-/// One Writer asymmetry is baked in: its docx exporter materializes
-/// inherited control as an explicit on, so a widow-control-off paragraph
-/// comes back from an odt-to-docx pass controlled (diagnosed from the
-/// converted `<w:pPr>`: `<w:widowControl/>` where ours wrote off). The
-/// off bit survives everywhere Writer's own model carries it, including
-/// the docx-to-odt pass here.
+/// Writer inverts widow control through an odt-to-docx pass: a paragraph
+/// we mark uncontrolled comes back controlled, and an unmarked one comes
+/// back uncontrolled (diagnosed from both sides' XML: our `fo:widows="1"`
+/// reads back as `<w:widowControl/>`, our unmarked paragraph as
+/// `w:val="0"`). Keep-lines survives both ways, and widow control
+/// survives everywhere else, including the docx-to-odt pass here — so
+/// that leg asserts the values, and the odt-to-docx leg asserts
+/// keep-lines only.
 #[test]
 fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let Some(bin) = require_or_skip() else { return };
     let mut d = Document::from_plain_text("kept together\nmay strand\nordinary");
     d.paragraphs[0].style.keep_lines = true;
     d.paragraphs[1].style.widow_control = Some(false);
-    let close = |got: &Document, how: &str, widow_off: bool| {
-        let kept = &para_with_text(got, "kept together").style;
-        let free = &para_with_text(got, "may strand").style;
-        let plain = &para_with_text(got, "ordinary").style;
-        assert!(kept.keep_lines, "{how}: keep_lines lost");
-        if widow_off {
-            assert_eq!(free.widow_control, Some(false), "{how}: widow control lost");
-        } else {
-            // Writer's docx export normalizes the off bit away (see
-            // above); the setting must at least survive explicitly.
-            assert!(free.widow_control.is_some(), "{how}: widow control dropped: {:?}", free);
-        }
-        // Writer materializes inherited control as explicit 2-and-2,
-        // which reads as Some(true): behaviorally the default, so the
-        // plain paragraph must only not allow widows.
-        assert!(!plain.keep_lines && plain.widow_control != Some(false), "{how}: plain paragraph gained control: {:?}", plain);
+    let keep = |got: &Document, how: &str| {
+        assert!(para_with_text(got, "kept together").style.keep_lines, "{how}: keep_lines lost");
+        assert!(!para_with_text(got, "may strand").style.keep_lines, "{how}: keep_lines spread");
+        assert!(!para_with_text(got, "ordinary").style.keep_lines, "{how}: keep_lines spread");
     };
     let dir = tempfile::tempdir().unwrap();
     let docx_path = dir.path().join("keep.docx");
@@ -2092,57 +2082,17 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let _ = soffice_convert(bin, &docx_path, "odt").ok();
     let odt_path = dir.path().join("keep.odt");
     assert!(odt_path.exists(), "soffice did not convert docx to odt");
-    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt", true);
-    // Temporary diagnostic: our styles and Writer's converted
-    // properties for every paragraph, to see the whole mapping.
-    let sub = dir.path().join("diag");
-    std::fs::create_dir_all(&sub).unwrap();
-    let op = sub.join("keep.odt");
-    letters_core::odt::write(&d, op.to_str().unwrap()).expect("write odt");
-    eprintln!("DIAG our styles: {}", auto_styles_of(&op));
-    let _ = soffice_convert(bin, &op, "docx").ok();
-    let dp = sub.join("keep.docx");
-    for text in ["kept together", "may strand", "ordinary"] {
-        eprintln!("DIAG converted [{text}]: {}", ppr_window(&dp, text));
-    }
+    let rt = letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt");
+    keep(&rt, "docx → Writer → odt");
+    let free = &para_with_text(&rt, "may strand").style;
+    let plain = &para_with_text(&rt, "ordinary").style;
+    assert_eq!(free.widow_control, Some(false), "docx → Writer → odt: widow control lost");
+    // Writer materializes inherited control as explicit 2-and-2, which
+    // reads as Some(true): behaviorally the default, so the plain
+    // paragraph must only not allow widows.
+    assert!(plain.widow_control != Some(false), "docx → Writer → odt: plain paragraph gained control: {plain:?}");
     let Some(rt) = through_lo_to_docx(&d, "keep") else { return };
-    close(&rt, "odt → Writer → docx", false);
-}
-
-/// DIAGNOSTIC (temporary): every automatic paragraph style in an odt.
-fn auto_styles_of(path: &std::path::Path) -> String {
-    let f = std::fs::File::open(path).unwrap();
-    let mut zip = zip::ZipArchive::new(f).unwrap();
-    let mut xml = String::new();
-    use std::io::Read;
-    zip.by_name("content.xml").unwrap().read_to_string(&mut xml).unwrap();
-    let mut out = Vec::new();
-    let mut rest = xml.as_str();
-    while let Some(at) = rest.find("<style:style ") {
-        let end = rest[at..].find('>').map(|e| at + e + 1).unwrap_or(rest.len());
-        let head = &rest[at..end];
-        if head.contains("paragraph") {
-            let close = rest[end..].find("</style:style>").map(|e| end + e + 14).unwrap_or(end);
-            out.push(rest[at..close].to_string());
-            rest = &rest[close..];
-        } else {
-            rest = &rest[end..];
-        }
-    }
-    out.join(" || ")
-}
-
-/// DIAGNOSTIC (temporary): 300 chars around `text` in a converted docx.
-fn ppr_window(path: &std::path::Path, text: &str) -> String {
-    let f = std::fs::File::open(path).unwrap();
-    let mut zip = zip::ZipArchive::new(f).unwrap();
-    let mut xml = String::new();
-    use std::io::Read;
-    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
-    let Some(at) = xml.find(text) else { return "text not found".into() };
-    let from = xml.floor_char_boundary(at.saturating_sub(300));
-    let end = (at + 60).min(xml.len());
-    xml[from..end].to_string()
+    keep(&rt, "odt → Writer → docx");
 }
 
 /// Fixed and minimum line heights across the format boundary, both
