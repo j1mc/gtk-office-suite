@@ -1132,6 +1132,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_rows,
         table_spans,
         table_fills,
+        sections: Vec::new(),
+        next_section_id: 0,
     })
 }
 
