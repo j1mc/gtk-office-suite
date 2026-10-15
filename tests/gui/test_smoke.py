@@ -3452,12 +3452,14 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
     """Two sheets through the whole sheet bar (tables-readiness.md row 3,
     #1204): a value on Sheet1 and a formula on Sheet2 that reads it; rename
     Sheet2, move it first, delete it and undo the delete; switch sheets
-    through the switcher; save, read the workbook's parts, then reopen it
-    in a fresh process and walk both sheets again. Nothing may cross sheets
-    on the way: the formula keeps its reference through the rename, the
-    delete's undo brings back the sheet with its formula, and the saved
-    file has both sheets, in the new order, under their new names, each
-    with its own content, in its parts and in the app that reopens it."""
+    through the switcher; edit the precedent on Sheet1 and save without
+    visiting the dependent sheet first (TBL-006); read the workbook's
+    parts, then reopen it in a fresh process and walk both sheets again.
+    Nothing may cross sheets on the way: the formula keeps its reference
+    through the rename, the delete's undo brings back the sheet with its
+    formula, and the saved file has both sheets, in the new order, under
+    their new names, each with its own content, in its parts and in the
+    app that reopens it."""
 
     app_name = "tables"
 
@@ -3567,6 +3569,12 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         self._switch_to("Sheet1")
         self._wait_state((["Totals", "Sheet1"], 1, ("5", None)), "the switcher to show Sheet1's own value")
 
+        # TBL-006: edit the precedent on Sheet1, then save WITHOUT
+        # visiting Totals first. The saved Totals sheet must still carry
+        # the formula and the freshly recalculated cached value.
+        self._put("A1", "7")
+        self._wait_state((["Totals", "Sheet1"], 1, ("7", None)), "Sheet1's edited precedent to land")
+
         # Save, then read the workbook back.
         out_path = os.path.join(self._dir, "two-sheets.xlsx")
         subprocess.run(["gapplication", "action", aid, "save-file-as"])
@@ -3587,8 +3595,8 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertEqual(len(sheets), 2, sheets)
         totals, sheet1 = parts[sheets[0]], parts[sheets[1]]
         self.assertRegex(totals, r"<f>Sheet1!A1\*2</f>", "Totals lost its formula")
-        self.assertRegex(totals, r"<v>10</v>", "Totals' formula has no cached 10")
-        self.assertRegex(sheet1, r"<v>5</v>", "Sheet1 lost its value")
+        self.assertRegex(totals, r"<v>14</v>", "Totals' formula has no recalculated cached 14")
+        self.assertRegex(sheet1, r"<v>7</v>", "Sheet1 lost its edited value")
         self.assertNotRegex(sheet1, r"<f>", "a formula crossed onto Sheet1")
 
         # Reopen it in a fresh process, as `tables two-sheets.xlsx` from a
@@ -3598,9 +3606,9 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         names = self.wait_until(lambda: self._state()[0], lambda got: got == ["Totals", "Sheet1"],
                                 interval=0.3, description="the reopened workbook's sheets")
         self._switch_to("Totals")
-        self._wait_state((names, 0, ("10", "Sheet1!A1*2")), "Totals to reopen with its formula and value")
+        self._wait_state((names, 0, ("14", "Sheet1!A1*2")), "Totals to reopen with its formula and recalculated value")
         self._switch_to("Sheet1")
-        self._wait_state((names, 1, ("5", None)), "Sheet1 to reopen with its own value")
+        self._wait_state((names, 1, ("7", None)), "Sheet1 to reopen with its edited value")
         self.assertIsNone(self.process.poll(), "tables crashed in the sheet journey")
 
 
