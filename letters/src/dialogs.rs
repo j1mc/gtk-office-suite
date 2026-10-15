@@ -137,9 +137,50 @@ pub(crate) fn apply_header_footer(buf: &gtk::TextBuffer, header: &str, footer: &
     crate::live::sync_actions(buf);
 }
 
-/// Set the document's page size, margins and orientation from Page Setup:
-/// one model edit, which Undo takes back. The columns and column gap are
-/// the document's own and are kept.
+/// The paragraph the caret is in, in the live model's document.
+fn caret_paragraph(live: &mut crate::live::LiveModel, buf: &gtk::TextBuffer) -> usize {
+    let caret = buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize;
+    let at = live.sequence_offset(caret);
+    letters_core::edit::locate(live.document(), at).map_or(0, |(para, _)| para)
+}
+
+/// Page Setup over `parent` for the page of the section the caret is in
+/// (the document's page when it has one section, the container's when
+/// it has none of its own); Apply sets it as one undoable model edit.
+pub(crate) fn show_page_setup(parent: &impl IsA<gtk::Widget>, pc: &PageContainer, buf: &gtk::TextBuffer) {
+    let current = crate::live::of(buf)
+        .and_then(|m| {
+            let mut m = m.borrow_mut();
+            let para = caret_paragraph(&mut m, buf);
+            letters_core::sections::page_at(m.document(), para)
+        })
+        .unwrap_or_else(|| crate::doc_tab::layout_options(pc).page);
+    let page = suite_common::page_setup::Page {
+        width_pt: current.width_pt,
+        height_pt: current.height_pt,
+        margin_top_pt: current.margin_top_pt,
+        margin_bottom_pt: current.margin_bottom_pt,
+        margin_left_pt: current.margin_left_pt,
+        margin_right_pt: current.margin_right_pt,
+    };
+    let buf = buf.clone();
+    suite_common::page_setup::show(parent, page, move |p| {
+        apply_page_geometry(&buf, letters_core::model::PageGeometry {
+            width_pt: p.width_pt,
+            height_pt: p.height_pt,
+            margin_top_pt: p.margin_top_pt,
+            margin_bottom_pt: p.margin_bottom_pt,
+            margin_left_pt: p.margin_left_pt,
+            margin_right_pt: p.margin_right_pt,
+            ..Default::default()
+        });
+    });
+}
+
+/// Set the page size, margins and orientation of the section the caret
+/// is in from Page Setup (`sections::set_page_at`): one model edit, which
+/// Undo takes back. For a document of one section that is the document's
+/// page. The section's columns and column gap are its own and are kept.
 ///
 /// Page Setup used to write only the application's settings, which the
 /// page view uses for a document with no page of its own. On a document
@@ -147,15 +188,43 @@ pub(crate) fn apply_header_footer(buf: &gtk::TextBuffer, header: &str, footer: &
 /// ever saved what was chosen.
 pub(crate) fn apply_page_geometry(buf: &gtk::TextBuffer, page: letters_core::model::PageGeometry) -> bool {
     let Some(live) = crate::live::of(buf) else { return false };
+    let para = caret_paragraph(&mut live.borrow_mut(), buf);
     let applied = live.borrow_mut().edit_with(buf, |doc| {
-        let base = doc.page.unwrap_or_default();
+        let base = letters_core::sections::page_at(doc, para).unwrap_or_default();
         let page = letters_core::model::PageGeometry { columns: base.columns, column_gap_pt: base.column_gap_pt, ..page };
-        if doc.page == Some(page) {
-            Vec::new()
-        } else {
-            vec![letters_core::edit::Op::SetPage { page: Some(page) }]
-        }
+        letters_core::sections::set_page_at(doc, para, page)
     });
+    crate::live::sync_actions(buf);
+    applied
+}
+
+/// Insert ▸ Section Break at the caret (`sections::insert_break`): a new
+/// section starts there on the page of the one it splits, as one model
+/// edit. A document with no page of its own gets the container's for both.
+pub(crate) fn insert_section_break(pc: &PageContainer, buf: &gtk::TextBuffer) -> bool {
+    let Some(live) = crate::live::of(buf) else { return false };
+    let default_page = crate::doc_tab::layout_options(pc).page;
+    let mut m = live.borrow_mut();
+    let caret = buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize;
+    let at = m.sequence_offset(caret);
+    let Some(ops) = letters_core::sections::insert_break(m.document(), at, default_page) else { return false };
+    let applied = m.apply_user_ops(buf, &ops, false);
+    drop(m);
+    crate::live::sync_actions(buf);
+    applied
+}
+
+/// Remove the break before the section the caret is in
+/// (`sections::remove_break`): it joins the section before, as one model
+/// edit. Nothing in the first section.
+pub(crate) fn remove_section_break(buf: &gtk::TextBuffer) -> bool {
+    let Some(live) = crate::live::of(buf) else { return false };
+    let mut m = live.borrow_mut();
+    let para = caret_paragraph(&mut m, buf);
+    let section = letters_core::sections::section_of(m.document(), para);
+    let Some(ops) = letters_core::sections::remove_break(m.document(), section) else { return false };
+    let applied = m.apply_user_ops(buf, &ops, false);
+    drop(m);
     crate::live::sync_actions(buf);
     applied
 }
@@ -528,6 +597,43 @@ mod tests {
             crate::live::undo(&buf, false);
             assert_eq!(live.borrow_mut().document().page, doc.page, "Undo put the old page back");
             assert!(!apply_page_geometry(&buf, letters_core::model::PageGeometry { columns: 2, ..Default::default() }), "the same page is no edit");
+        });
+    }
+
+    /// Insert Section Break at the caret starts a section; Page Setup there
+    /// sets that section's page only, which the page view lays out; each
+    /// is one undo step (LET-005S).
+    #[test]
+    fn page_setup_sets_the_carets_section_and_undoes() {
+        gtk_test(|| {
+            let (pc, buf) = crate::doc_tab::make_doc_widget(None);
+            let live = crate::live::of(&buf).unwrap();
+            let mut doc = letters_core::Document::from_plain_text("first\nsecond");
+            doc.page = Some(letters_core::model::PageGeometry::default());
+            crate::bridge::load_document(&doc, &buf);
+            let second = live.borrow_mut().buffer_offset(letters_core::edit::paragraph_start(&doc, 1)).unwrap();
+            buf.place_cursor(&buf.iter_at_offset(second as i32));
+
+            assert!(insert_section_break(&pc, &buf));
+            let sections = live.borrow_mut().document().sections.clone();
+            assert_eq!(sections.iter().map(|s| (s.range.start, s.range.end)).collect::<Vec<_>>(), vec![(0, 1), (1, 2)]);
+            assert_eq!(live.borrow_mut().document().to_plain_text(), "first\nsecond", "a break at a paragraph's start splits nothing");
+
+            let landscape = letters_core::model::PageGeometry { width_pt: 841.9, height_pt: 595.3, ..Default::default() };
+            assert!(apply_page_geometry(&buf, landscape));
+            let d = live.borrow_mut().document().clone();
+            assert_eq!((d.sections[0].geometry, d.sections[1].geometry), (letters_core::model::PageGeometry::default(), landscape));
+            assert_eq!(d.page, Some(letters_core::model::PageGeometry::default()), "the first section's page is the document's");
+            let typeset = crate::doc_tab::typeset_for(&pc, &buf);
+            let sizes: Vec<(f64, f64)> = typeset.tree().pages.iter().map(|p| (p.width_pt, p.height_pt)).collect();
+            assert_eq!(sizes, vec![(595.3, 841.9), (841.9, 595.3)], "the page view lays each section on its page");
+
+            crate::live::undo(&buf, false);
+            assert_eq!(live.borrow_mut().document().sections, sections, "Undo put the section's page back");
+            assert!(remove_section_break(&buf));
+            assert_eq!(live.borrow_mut().document().sections.len(), 1);
+            crate::live::undo(&buf, false);
+            assert_eq!(live.borrow_mut().document().sections, sections, "Undo put the break back, ids and all");
         });
     }
 }
