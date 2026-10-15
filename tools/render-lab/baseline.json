@@ -83,9 +83,17 @@
     "B": "green",
     "C": "green"
   },
+  "letters/combining-marks": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/edited-journey": {
     "A": "green",
     "B": "green"
+  },
+  "letters/exact-line-spacing": {
+    "A": "amber",
+    "B": "amber"
   },
   "letters/font-families": {
     "A": "green",
@@ -137,6 +145,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/keep-widow": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/landscape": {
     "A": "green",
     "B": "green",
@@ -182,6 +194,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/para-shading-borders": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/paragraph-spacing": {
     "A": "green",
     "B": "green",
@@ -196,6 +212,10 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/tab-leaders": {
+    "A": "green",
+    "B": "green"
   },
   "letters/table": {
     "A": "amber",
