@@ -68,7 +68,7 @@ pub struct TableData {
     /// The table style it names (`a:tableStyleId`), one of PowerPoint's
     /// built-in styles by its GUID; `None` is the default, "Medium Style 2
     /// - Accent 1". `accent` is that style's colour.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub style_id: Option<String>,
 }
 
