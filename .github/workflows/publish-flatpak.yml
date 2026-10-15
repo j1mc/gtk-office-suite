@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # A tag used to publish Flatpaks regardless of what the evidence workflows
   # said: release-revision.yml and the stress campaign ran *beside* this one,
