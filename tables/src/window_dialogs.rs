@@ -91,14 +91,14 @@ pub(crate) fn show_format_cells_dialog(
                 5 => NumberFormatKind::Scientific(dp),
                 _ => NumberFormatKind::General,
             };
-            crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Format Cells", move |sh| {
+            crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Format Cells", move |sh| {
                 let (r0, c0, r1, c1) = sh.selection_rect();
                 for r in r0..=r1 {
                     for c in c0..=c1 {
                         sh.formats[r][c] = NumberFormat::new(kind.clone());
                     }
                 }
-            }));
+            }); });
             refresh();
             da.queue_draw();
             dialog.close();
@@ -172,7 +172,7 @@ pub(crate) fn show_conditional_format_dialog(
                 (rgba.green() * 255.0) as u8,
                 (rgba.blue() * 255.0) as u8
             );
-            crate::sheet_actions::apply(&ctl, &da, |c| c.mutate_sheet("Conditional Formatting", move |sheet| {
+            crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Conditional Formatting", move |sheet| {
                 let (r0, c0, r1, c1) = sheet.selection_rect();
                 // Priority past every existing rule: the dialog appends,
                 // and rules evaluate in priority order (TBL-003).
@@ -185,7 +185,7 @@ pub(crate) fn show_conditional_format_dialog(
                     fill,
                     priority,
                 });
-            }));
+            }); });
             da.queue_draw();
             dlg.close();
         });

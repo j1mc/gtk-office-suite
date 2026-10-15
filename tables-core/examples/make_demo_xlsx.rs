@@ -17,7 +17,7 @@ fn main() -> Result<(), String> {
         (5, 0, "Total"), (5, 1, "=SUM(B2:B5)"), (5, 2, "=SUM(C2:C5)"), (5, 3, "=(C6-B6)/B6"),
     ];
     for (r, c, v) in cells {
-        engine.set_cell_text(*r, *c, v);
+        engine.set_cell_text(*r, *c, v)?;
     }
     engine.evaluate();
 

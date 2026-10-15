@@ -1,4 +1,5 @@
     use super::WorkbookController;
+    use super::{Op, WorkbookImage};
     use crate::engine::TablesEngine;
     use crate::fragment::Fragment; // was an import of the old controller.rs; tests reference Fragment::Grid
 
@@ -1211,3 +1212,107 @@
         assert!(controller.undo(), "the range undoes");
         assert!(controller.state.borrow().sheet().filter.is_none());
     }
+
+    /// TBL-006: editing a precedent refreshes dependents on every sheet
+    /// in the same operation. The dependent sheet here is never visited
+    /// after the edit — its projection must still follow.
+    #[test]
+    fn tbl006_inactive_dependents_refresh() {
+        let mut controller = WorkbookController::new(8, 5).unwrap();
+        controller.edit_cell(0, 0, "5");
+        assert!(controller.add_sheet("Sheet2"));
+        controller.edit_cell(0, 0, "=Sheet1!A1*2");
+        controller.state.borrow_mut().switch_sheet(0).unwrap();
+        controller.edit_cell(0, 0, "7");
+        let state = controller.state.borrow();
+        assert_eq!(state.active_sheet, 0);
+        assert_eq!(state.sheets[1].borrow().cell(0, 0), "14");
+        assert_eq!(state.cell_input_at(1, 0, 0), "=Sheet1!A1*2");
+        assert_eq!(state.engine.cell_at(1, 0, 0), "14");
+    }
+
+    /// TBL-006: a group that fails partway changes nothing and keeps redo.
+    /// The first op's write is rolled back, no step is recorded, and the
+    /// earlier undo stays redoable.
+    #[test]
+    fn tbl006_failed_group_keeps_redo() {
+        let mut controller = WorkbookController::new(5, 5).unwrap();
+        controller.edit_cell(0, 0, "before");
+        let live = controller.state.borrow().sheets[0].borrow().sheet_id;
+        assert!(controller.undo());
+        assert!(controller.can_redo());
+        let before = WorkbookImage::of(&controller.state.borrow());
+        let bad = vec![
+            Op::SetCell { sheet: live, row: 0, col: 0, input: "dropped".into() },
+            Op::SetCell { sheet: 9999, row: 0, col: 0, input: "dropped".into() },
+        ];
+        assert!(!controller.apply_ops("Bad Group", bad));
+        assert_eq!(WorkbookImage::of(&controller.state.borrow()), before);
+        assert!(controller.can_redo(), "a failed group must not consume redo");
+        assert!(controller.redo());
+        assert_eq!(controller.state.borrow().sheet().cell(0, 0), "before");
+    }
+
+    /// TBL-006: projections are never written back as inputs. A formula
+    /// saves as its formula with a cached result, and a spill's derived
+    /// cells save as empty inputs — not as constants that would block the
+    /// spill when the file reopens.
+    #[test]
+    fn tbl006_projection_never_becomes_input() {
+        let mut controller = WorkbookController::new(8, 8).unwrap();
+        controller.edit_cell(0, 0, "2");
+        controller.edit_cell(0, 1, "3");
+        controller.edit_cell(1, 0, "=A1+B1");
+        controller.edit_cell(4, 0, "=SEQUENCE(3)");
+        {
+            let state = controller.state.borrow();
+            assert_eq!(state.sheet().cell(1, 0), "5");
+            assert_eq!(state.cell_input(1, 0), "=A1+B1");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contract.xlsx");
+        {
+            let state = controller.state.borrow();
+            let sheets: Vec<_> = state.sheets.iter().map(|s| s.borrow().clone()).collect();
+            crate::io::save_sheets_to_xlsx_with_engine(path.to_str().unwrap(), &sheets, Some(&state.engine)).unwrap();
+        }
+        let (engine, _) = crate::io::load_xlsx_workbook(path.to_str().unwrap()).unwrap();
+        assert_eq!(engine.formula(1, 0).as_deref(), Some("A1+B1"), "the formula survived the round trip");
+        assert_eq!(engine.cell(1, 0), "5");
+        // The reload re-spills, so the derived cell reads "2" again — but
+        // it holds no input, and the file stores no constant there that
+        // could block the spill.
+        assert_eq!(engine.editable_input_at(0, 5, 0), "", "a derived spill cell has no input to flatten");
+        assert_eq!(engine.cell_at(0, 5, 0), "2", "the spill recomputes on load");
+        let mut wb: calamine::Xlsx<_> = calamine::open_workbook(path.to_str().unwrap()).unwrap();
+        let range = calamine::Reader::worksheet_range(&mut wb, "Sheet1").unwrap();
+        assert!(range.get_value((5, 0)).is_none(), "a derived spill cell was flattened into the file");
+    }
+
+    /// TBL-006: `mutate_sheet` cannot smuggle values or a resize past the
+    /// content contract — in any build, not just debug ones. A refused
+    /// mutation records no step and, like any failed operation, leaves
+    /// redo alone; metadata still flows through as one step.
+    #[test]
+    fn tbl006_mutate_sheet_refuses_value_and_size_edits() {
+        let mut controller = WorkbookController::new(4, 4).unwrap();
+        controller.edit_cell(0, 0, "kept");
+        assert!(controller.undo());
+        assert!(controller.can_redo());
+        assert!(!controller.mutate_sheet("Sneaky Values", |sheet| {
+            sheet.data[0][0] = "dropped".into();
+        }));
+        assert!(!controller.mutate_sheet("Sneaky Size", |sheet| {
+            sheet.rows = 99;
+        }));
+        assert!(controller.can_redo(), "a refused mutation must not consume redo");
+        assert!(controller.redo());
+        assert_eq!(controller.state.borrow().sheet().cell(0, 0), "kept");
+        assert!(controller.mutate_sheet("Bold", |sheet| {
+            sheet.styles[0][0].bold = true;
+        }));
+        assert!(controller.state.borrow().sheet().styles[0][0].bold);
+        assert!(controller.undo());
+        assert!(!controller.state.borrow().sheet().styles[0][0].bold);
+    }
+

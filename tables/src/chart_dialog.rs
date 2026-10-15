@@ -143,9 +143,9 @@ pub fn opener(
                     480.0,
                     280.0,
                 );
-                crate::sheet_actions::apply(&ctl, &grid, |c| c.mutate_sheet("Insert Chart", move |sheet| {
+                crate::sheet_actions::apply(&ctl, &grid, |c| { c.mutate_sheet("Insert Chart", move |sheet| {
                     sheet.charts.push(chart);
-                }));
+                }); });
                 dlg.close();
             });
         }

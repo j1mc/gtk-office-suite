@@ -218,11 +218,15 @@ impl WorkbookController {
         use SortDirection::{Ascending, Descending};
         let sorted = self.state.borrow().sheet().sorted_col;
         match sorted {
-            Some((current, Ascending)) if current == col => self.sort_column(col, Descending),
+            Some((current, Ascending)) if current == col => {
+                self.sort_column(col, Descending);
+            }
             Some((current, Descending)) if current == col => {
                 self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None);
             }
-            _ => self.sort_column(col, Ascending),
+            _ => {
+                self.sort_column(col, Ascending);
+            }
         }
     }
 
@@ -305,8 +309,11 @@ impl WorkbookController {
     }
 
     /// Sort the sheet's rows by `col` in `direction` (numbers numerically,
-    /// text case-insensitively, blanks last), as one undo step.
-    pub fn sort_column(&mut self, col: usize, direction: SortDirection) {
+    /// text case-insensitively, blanks last), as one undo step. Returns
+    /// whether the sort was applied: a reference the engine cannot
+    /// translate aborts the sort with no history step rather than
+    /// reordering rows under stale references.
+    pub fn sort_column(&mut self, col: usize, direction: SortDirection) -> bool {
         use SortDirection::Ascending;
 
         let (sheet, start, rows, cols) = {
@@ -315,14 +322,14 @@ impl WorkbookController {
             (sheet.sheet_id, sheet.frozen_rows.min(sheet.rows), sheet.rows, sheet.cols)
         };
         if !self.authorize_cells(sheet, (start..rows).flat_map(|r| (0..cols).map(move |c| (r, c)))) {
-            return;
+            return false;
         }
 
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
         let before_sheet = state.sheet().clone();
         if col >= before_sheet.cols {
-            return;
+            return false;
         }
         let new_direction = direction;
         let before_inputs: Vec<Vec<String>> = (0..before_sheet.rows)
@@ -390,7 +397,14 @@ impl WorkbookController {
             let mut state = self.state.borrow_mut();
             for (new_row, &old_row) in order.iter().enumerate() {
                 for (column, (input, current)) in before_inputs[old_row].iter().zip(&before_inputs[new_row]).enumerate() {
-                    let moved = state.engine.move_input(input, (old_row, column), (new_row, column));
+                    // The translation touches nothing yet — these strings
+                    // become the op below — so a rejection aborts the sort
+                    // with no history step rather than sorting rows under
+                    // references that no longer point where they did.
+                    let moved = match state.engine.move_input(input, (old_row, column), (new_row, column)) {
+                        Ok(moved) => moved,
+                        Err(_) => return false,
+                    };
                     if moved != *current {
                         cells.push((new_row, column, moved));
                     }
@@ -406,6 +420,6 @@ impl WorkbookController {
         after_sheet.notes = order.iter().map(|&row| before_sheet.notes[row].clone()).collect();
         let mut ops = vec![Op::SetCells { sheet: sheet_id, cells }];
         ops.extend(super::ops::diff_ops(&before_sheet, &after_sheet));
-        self.apply_ops("Sort", ops);
+        self.apply_ops("Sort", ops)
     }
 }

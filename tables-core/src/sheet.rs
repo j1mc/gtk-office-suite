@@ -1063,6 +1063,11 @@ impl Default for SheetProtection {
 #[derive(Clone)]
 pub struct SheetModel {
     pub name: String,
+    /// Calculated values as display text: a read-only projection of the
+    /// engine, refreshed by `sync_from_engine_at`, never another formula
+    /// engine. Editable content (inputs, formulas) lives in IronCalc;
+    /// writing this text back as input silently flattens formulas and
+    /// spill results into constants.
     pub data: Vec<Vec<String>>,
     pub rows: usize,
     pub cols: usize,
@@ -1470,6 +1475,10 @@ impl SheetModel {
         )
     }
 
+    /// The cell's displayed value: read-only projection text for render,
+    /// stats, filters and copy. The editable input (formula-preserving)
+    /// lives in the engine; see `WorkbookState::cell_input` and
+    /// `TablesEngine::input_at`. Never write this text back as input.
     pub fn cell(&self, r: usize, c: usize) -> &str {
         if r < self.rows && c < self.cols { &self.data[r][c] } else { "" }
     }
@@ -1645,14 +1654,24 @@ impl SheetModel {
     }
 
     #[allow(clippy::needless_range_loop)]
-    pub fn sync_from_engine(&mut self, engine: &TablesEngine) {
-        let grid = engine.to_grid();
-        for r in 0..self.rows.min(grid.len()) {
-            for c in 0..self.cols.min(grid[r].len()) {
-                self.data[r][c] = grid[r][c].clone();
-                self.formulas[r][c] = engine.has_formula(r, c);
+    pub fn sync_from_engine_at(&mut self, engine: &TablesEngine, sheet: usize) {
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                self.data[r][c] = engine.cell_at(sheet, r, c);
+                self.formulas[r][c] = engine.has_formula_at(sheet, r, c);
             }
         }
+    }
+
+    /// Re-read this sheet's values from the engine's active sheet: for a
+    /// freshly loaded sheet right after its `set_active_sheet`, and
+    /// anywhere else the sheet is known to be active. Prefer
+    /// [`Self::sync_from_engine_at`] with an explicit sheet — and
+    /// `WorkbookState::sync_all_sheets` after any engine write — so a
+    /// formula on another sheet follows its precedent in the same
+    /// operation, not when that sheet is next visited.
+    pub fn sync_from_engine(&mut self, engine: &TablesEngine) {
+        self.sync_from_engine_at(engine, engine.active_sheet());
     }
 }
 
