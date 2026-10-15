@@ -95,6 +95,15 @@ pub struct TxnOutcome {
 pub struct DecksController {
     pub slides: Rc<RefCell<Vec<Slide>>>,
     pub masters: Rc<RefCell<Vec<MasterSlide>>>,
+    /// The deck's declared slide size, in EMU (`Deck.page_size`, DCK-006):
+    /// installed at open/recovery, saved back by `deck()`. No edit path
+    /// changes it in this cutover; it rides the session, not the history.
+    pub page_size: Rc<Cell<Option<(f64, f64)>>>,
+    /// The deck's retained themes (`Deck.themes`, DCK-006): installed at
+    /// open/recovery, saved back by `deck()`. Masters name these by
+    /// stable id; edits to masters (SetMaster) carry their `theme_id`
+    /// through history, but no edit path retargets themes yet.
+    pub themes: Rc<RefCell<Vec<crate::engine::theme::Theme>>>,
     pub dirty: Rc<Cell<bool>>,
     /// The deck's on-disk path, or `None` for an unsaved new document.
     /// Canonical document identity (#103) — window.rs reads/writes this
@@ -220,6 +229,8 @@ impl DecksController {
         Self {
             slides: Rc::new(RefCell::new(slides)),
             masters: Rc::new(RefCell::new(masters)),
+            page_size: Rc::new(Cell::new(None)),
+            themes: Rc::new(RefCell::new(Vec::new())),
             dirty: Rc::new(Cell::new(false)),
             file_path: Rc::new(RefCell::new(None)),
             history: RefCell::new(History::default()),
@@ -287,6 +298,8 @@ impl DecksController {
     ) {
         *self.slides.borrow_mut() = deck.slides;
         *self.masters.borrow_mut() = deck.masters;
+        self.page_size.set(deck.page_size);
+        *self.themes.borrow_mut() = deck.themes;
         crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
         *self.source_context.borrow_mut() = Some(context);
         *self.history.borrow_mut() = History::default();
@@ -321,6 +334,8 @@ impl DecksController {
     ) {
         *self.slides.borrow_mut() = deck.slides;
         *self.masters.borrow_mut() = deck.masters;
+        self.page_size.set(deck.page_size);
+        *self.themes.borrow_mut() = deck.themes;
         crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
         *self.source_context.borrow_mut() = context;
         *self.history.borrow_mut() = History::default();
@@ -539,7 +554,7 @@ impl DecksController {
             }
             None => self.slides.borrow().clone(),
         };
-        crate::engine::Deck { slides, masters }
+        crate::engine::Deck { slides, masters, page_size: self.page_size.get(), themes: self.themes.borrow().clone() }
     }
 
     pub fn slide_count(&self) -> usize {
@@ -1985,7 +2000,8 @@ mod tests {
             background: "#0b3d6b".into(),
             default_font: "Sans".into(),
             shapes: vec![SlideObject::Rect { x: 0.0, y: 0.0, w: 28.0, h: 540.0, rotation: 0.0 }],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }
     }
@@ -2148,6 +2164,8 @@ mod tests {
         let deck = crate::engine::Deck {
             slides: c.slides.borrow().clone(),
             masters: c.masters.borrow().clone(),
+            page_size: None,
+            themes: Vec::new(),
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().with_extension("pptx");

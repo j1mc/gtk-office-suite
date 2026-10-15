@@ -38,7 +38,7 @@ fn through_a_snapshot(deck: &Deck, kind: &str, tag: &str) -> Deck {
 
 /// A deck of exactly these slides, with no masters.
 fn deck_of(slides: Vec<Slide>) -> Deck {
-    let mut deck = Deck { slides, masters: vec![] };
+    let mut deck = Deck { slides, masters: vec![], page_size: None, themes: Vec::new() };
     // Writers map builds to file ids through stable object ids, so the
     // deck needs them before the snapshot (DCK-005).
     decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
@@ -334,7 +334,8 @@ fn masters_survive_a_snapshot() {
                     background: "#204060".into(),
                     default_font: "Cantarell".into(),
                     shapes: vec![text_box("a footer on the master", 20.0, 500.0)],
-                    page_emu: None,
+                    theme_id: None,
+                    color_map: Default::default(),
                     layouts: Vec::new(),
                 },
                 MasterSlide {
@@ -343,7 +344,8 @@ fn masters_survive_a_snapshot() {
                     background: "#a01020".into(),
                     default_font: "Cantarell".into(),
                     shapes: vec![],
-                    page_emu: None,
+                    theme_id: None,
+                    color_map: Default::default(),
                     layouts: Vec::new(),
                 },
             ],
@@ -376,6 +378,8 @@ fn masters_survive_a_snapshot() {
                     layout_id: None,
                 },
             ],
+            page_size: None,
+            themes: Vec::new(),
         };
         // Stable master and slide ids, minted once here (DCK-005): the
         // first slide stays on the first master, the second on the second.
@@ -563,7 +567,8 @@ fn the_masters_font_survives_a_snapshot() {
                 // still come back as "Sans" and look like a pass.
                 default_font: "Liberation Serif".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
             slides: vec![Slide {
@@ -577,6 +582,8 @@ fn the_masters_font_survives_a_snapshot() {
                 ids: Default::default(),
                 layout_id: None,
             }],
+            page_size: None,
+            themes: Vec::new(),
         };
         let back = through_a_snapshot(&deck, kind, "master-font");
         match back.masters.first() {
@@ -613,7 +620,8 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 background: "#ffffff".into(),
                 default_font: "Liberation Serif".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             },
             MasterSlide {
@@ -622,7 +630,8 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 background: "#ffffff".into(),
                 default_font: "Liberation Mono".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             },
         ],
@@ -650,6 +659,8 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 layout_id: None,
             },
         ],
+        page_size: None,
+        themes: Vec::new(),
     };
     decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
     deck.slides[0].master_id = Some(deck.masters[0].id);
@@ -694,7 +705,8 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             background: "#ffffff".into(),
             default_font: "Liberation Serif".into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }],
         slides: vec![Slide {
@@ -708,6 +720,8 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             ids: Default::default(),
             layout_id: None,
         }],
+        page_size: None,
+        themes: Vec::new(),
     };
     let bytes = decks_core::write_deck_bytes("pptx", &deck).expect("write pptx");
     let mut zip =
@@ -846,9 +860,12 @@ fn a_master_decorations_run_styling_survives_a_snapshot() {
                     ],
                     body: Default::default(),
                 }],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
+            page_size: None,
+            themes: Vec::new(),
         };
         let back = through_a_snapshot(&deck, kind, "masterruns");
         let master = back
@@ -928,9 +945,12 @@ fn a_masters_run_styles_do_not_collide_with_a_slides_in_odp() {
                 }],
                 body: Default::default(),
             }],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }],
+        page_size: None,
+        themes: Vec::new(),
     };
     let back = through_a_snapshot(&deck, "odp", "stylecollide");
 
@@ -1494,6 +1514,7 @@ fn paragraph_styles_survive_a_snapshot() {
         insets: Some(Insets { left: 9.6, top: 4.8, right: 9.6, bottom: 4.8 }),
         autofit: Some(decks_core::engine::Autofit { font_scale: 0.625, line_reduction: 0.2 }),
         placeholder: None,
+        placeholder_key: None,
         frame: None,
     };
     let deck = deck_of(vec![slide_of(
@@ -1920,7 +1941,8 @@ fn recovery_rich_state_round_trip() {
             background: "#aabbcc".into(),
             default_font: "Cantarell".into(),
             shapes: vec![text_box("footer", 20.0, 500.0)],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: vec![Layout {
                 id: 0,
                 name: "Title".into(),
@@ -1931,9 +1953,13 @@ fn recovery_rich_state_round_trip() {
                     id: 0,
                     role: Placeholder::Title,
                     x: 10.0, y: 10.0, w: 300.0, h: 80.0,
+                    source_ty: String::new(),
+                    source_idx: None,
                 }],
             }],
         }],
+        page_size: None,
+        themes: Vec::new(),
     };
     decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
     deck.slides[0].master_id = Some(deck.masters[0].id);

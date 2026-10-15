@@ -7146,6 +7146,155 @@ class DecksExportSmoke(BaseGUITestCase):
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), before, "the source file changed")
 
 
+def dual_theme_pptx_bytes():
+    """A two-slide deck whose masters name different themes (DCK-006).
+
+    Hand-built rather than produced by Decks itself, because the point is
+    a deck that exists *before* the app starts: master 1 is navy with a
+    red accent theme, master 2 states no background with a blue accent
+    theme, and both slides state no background and fill one box with
+    their own theme's accent1. What the app must keep: both theme parts
+    with their own accents, the token (not frozen) fills, and the absent
+    backgrounds (never white smuggled in at import).
+    """
+    import io
+    import zipfile
+
+    ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+
+    def theme(name, accent, font):
+        slots = [("dk1", "000000"), ("lt1", "FFFFFF"), ("dk2", "44546A"), ("lt2", "E7E6E6"),
+                 ("accent1", accent), ("accent2", "ED7D31"), ("accent3", "A5A5A5"), ("accent4", "FFC000"),
+                 ("accent5", "5B9BD5"), ("accent6", "70AD47"), ("hlink", "0563C1"), ("folHlink", "954F72")]
+        scheme = "".join(f'<a:{s}><a:srgbClr val="{v}"/></a:{s}>' for s, v in slots)
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="{name}"><a:themeElements>
+<a:clrScheme name="Office">{scheme}</a:clrScheme>
+<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Heading Face"/></a:majorFont>
+<a:minorFont><a:latin typeface="{font}"/></a:minorFont></a:fontScheme>
+<a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>
+<a:lnStyleLst><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>
+<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
+<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
+</a:fmtScheme></a:themeElements></a:theme>"""
+
+    clr_map = ('<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" '
+               'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>')
+
+    def master(name, bg, layout_id):
+        bg_xml = (f'<p:bg><p:bgPr><a:solidFill><a:srgbClr val="{bg}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>'
+                  if bg else '')
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {ns}><p:cSld name="{name}">{bg_xml}<p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld>{clr_map}<p:sldLayoutIdLst><p:sldLayoutId id="2147484648" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>"""
+
+    def layout(name):
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {ns} type="obj" preserve="1"><p:cSld name="{name}"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"""
+
+    def slide(text):
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {ns}><p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"""
+
+    def rels(targets):
+        body = "".join(
+            f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{k}" Target="{t}"/>'
+            for i, (k, t) in enumerate(targets, 1))
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + body + '</Relationships>')
+
+    parts = {
+        "[Content_Types].xml": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+<Override PartName="/ppt/slideMasters/slideMaster2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+<Override PartName="/ppt/slideLayouts/slideLayout2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+<Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+</Types>""",
+        "_rels/.rels": rels([("officeDocument", "ppt/presentation.xml")]),
+        "ppt/presentation.xml": f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation {ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="5143500"/></p:presentation>""",
+        "ppt/_rels/presentation.xml.rels": rels([("slide", "slides/slide1.xml"), ("slide", "slides/slide2.xml")]),
+        "ppt/slides/slide1.xml": slide("Red box"),
+        "ppt/slides/slide2.xml": slide("Blue box"),
+        "ppt/slides/_rels/slide1.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout1.xml")]),
+        "ppt/slides/_rels/slide2.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout2.xml")]),
+        "ppt/slideLayouts/slideLayout1.xml": layout("Red layout"),
+        "ppt/slideLayouts/slideLayout2.xml": layout("Blue layout"),
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": rels([("slideMaster", "../slideMasters/slideMaster1.xml")]),
+        "ppt/slideLayouts/_rels/slideLayout2.xml.rels": rels([("slideMaster", "../slideMasters/slideMaster2.xml")]),
+        "ppt/slideMasters/slideMaster1.xml": master("Red master", "0B3D6B", 1),
+        "ppt/slideMasters/slideMaster2.xml": master("Blue master", "", 2),
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout1.xml"), ("theme", "../theme/theme1.xml")]),
+        "ppt/slideMasters/_rels/slideMaster2.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout2.xml"), ("theme", "../theme/theme2.xml")]),
+        "ppt/theme/theme1.xml": theme("Red theme", "FF0000", "Body Face"),
+        "ppt/theme/theme2.xml": theme("Blue theme", "0000FF", "Body Face"),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as deck:
+        for name, content in parts.items():
+            deck.writestr(name, content)
+    return buffer.getvalue()
+
+
+class DecksThemeInheritanceSmoke(BaseGUITestCase):
+    """Theme/layout/master inheritance (DCK-006): a two-master deck whose
+    masters name different themes opens with both designs, and a save
+    keeps both theme parts with their own accents, the token (not frozen)
+    fills, and the absent backgrounds — never white smuggled in."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix="decks-theme-")
+        self.isolate_snapshot(prefix="decks-theme-snap-")
+        self._doc = os.path.join(self._dir, "two-themes.pptx")
+        with open(self._doc, "wb") as f:
+            f.write(dual_theme_pptx_bytes())
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def test_two_themes_survive_a_save_with_relationships_intact(self):
+        import zipfile
+        aid = "org.tunaos.decks"
+        snap = lambda: self.trigger_snapshot(aid)
+        opened = self.wait_until(snap, lambda s: s and s["slide_count"] == 2, interval=0.5, description="both slides to open")
+        self.assertEqual(len(opened["masters"]), 2, "both masters are kept")
+        self.gapplication_action(aid, "save")
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._doc) as z:
+                    return {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xml")}
+            except (OSError, zipfile.BadZipFile):
+                return {}
+        out = self.wait_until(saved, lambda p: "ppt/theme/theme2.xml" in p, interval=0.5, description="the save to land")
+        self.assertIn('val="FF0000"', out["ppt/theme/theme1.xml"], "theme 1 keeps its red accent")
+        self.assertIn('val="0000FF"', out["ppt/theme/theme2.xml"], "theme 2 keeps its blue accent")
+        self.assertIn('val="accent1"', out["ppt/slides/slide1.xml"], "the fill is still a token, not a frozen colour")
+        self.assertNotIn("<p:bg>", out["ppt/slides/slide1.xml"], "the absent slide background was not frozen white")
+        self.assertIn("0B3D6B", out["ppt/slideMasters/slideMaster1.xml"], "the navy master background survived")
+        self.assertIsNone(self.process.poll(), "decks crashed saving two themes")
+
+
 def presenter_button(test, name):
     """The presenter display's button `name`. The editing window has
     buttons of the same names (Next Slide), so the search is limited to

@@ -530,6 +530,7 @@ mod tests {
             insets: Some(Insets { left: 9.6, top: 4.8, right: 9.6, bottom: 4.8 }),
             autofit: None,
             placeholder: None,
+            placeholder_key: None,
             frame: None,
         };
         let mut w = TextStyles::new("T");

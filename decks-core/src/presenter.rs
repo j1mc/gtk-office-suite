@@ -277,6 +277,8 @@ mod tests {
                 Slide { title: "Details".into(), background: "#fff".into(), objects: vec![], notes: "Explain this".into(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None },
             ],
             masters: vec![],
+            page_size: None,
+            themes: Vec::new(),
         }
     }
 
@@ -373,7 +375,7 @@ mod tests {
         let mut deck = deck();
         deck.masters.push(crate::engine::MasterSlide {
             id: 0, name: "Master".into(), background: "#fff".into(), default_font: "Sans".into(),
-            shapes: Vec::new(), page_emu: None, layouts: Vec::new(),
+            shapes: Vec::new(), theme_id: None, color_map: Default::default(), layouts: Vec::new(),
         });
         deck.masters[0].shapes.push(image(&path("master")));
         deck.masters[0].layouts = crate::layouts::standard();

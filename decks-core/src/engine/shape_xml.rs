@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 // ── A minimal element tree ────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Node {
     pub(super) name: String,
     pub(super) attrs: Vec<(String, String)>,
@@ -141,7 +141,7 @@ pub(super) fn parse_tree(xml: &str) -> Node {
 
 /// A deck's theme: its colour slots (`a:clrScheme`) and format scheme
 /// (`a:fmtScheme`), which shapes reference through `p:style`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Theme {
     colors: HashMap<String, Color>,
     fmt: Node,
@@ -149,6 +149,13 @@ pub(crate) struct Theme {
     /// typefaces, when the part names them.
     major_font: Option<String>,
     minor_font: Option<String>,
+    /// The theme part's `name`, retained for the writer to carry back.
+    name: String,
+    /// A master's colour map (`p:clrMap`) over this theme: presentation
+    /// names (`bg1`, `tx1` …) to the slots they draw from. Read-time
+    /// only (the model keeps the map on the master beside the theme id,
+    /// DCK-006); empty is the identity every package without one assumes.
+    remap: HashMap<String, String>,
 }
 
 impl Default for Theme {
@@ -185,20 +192,27 @@ impl Default for Theme {
             .unwrap_or_default(),
             major_font: None,
             minor_font: None,
+            name: "Office".to_string(),
+            remap: HashMap::new(),
         }
     }
 }
 
 impl Theme {
-    /// A `schemeClr` value, with the presentation's standard mapping of
-    /// text/background names onto the dark/light slots.
+    /// A `schemeClr` value. A master's colour map (`remap`, from its
+    /// `p:clrMap`) replaces the standard mapping of presentation names
+    /// onto the dark/light slots where it states one; anything neither
+    /// names resolves directly.
     pub(super) fn slot(&self, name: &str) -> Option<Color> {
-        let slot = match name {
-            "tx1" => "dk1",
-            "bg1" => "lt1",
-            "tx2" => "dk2",
-            "bg2" => "lt2",
-            other => other,
+        let slot = match self.remap.get(name) {
+            Some(mapped) => mapped.as_str(),
+            None => match name {
+                "tx1" => "dk1",
+                "bg1" => "lt1",
+                "tx2" => "dk2",
+                "bg2" => "lt2",
+                other => other,
+            },
         };
         self.colors.get(slot).copied()
     }
@@ -222,6 +236,44 @@ impl Theme {
     fn style(&self, list: &str, n: usize) -> Option<&Node> {
         self.fmt.child(list)?.children.get(n.checked_sub(1)?)
     }
+
+    /// This theme resolving under a master's colour map (`p:clrMap`,
+    /// presentation names to slots): a read-time copy (DCK-006), so the
+    /// retained model theme keeps the part's own slots while masters
+    /// with different maps resolve differently.
+    pub(crate) fn with_remap(&self, map: &std::collections::BTreeMap<String, String>) -> Theme {
+        let mut out = Theme {
+            colors: self.colors.clone(),
+            fmt: clone_node(&self.fmt),
+            major_font: self.major_font.clone(),
+            minor_font: self.minor_font.clone(),
+            name: self.name.clone(),
+            remap: HashMap::new(),
+        };
+        out.remap = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        out
+    }
+
+    /// The heading (`+mj-lt`) and body (`+mn-lt`) Latin typefaces, when
+    /// the part names them. The pptx reader carries these onto the
+    /// master's `default_font` without claiming an absent font is Sans.
+    pub(crate) fn fonts(&self) -> (Option<String>, Option<String>) {
+        (self.major_font.clone(), self.minor_font.clone())
+    }
+
+    /// The retained model theme (engine::theme) for `Deck.themes`: the
+    /// part's own slots, fonts and name with its source part path. The
+    /// id is stamped by the caller from the session space (DCK-005).
+    pub(crate) fn to_model(&self, id: u64, source: &str) -> super::theme::Theme {
+        super::theme::Theme {
+            id,
+            name: self.name.clone(),
+            colors: self.colors.iter().map(|(k, v)| (k.clone(), v.to_hex())).collect(),
+            major_font: self.major_font.clone(),
+            minor_font: self.minor_font.clone(),
+            source: source.to_string(),
+        }
+    }
 }
 
 /// The theme in a theme part (`ppt/theme/themeN.xml`). Slots or lists the
@@ -229,6 +281,9 @@ impl Theme {
 pub(crate) fn theme(theme_xml: &str) -> Theme {
     let mut theme = Theme::default();
     let root = parse_tree(theme_xml);
+    if let Some(name) = root.child("a:theme").and_then(|t| t.attr("name")).map(str::trim).filter(|n| !n.is_empty()) {
+        theme.name = name.to_string();
+    }
     if let Some(scheme) = root.find("a:clrScheme") {
         for slot in &scheme.children {
             let value = slot.children.first().and_then(|c| match c.name.as_str() {
@@ -388,6 +443,49 @@ fn fill_among(node: &Node, theme: &Theme, placeholder: Option<Color>) -> Option<
     node.children.iter().find_map(|c| fill_of(c, theme, placeholder))
 }
 
+/// A direct `a:solidFill` colour statement as its source states it
+/// (DCK-006): a theme token with its modulation, or a literal sRGB.
+/// System and preset colours resolve to their hex (the same values
+/// `color_of` draws); `phClr` — the style reference's own colour — is
+/// not a token of this statement, so `None`, resolved by the caller.
+/// The caller passes the `a:solidFill` node itself.
+fn direct_color_ref(node: &Node) -> Option<super::theme::ColorRef> {
+    use super::theme::{ColorMod, ColorRef, ThemeColor};
+    let c = node.children.iter().find(|c| COLOR_ELEMENTS.contains(&c.name.as_str()))?;
+    match c.name.as_str() {
+        "a:srgbClr" => c.attr("val").and_then(Color::from_hex).map(|c| ColorRef::Rgb(c.to_hex())),
+        "a:sysClr" => c.attr("lastClr").and_then(Color::from_hex).map(|c| ColorRef::Rgb(c.to_hex())),
+        "a:prstClr" => match c.attr("val") {
+            Some("black") => Some(ColorRef::Rgb("000000".to_string())),
+            Some("white") => Some(ColorRef::Rgb("FFFFFF".to_string())),
+            _ => None,
+        },
+        "a:schemeClr" => {
+            let slot = c.attr("val")?;
+            // `phClr` is the style reference's own colour, not a token of
+            // this statement: no reference, resolved by the caller.
+            if slot == "phClr" {
+                return None;
+            }
+            let mut mods = Vec::new();
+            for m in &c.children {
+                let v: Option<i32> = m.attr("val").and_then(|v| v.parse().ok());
+                let Some(v) = v else { continue };
+                mods.push(match m.name.as_str() {
+                    "a:tint" => ColorMod::Tint(v),
+                    "a:shade" => ColorMod::Shade(v),
+                    "a:satMod" => ColorMod::SatMod(v),
+                    "a:lumMod" => ColorMod::LumMod(v),
+                    "a:lumOff" => ColorMod::LumOff(v),
+                    _ => continue,
+                });
+            }
+            Some(ColorRef::Theme(ThemeColor { slot: slot.to_string(), mods }))
+        }
+        _ => None,
+    }
+}
+
 /// A line (`a:ln`): its colour (None = no line) and width in EMU.
 fn line_of(ln: &Node, theme: &Theme, placeholder: Option<Color>) -> (Option<Option<Color>>, Option<f64>) {
     let width = ln.attr("w").and_then(|v| v.parse::<f64>().ok());
@@ -412,6 +510,7 @@ pub(crate) struct SpStyle {
 }
 
 fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -> SpStyle {
+    use super::theme::{FillSrc, StrokeSrc};
     let sppr = sp.child("p:spPr");
     let style = sp.child("p:style");
     let reference = |name: &str| -> Option<(usize, Option<Color>)> {
@@ -420,6 +519,19 @@ fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -
         Some((idx, first_color(r, theme, None)))
     };
 
+    // The shape's own fill statement, as stated (DCK-006): an explicit
+    // no-fill, or a direct literal or theme-token colour. Anything else
+    // — a style or group reference, a gradient, no statement — leaves
+    // no reference and the resolved cache stays canonical.
+    let fill_src = match sppr {
+        Some(p) if p.child("a:grpFill").is_some() => None,
+        Some(p) => match p.children.iter().find(|c| matches!(c.name.as_str(), "a:noFill" | "a:solidFill")) {
+            Some(n) if n.name == "a:noFill" => Some(FillSrc::NoFill),
+            Some(n) => direct_color_ref(n).map(FillSrc::Color),
+            None => None,
+        },
+        None => None,
+    };
     // Fill: the shape's own, else its fillRef into the format scheme.
     let own_fill = match sppr {
         // `a:grpFill`: the fill of the group the shape is in.
@@ -441,6 +553,17 @@ fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -
         Some(Fill::None) | None => (None, None),
     };
 
+    // The shape's own outline statement, as stated: an explicit no-line,
+    // or a direct colour. A width-only line, a style reference or no
+    // statement leaves no reference (see `fill_src`).
+    let stroke_src = match sppr.and_then(|p| p.child("a:ln")) {
+        Some(ln) => match ln.children.iter().find(|c| matches!(c.name.as_str(), "a:noFill" | "a:solidFill")) {
+            Some(n) if n.name == "a:noFill" => Some(StrokeSrc::NoLine),
+            Some(n) => direct_color_ref(n).map(StrokeSrc::Color),
+            None => None,
+        },
+        None => None,
+    };
     // Line: the shape's own a:ln (colour and width each), else lnRef's.
     let (mut color, mut width) = sppr.and_then(|p| p.child("a:ln")).map_or((None, None), |ln| line_of(ln, theme, None));
     if color.is_none() || width.is_none() {
@@ -463,7 +586,7 @@ fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -
         .and_then(|gd| gd.attr("fmla")?.strip_prefix("val ")?.trim().parse::<f64>().ok())
         .map(|v| v / 100_000.0);
 
-    SpStyle { style: ShapeStyle { fill, gradient, stroke }, round_adj }
+    SpStyle { style: ShapeStyle { fill, gradient, stroke, fill_src, stroke_src }, round_adj }
 }
 
 // ── Tables ────────────────────────────────────────────────────────────────
@@ -748,6 +871,57 @@ mod tests {
         let bare = sp("", "");
         let s = &sp_styles(&bare, &Theme::default(), 1.0)[0].style;
         assert_eq!((s.fill, s.stroke), (None, None));
+    }
+
+    #[test]
+    fn direct_colours_keep_their_source_reference() {
+        use super::super::theme::{ColorRef, FillSrc, StrokeSrc, ThemeColor};
+        let xml = sp(
+            r#"<a:prstGeom prst="rect"/><a:solidFill><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:solidFill>
+               <a:ln w="12700"><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:ln>"#,
+            "",
+        );
+        let s = &sp_styles(&xml, &Theme::default(), 1.0)[0].style;
+        assert_eq!(
+            &s.fill_src,
+            &Some(FillSrc::Color(ColorRef::Theme(ThemeColor {
+                slot: "accent1".into(),
+                mods: vec![super::super::theme::ColorMod::Shade(50_000)],
+            })))
+        );
+        assert_eq!(s.fill, Some(Color(0x44, 0x72, 0xC4).shade(50_000)), "the resolved cache agrees with the reference");
+        assert_eq!(&s.stroke_src, &Some(StrokeSrc::Color(ColorRef::Rgb("112233".into()))));
+    }
+
+    #[test]
+    fn an_explicit_no_fill_is_not_an_absent_fill() {
+        use super::super::theme::{FillSrc, StrokeSrc};
+        let xml = sp(r#"<a:noFill/><a:ln><a:noFill/></a:ln>"#, "");
+        let s = &sp_styles(&xml, &Theme::default(), 1.0)[0].style;
+        assert_eq!((&s.fill_src, &s.stroke_src), (&Some(FillSrc::NoFill), &Some(StrokeSrc::NoLine)));
+        let bare = sp("", "");
+        let s = &sp_styles(&bare, &Theme::default(), 1.0)[0].style;
+        assert_eq!((&s.fill_src, &s.stroke_src), (&None, &None));
+    }
+
+    #[test]
+    fn a_colour_map_remaps_presentation_names() {
+        let base = theme(THEME_2007);
+        let map: std::collections::BTreeMap<String, String> =
+            [("tx1", "accent1"), ("bg1", "lt1")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let themed = base.with_remap(&map);
+        assert_eq!(themed.slot("tx1"), base.slot("accent1"));
+        assert_eq!(themed.slot("bg1"), base.slot("lt1"));
+        assert_eq!(Theme::default().slot("tx1"), Some(Color(0, 0, 0)), "no map: the standard mapping");
+    }
+
+    #[test]
+    fn a_theme_part_converts_to_the_retained_model() {
+        let t = theme(THEME_2007).to_model(7, "ppt/theme/theme2.xml");
+        assert_eq!((t.id, t.source.as_str()), (7, "ppt/theme/theme2.xml"));
+        assert_eq!(t.colors.get("accent1").map(String::as_str), Some("4F81BD"));
+        // `sysClr` slots keep their `lastClr`, as resolution does.
+        assert_eq!(t.colors.get("dk1").map(String::as_str), Some("000000"));
     }
 
     #[test]

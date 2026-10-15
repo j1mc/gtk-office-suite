@@ -543,23 +543,19 @@ pub fn draw_slide_base(
         cr.fill().unwrap();
     }
 
-    // Slide background — an unset (white) slide inherits its master's.
+    // Slide background: the slide's own when it states one, else its
+    // layout's and master's (folded into the effective master above),
+    // else the documented fallback. An explicit white slide on a coloured
+    // master stays white (DCK-006).
     // Captured for the text-color contrast check below
     // (tuna-os/gtk-office-suite#78).
     let mut slide_bg_rgb: (f64, f64, f64) = (1.0, 1.0, 1.0);
     if slide < slides.len() {
         let slide_bg = &slides[slide].background;
         let master = master_for(slides, slide, masters);
-        let master_bg = master
-            .as_deref()
-            .map(|m| m.background.as_str())
-            .filter(|b| !b.is_empty() && *b != "#ffffff");
-        let bg: &str = if slide_bg == "#ffffff" || slide_bg.is_empty() {
-            master_bg.unwrap_or(slide_bg)
-        } else {
-            slide_bg
-        };
-        let resolved_bg = if bg == "#ffffff" || bg.is_empty() {
+        let master_bg = master.as_deref().map(|m| m.background.as_str()).unwrap_or("");
+        let bg: &str = decks_core::layouts::resolve_background(slide_bg, None, master_bg);
+        let resolved_bg = if bg == "#ffffff" {
             (1.0, 1.0, 1.0)
         } else if bg.starts_with('#') && bg.len() >= 7 {
             let r = u8::from_str_radix(&bg[1..3], 16).unwrap_or(255) as f64 / 255.0;
@@ -1140,7 +1136,7 @@ mod font_tests {
             w: 200.0,
             h: 100.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let slide = Slide {
             title: String::new(),
@@ -1231,7 +1227,8 @@ mod font_tests {
             background: "#ffffff".into(),
             default_font: font.into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }
     }
