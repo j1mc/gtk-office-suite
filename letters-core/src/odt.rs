@@ -171,6 +171,17 @@ fn para_style_props(st: &ParaStyle) -> String {
     if let Some(e) = &st.borders.right {
         props.push_str(&format!(" fo:border-right=\"{}\"", border(e)));
     }
+    // ODF spells paragraph spacing `fo:margin-top`/`fo:margin-bottom`,
+    // the same XSL-FO properties the page geometry below already uses.
+    // This wrote `fo:space-before`/`fo:space-after`, which our own reader
+    // understood and LibreOffice does not: the self round trip passed
+    // because both halves shared an attribute nothing else reads, and the
+    // spacing was silently gone the moment the file reached Writer.
+    if st.space_before_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-top=\"{:.2}pt\"", st.space_before_pt)); }
+    if st.space_after_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-bottom=\"{:.2}pt\"", st.space_after_pt)); }
+    if st.left_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-left=\"{:.2}pt\"", st.left_indent_pt)); }
+    if st.right_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-right=\"{:.2}pt\"", st.right_indent_pt)); }
+    if st.first_line_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:text-indent=\"{:.2}pt\"", st.first_line_indent_pt)); }
     props
 }
 
