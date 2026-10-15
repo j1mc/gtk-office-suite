@@ -142,13 +142,19 @@ fn odt_typography(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
         record_why(report, TAB_LEADERS, member, "Letters keeps dotted, dashed and solid tab leaders; anything else draws as its character, if any");
     }
     const BORDERS: &[&[u8]] = &[b"none", b"solid", b"dashed", b"dotted", b"double"];
+    // The look is the second word ("0.5pt solid #000000"), or the only
+    // word: Writer spells no border `fo:border="none"`, which drops
+    // nothing and must stay quiet.
     let borders = ["fo:border=\"", "fo:border-top=\"", "fo:border-left=\"", "fo:border-bottom=\"", "fo:border-right=\""]
         .iter()
         .any(|attr| {
             regions.iter().flat_map(|r| attr_values(r, attr.as_bytes())).any(|v| {
                 let mut words = v.split(|b| b.is_ascii_whitespace());
-                let _width = words.next();
-                !matches!(words.next(), Some(w) if BORDERS.contains(&w))
+                match (words.next(), words.next()) {
+                    (_, Some(look)) => !BORDERS.contains(&look),
+                    (Some(look), None) => !BORDERS.contains(&look),
+                    (None, _) => false,
+                }
             })
         });
     if borders {
@@ -371,5 +377,21 @@ mod tests {
              </style:paragraph-properties></style:style></office:body>",
         )]);
         assert_eq!(ids(&content_a_save_drops(&p)), ["widow-orphan-counts", "tab-leader-styles", "para-border-styles"]);
+    }
+
+    #[test]
+    fn writer_spelling_no_border_stays_quiet() {
+        // Writer spells no border `fo:border="none"`: one word, no
+        // look to lose. Flagging it blocked every save of its own
+        // files with a loss dialog about nothing (file-corpus odt).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.odt");
+        package_with(&p, "META-INF/manifest.xml", &[(
+            "content.xml",
+            "<office:body><style:style style:name=\"P1\" style:family=\"paragraph\">\
+             <style:paragraph-properties fo:border=\"none\" fo:widows=\"2\" fo:orphans=\"2\"/>\
+             </style:style></office:body>",
+        )]);
+        assert!(ids(&content_a_save_drops(&p)).is_empty());
     }
 }
