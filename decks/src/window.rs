@@ -218,7 +218,9 @@ impl DecksWindow {
                 area.update_property(&[gtk::accessible::Property::Description(&desc)]);
                 let accent = crate::canvas::accent_rgb(area);
                 let selected_set: std::collections::HashSet<usize> = primary.into_iter().collect();
-                crate::canvas::draw_slide_multi(cr, width as f64, height as f64, &slides, cur, &selected_set, None, &m.borrow(), accent);
+                // A text box being edited shows the session's working copy.
+                let editing = slides.get(cur).and_then(|sl| crate::text_editor::canvas_preview(&ctl, sl));
+                crate::canvas::draw_slide_multi(cr, width as f64, height as f64, &slides, cur, &selected_set, None, &m.borrow(), accent, editing.as_ref());
                 crate::canvas::draw_guides(cr, width as f64, height as f64, &gd.borrow(), accent);
             });
         }

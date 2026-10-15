@@ -430,7 +430,7 @@ pub fn draw_slide(
     slides: &[Slide], slide: usize, selected: Option<usize>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
 ) {
-    draw_slide_multi(cr, width, height, slides, slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent);
+    draw_slide_multi(cr, width, height, slides, slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent, None);
 }
 
 /// What surrounds a slide: the editor's (grey, a shadow and a border, a
@@ -646,12 +646,23 @@ fn draw_placeholder_prompt(cr: &cairo::Context, obj: &SlideObject, rect: (f64, f
     let _ = cr.restore();
 }
 
+/// A text box being edited in place (DCK-007): the session's working
+/// copy drawn in place of the box at z-position `index`, with its caret or
+/// selection (bytes of its text). The document is not touched; this is
+/// the editor's preview, transformed exactly as the box is.
+pub struct TextPreview {
+    pub index: usize,
+    pub object: SlideObject,
+    pub range: (usize, usize),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slide_multi(
     cr: &cairo::Context, width: f64, height: f64,
     slides: &[Slide], slide: usize, selected_indices: &std::collections::HashSet<usize>,
     marquee: Option<(f64, f64, f64, f64)>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
+    preview: Option<&TextPreview>,
 ) {
     suite_common::use_ui_font_rendering(cr);
     let (ar, ag, ab) = accent;
@@ -663,8 +674,13 @@ pub fn draw_slide_multi(
         let master = master.as_deref();
         let frame = (ox, oy, slide_w, slide_h);
         for (oi, obj) in slides[slide].objects.iter().enumerate() {
+            let editing = preview.filter(|p| p.index == oi);
+            let obj = editing.map_or(obj, |p| &p.object);
             let rect = draw_object(cr, obj, frame, slide_bg_rgb, master);
             draw_placeholder_prompt(cr, obj, rect, slide_w / 960.0, slide_bg_rgb);
+            if let Some(p) = editing {
+                draw_text_range(cr, &p.object, frame, master, p.range, (ar, ag, ab));
+            }
             if selected_indices.contains(&oi) {
                 draw_selection(cr, selected_indices.len(), rect, (ar, ag, ab));
             }
@@ -758,12 +774,8 @@ pub fn draw_object(
             if !body.is_plain() {
                 crate::text_render::draw_text_body(cr, text, runs, body, (sx, sy, sw, sh), scale, &desc);
             } else {
-                let layout = pangocairo::functions::create_layout(cr);
-                layout.set_width(((sw - 8.0).max(8.0) as i32) * pango::SCALE);
-                layout.set_wrap(pango::WrapMode::WordChar);
-                layout.set_font_description(Some(&desc));
-                set_styled_text(&layout, text, runs, scale);
-                cr.move_to(sx + 4.0, sy + 4.0);
+                let (layout, (lx, ly)) = crate::text_render::plain_layout(cr, text, runs, (sx, sy, sw, sh), scale, &desc);
+                cr.move_to(lx, ly);
                 pangocairo::functions::show_layout(cr, &layout);
             }
         }
@@ -830,6 +842,67 @@ pub fn draw_object(
     }
     cr.restore().unwrap();
     (sx, sy, sw, sh)
+}
+
+/// A text box's box on the canvas `(x, y, w, h)` in the slide `frame`, and
+/// the rotation the canvas draws it with, about the box's centre.
+fn text_box_frame(obj: &SlideObject, frame: (f64, f64, f64, f64)) -> ((f64, f64, f64, f64), f64) {
+    let (ox, oy, slide_w, slide_h) = frame;
+    let (x, y, w, h) = decks_core::undo::obj_bounds(obj);
+    ((ox + (x / 960.0) * slide_w, oy + (y / 540.0) * slide_h, (w / 960.0) * slide_w, (h / 540.0) * slide_h), obj.rotation())
+}
+
+/// The caret (a bar) or selection (a tint) of a text box being edited,
+/// on its text as the canvas lays it out and rotated with the box.
+fn draw_text_range(
+    cr: &cairo::Context,
+    obj: &SlideObject,
+    frame: (f64, f64, f64, f64),
+    master: Option<&MasterSlide>,
+    range: (usize, usize),
+    (ar, ag, ab): (f64, f64, f64),
+) {
+    let SlideObject::TextBox { text, runs, body, .. } = obj else { return };
+    let (rect, rot) = text_box_frame(obj, frame);
+    let (sx, sy, sw, sh) = rect;
+    let _ = cr.save();
+    if rot != 0.0 {
+        cr.translate(sx + sw / 2.0, sy + sh / 2.0);
+        cr.rotate(rot.to_radians());
+        cr.translate(-(sx + sw / 2.0), -(sy + sh / 2.0));
+    }
+    let scale = frame.2 / 960.0;
+    let desc = document_font_description(master, 18.0 * scale);
+    let rects = crate::text_render::range_rects(cr, text, runs, body, rect, scale, &desc, range);
+    if range.0 == range.1 {
+        cr.set_source_rgb(ar, ag, ab);
+    } else {
+        cr.set_source_rgba(ar, ag, ab, 0.3);
+    }
+    for (x, y, w, h) in rects {
+        cr.rectangle(x, y, w, h);
+    }
+    let _ = cr.fill();
+    let _ = cr.restore();
+}
+
+/// The byte offset in text box `obj`'s text under the canvas point
+/// `(cx, cy)`, the box drawn in the slide `frame`: where a double-click
+/// puts the caret. A rotated box is measured in its own frame.
+pub fn text_offset_at(obj: &SlideObject, frame: (f64, f64, f64, f64), master: Option<&MasterSlide>, (cx, cy): (f64, f64)) -> Option<usize> {
+    let SlideObject::TextBox { text, runs, body, .. } = obj else { return None };
+    let (rect, rot) = text_box_frame(obj, frame);
+    let (sx, sy, sw, sh) = rect;
+    let (mx, my) = (sx + sw / 2.0, sy + sh / 2.0);
+    let (sin, cos) = (-rot).to_radians().sin_cos();
+    let (dx, dy) = (cx - mx, cy - my);
+    let point = (mx + dx * cos - dy * sin, my + dx * sin + dy * cos);
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).ok()?;
+    let cr = cairo::Context::new(&surface).ok()?;
+    suite_common::use_ui_font_rendering(&cr);
+    let scale = frame.2 / 960.0;
+    let desc = document_font_description(master, 18.0 * scale);
+    Some(crate::text_render::offset_at(&cr, text, runs, body, rect, scale, &desc, point))
 }
 
 /// Smart guides (decks_core::guides) in the accent colour: solid lines

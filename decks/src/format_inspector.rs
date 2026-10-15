@@ -4,7 +4,9 @@
 //
 // Keynote's inspector in libadwaita's form, as Tables' (#962): AdwViewStack
 // pages switched by an AdwViewSwitcher — Style (fill, outline, shape),
-// Text (font, size, emphasis, colour, alignment, list, vertical anchor),
+// Text (font, size, emphasis, colour, alignment, list, indent, spacing,
+// vertical anchor, inner margin — always the whole box; a selection is
+// formatted in the in-place text editor, text_editor.rs),
 // Chart (type and data, chart_inspector.rs), Arrange (position, size,
 // rotation, order) and Animate — each of AdwPreferencesGroup rows. Every edit is a decks_core::format::FormatEdit
 // applied through DecksController::format_objects: one undo step over the
@@ -176,7 +178,12 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
     let style_page = page(&[&fill_group, &outline_group, &shape_group]);
 
     // ── Text ─────────────────────────────────────────────────────────────
-    let font_group = adw::PreferencesGroup::builder().title("Font").build();
+    // Object mode formats the whole box; a selection is formatted in the
+    // text editor (DCK-007), never by widening it to the box.
+    let font_group = adw::PreferencesGroup::builder()
+        .title("Font")
+        .description("Formats the whole box. Double-click its text to format a selection.")
+        .build();
     // A button naming the family, as in Tables: GtkFontDialogButton shows
     // "None" for a family installed under another name (Calibri drawn as
     // Carlito), the common case in imported decks.
@@ -192,7 +199,9 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
     font_group.add(&size);
     let bold = toggle("format-text-bold-symbolic", "Bold", None);
     let italic = toggle("format-text-italic-symbolic", "Italic", None);
-    font_group.add(&row("Style", &linked(&[bold.upcast_ref(), italic.upcast_ref()])));
+    let underline = toggle("format-text-underline-symbolic", "Underline", None);
+    let strike = toggle("format-text-strikethrough-symbolic", "Strikethrough", None);
+    font_group.add(&row("Style", &linked(&[bold.upcast_ref(), italic.upcast_ref(), underline.upcast_ref(), strike.upcast_ref()])));
     let text_color = color_button("Text Colour");
     let text_color_auto = clear_button("Automatic Colour");
     let text_color_row = row("Colour", &text_color);
@@ -210,8 +219,17 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
     ));
     let list = combo("List", &["None", "Bullets", "Numbers"]);
     para_group.add(&list);
+    let outdent = icon_button("format-indent-less-symbolic", "Decrease Indent");
+    let indent = icon_button("format-indent-more-symbolic", "Increase Indent");
+    para_group.add(&row("Indent", &linked(&[outdent.upcast_ref(), indent.upcast_ref()])));
+    let space_before = spin("Space Before", 0.0, 400.0, 1.0);
+    let space_after = spin("Space After", 0.0, 400.0, 1.0);
+    para_group.add(&space_before);
+    para_group.add(&space_after);
     let anchor = combo("Vertical", &["Top", "Middle", "Bottom"]);
     para_group.add(&anchor);
+    let inset = spin("Inner Margin", 0.0, 200.0, 1.0);
+    para_group.add(&inset);
     let text_page = page(&[&font_group, &para_group]);
 
     // ── Arrange ──────────────────────────────────────────────────────────
@@ -322,6 +340,8 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
         let (fill, outline, outline_width, kind) = (fill.clone(), outline.clone(), outline_width.clone(), kind.clone());
         let (font, size, bold, italic, text_color) =
             (font.clone(), size.clone(), bold.clone(), italic.clone(), text_color.clone());
+        let (underline, strike, space_before, space_after, inset) =
+            (underline.clone(), strike.clone(), space_before.clone(), space_after.clone(), inset.clone());
         let aligns = [a_left.clone(), a_center.clone(), a_right.clone(), a_just.clone()];
         let (list, anchor, transition) = (list.clone(), anchor.clone(), transition.clone());
         let layout_sync = layout.sync.clone();
@@ -375,6 +395,12 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
             size.set_value(f.font_size.unwrap_or(decks_core::format::DEFAULT_FONT_PT));
             bold.set_active(f.bold);
             italic.set_active(f.italic);
+            underline.set_active(f.underline);
+            strike.set_active(f.strikethrough);
+            space_before.set_value(f.space_before.unwrap_or(0.0));
+            space_after.set_value(f.space_after.unwrap_or(0.0));
+            // An unstated margin shows DrawingML's 0.1in (7.2pt).
+            inset.set_value(f.inset.unwrap_or(7.2));
             let tc = f.text_color.as_deref().and_then(Color::from_hex).unwrap_or(Color(0, 0, 0));
             text_color.set_rgba(&rgba(tc));
             aligns[match f.align {
@@ -505,6 +531,33 @@ pub fn build(ctl: &Rc<DecksController>, changed: Rc<dyn Fn()>) -> FormatInspecto
     {
         let apply = on(&apply);
         italic.connect_toggled(move |t| apply(FormatEdit::Italic(t.is_active())));
+    }
+    {
+        let apply = on(&apply);
+        underline.connect_toggled(move |t| apply(FormatEdit::Underline(t.is_active())));
+    }
+    {
+        let apply = on(&apply);
+        strike.connect_toggled(move |t| apply(FormatEdit::Strikethrough(t.is_active())));
+    }
+    for (button, more) in [(&outdent, false), (&indent, true)] {
+        let (apply, sync) = (on(&apply), sync.clone());
+        button.connect_clicked(move |_| {
+            apply(FormatEdit::Indent(more));
+            sync();
+        });
+    }
+    {
+        let apply = on(&apply);
+        space_before.connect_value_notify(move |r| apply(FormatEdit::SpaceBefore(r.value())));
+    }
+    {
+        let apply = on(&apply);
+        space_after.connect_value_notify(move |r| apply(FormatEdit::SpaceAfter(r.value())));
+    }
+    {
+        let apply = on(&apply);
+        inset.connect_value_notify(move |r| apply(FormatEdit::Insets(r.value())));
     }
     {
         let apply = on(&apply);
