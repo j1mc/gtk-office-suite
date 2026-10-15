@@ -160,15 +160,19 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
                 refresh();
                 grid.queue_draw();
                 // The menu held keyboard focus while open; hand it back to
-                // the grid only once the menu has actually closed.
-                // Grabbing it synchronously here races the popover's dying
-                // input grab and loses silently, leaving keyboard focus
-                // where later Ctrl+G and typing cannot reach — the next
-                // name-box jump then times out with stale fx text.
-                let grid = grid.clone();
-                suite_common::popover::on_next_close(&popover, move || {
+                // the grid. If the menu is already closed, grab it now. If
+                // it is still closing, grabbing now races the popover's
+                // dying input grab and loses silently — leaving keyboard
+                // focus where later Ctrl+G and typing cannot reach — so
+                // hand it back when the close lands instead.
+                if popover.is_visible() {
+                    let grid = grid.clone();
+                    suite_common::popover::on_next_close(&popover, move || {
+                        grid.grab_focus();
+                    });
+                } else {
                     grid.grab_focus();
-                });
+                }
             });
             content.append(&clear_one);
         }
