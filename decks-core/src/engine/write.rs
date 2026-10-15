@@ -926,15 +926,16 @@ fn write_group_prelude<W: std::io::Write>(
     Ok(())
 }
 
-/// Emit `p:bg` for an explicit colour. White and anything unparseable is
-/// left out, so a deck that never set a background is not rewritten with
-/// one.
+/// Emit `p:bg` for an explicit colour, white included: an explicit white
+/// background is not the absence of one (DCK-006), and Impress preserves
+/// an explicit `p:bg`. Only an empty (absent) or unparseable background
+/// is left out, so a deck that never set one is not rewritten with one.
 fn write_background<W: std::io::Write>(
     writer: &mut Writer<W>,
     background: &str,
 ) -> Result<(), quick_xml::Error> {
     let bg = background.trim_start_matches('#');
-    if bg.len() != 6 || bg.eq_ignore_ascii_case("ffffff") {
+    if bg.len() != 6 {
         return Ok(());
     }
     writer.write_event(Event::Start(BytesStart::new("p:bg")))?;
@@ -1542,10 +1543,11 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
             }
             writer.write_event(Event::Start(c_sld)).map_err(|e| e.to_string())?;
 
-            // Slide background (only when it differs from the default
-            // white — Impress preserves an explicit p:bg).
+            // Slide background when the slide states one, white included:
+            // an explicit white slide on a coloured master stays white
+            // (DCK-006), and Impress preserves an explicit p:bg.
             let bg = slide.background.trim_start_matches('#');
-            if !bg.eq_ignore_ascii_case("ffffff") && bg.len() == 6 {
+            if bg.len() == 6 {
                 writer.write_event(Event::Start(BytesStart::new("p:bg"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("p:bgPr"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("a:solidFill"))).map_err(|e| e.to_string())?;

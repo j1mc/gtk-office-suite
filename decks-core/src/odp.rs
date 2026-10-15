@@ -1008,7 +1008,7 @@ fn styles_xml(deck: &Deck, media: &mut Vec<Media>) -> Result<String, String> {
             auto.push_str(&declare_run_styles(&lstyles, &prefix));
             let style_of = |st: &RunStyle| lstyles.iter().position(|s| s == st).map(|p| p + 1).unwrap_or(0);
             let bg = l.background.as_deref().unwrap_or(&master.background).trim_start_matches('#').to_string();
-            let ldp = if bg.len() == 6 && !bg.eq_ignore_ascii_case("ffffff") {
+            let ldp = if bg.len() == 6 {
                 auto.push_str(&format!(
                     "<style:style style:name=\"mdp{}l{}\" style:family=\"drawing-page\">\
                      <style:drawing-page-properties draw:fill=\"solid\" draw:fill-color=\"#{}\"/>\
@@ -1264,10 +1264,11 @@ fn transition_of(smil_type: Option<&str>, decks: Option<&str>) -> Transition {
 }
 
 /// A slide's drawing-page style properties, or `None` when it needs no
-/// style (white background, no transition).
+/// style (absent background, no transition). An explicit white background
+/// keeps its style (DCK-006): it is not the absence of one.
 fn drawing_page_props(slide: &Slide) -> Option<String> {
     let bg = slide.background.trim_start_matches('#');
-    let fill = if bg.len() == 6 && !bg.eq_ignore_ascii_case("ffffff") {
+    let fill = if bg.len() == 6 {
         format!(" draw:fill=\"solid\" draw:fill-color=\"#{}\"", bg.to_lowercase())
     } else {
         String::new()

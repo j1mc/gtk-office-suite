@@ -155,12 +155,19 @@ fn a_4_3_or_custom_deck_keeps_its_size_through_odp() {
 
 #[test]
 fn the_size_is_the_decks_not_the_first_masters() {
-    // Two masters, a reorder between them: the written size follows the
-    // deck, not whichever master happens to be first (DCK-006).
+    // Two masters with a slide each, reordered: the written size follows
+    // the deck, not whichever master happens to be first (DCK-006). Each
+    // master needs its slide, or the reader (which builds masters from
+    // the layouts slides use) has nothing to build it from.
     let size = SIZES[0];
     let mut d = deck(Some(size));
     d.masters.push(d.masters[0].clone());
+    d.masters[1].id = 2;
     d.masters[1].name = "Second".into();
+    let mut second = d.slides[0].clone();
+    second.title = "Slide 2".into();
+    second.master_id = Some(2);
+    d.slides.push(second);
     d.masters.rotate_left(1);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two-master.pptx");
