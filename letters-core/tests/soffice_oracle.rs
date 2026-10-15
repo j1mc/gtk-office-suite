@@ -2092,8 +2092,10 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     eprintln!("DIAG converted pPr: {}", ppr_of(&dp, "may strand"));
     // Probe B (export leg): our docx rewritten as docx. If Writer keeps
     // the off bit, its exporter is fine and the odt import drops it.
-    let _ = soffice_convert(bin, &docx_path, "docx").ok();
-    eprintln!("DIAG rewritten pPr: {}", ppr_of(&docx_path, "may strand"));
+    let probe = dir.path().join("rewrite-src.docx");
+    std::fs::copy(&docx_path, &probe).unwrap();
+    let _ = soffice_convert(bin, &probe, "docx").ok();
+    eprintln!("DIAG rewritten pPr: {}", ppr_of(&probe, "may strand"));
     // Probe A (import leg): our odt rewritten as odt. If Writer keeps
     // fo:widows="1", its import is fine and the docx exporter drops it.
     // Converted in place: keep.odt now holds Writer's rewrite.
@@ -2133,9 +2135,9 @@ fn ppr_of(path: &std::path::Path, text: &str) -> String {
     use std::io::Read;
     zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
     let Some(at) = xml.find(text) else { return "text not found".into() };
-    let start = xml[..at].rfind("<w:p ").map(|i| i).or_else(|| xml[..at].rfind("<w:p>")).unwrap_or(0);
-    let end = xml[at..].find("</w:p>").map(|e| at + e).unwrap_or(xml.len());
-    xml[start..end].chars().take(1500).collect()
+    let from = xml.floor_char_boundary(at.saturating_sub(900));
+    let end = (at + 200).min(xml.len());
+    xml[from..end].to_string()
 }
 
 /// Fixed and minimum line heights across the format boundary, both
