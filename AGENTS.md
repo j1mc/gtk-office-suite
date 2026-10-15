@@ -121,3 +121,9 @@ units) ← `suite-common` (GTK helpers: dialogs, toasts, SuiteApp/SuiteWindow)
   `grab_focus` when mapped or typing goes to the search entry.
 - AT-SPI test framework is dogtail 0.9.11 (apt), not pip dogtail 2.x — no
   `tree.Accessible`, no `retry=` kwarg on `findChildren`.
+- dogtail's `do_action(0)` on a GTK 4 button returns before `clicked` runs:
+  it is GTK's keyboard activation, which clicks 250 ms later, so keys a
+  journey sends meanwhile reach the app first. Wait on the click's effect.
+  And `Entry::set_text` replaces the buffer even when the text is unchanged
+  (caret to 0, selection gone), so never refresh an entry the user is typing
+  in (`tables/src/name_box.rs`, TBL-006).
