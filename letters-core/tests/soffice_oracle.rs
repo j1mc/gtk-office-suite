@@ -2056,18 +2056,31 @@ fn header_and_footer_alignment_survive_writer_both_ways() {
 
 /// Keep-lines and widow control across the format boundary, both ways:
 /// our docx converted to odt, and our odt converted to docx.
+///
+/// One Writer asymmetry is baked in: its docx exporter materializes
+/// inherited control as an explicit on, so a widow-control-off paragraph
+/// comes back from an odt-to-docx pass controlled (diagnosed from the
+/// converted `<w:pPr>`: `<w:widowControl/>` where ours wrote off). The
+/// off bit survives everywhere Writer's own model carries it, including
+/// the docx-to-odt pass here.
 #[test]
 fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let Some(bin) = require_or_skip() else { return };
     let mut d = Document::from_plain_text("kept together\nmay strand\nordinary");
     d.paragraphs[0].style.keep_lines = true;
     d.paragraphs[1].style.widow_control = Some(false);
-    let close = |got: &Document, how: &str| {
+    let close = |got: &Document, how: &str, widow_off: bool| {
         let kept = &para_with_text(got, "kept together").style;
         let free = &para_with_text(got, "may strand").style;
         let plain = &para_with_text(got, "ordinary").style;
         assert!(kept.keep_lines, "{how}: keep_lines lost");
-        assert_eq!(free.widow_control, Some(false), "{how}: widow control lost");
+        if widow_off {
+            assert_eq!(free.widow_control, Some(false), "{how}: widow control lost");
+        } else {
+            // Writer's docx export normalizes the off bit away (see
+            // above); the setting must at least survive explicitly.
+            assert!(free.widow_control.is_some(), "{how}: widow control dropped: {:?}", free);
+        }
         // Writer materializes inherited control as explicit 2-and-2,
         // which reads as Some(true): behaviorally the default, so the
         // plain paragraph must only not allow widows.
@@ -2079,65 +2092,9 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let _ = soffice_convert(bin, &docx_path, "odt").ok();
     let odt_path = dir.path().join("keep.odt");
     assert!(odt_path.exists(), "soffice did not convert docx to odt");
-    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
-    // odt -> Writer -> docx, dumping the converted properties: a
-    // temporary diagnostic for where Writer drops widow control off.
-    let sub = dir.path().join("odt2docx");
-    std::fs::create_dir_all(&sub).unwrap();
-    let op = sub.join("keep.odt");
-    letters_core::odt::write(&d, op.to_str().unwrap()).expect("write odt");
-    let _ = soffice_convert(bin, &op, "docx").ok();
-    let dp = sub.join("keep.docx");
-    assert!(dp.exists(), "soffice did not convert keep.odt to docx");
-    eprintln!("DIAG converted pPr: {}", ppr_of(&dp, "may strand"));
-    // Probe B (export leg): our docx rewritten as docx. If Writer keeps
-    // the off bit, its exporter is fine and the odt import drops it.
-    let probe = dir.path().join("rewrite-src.docx");
-    std::fs::copy(&docx_path, &probe).unwrap();
-    let _ = soffice_convert(bin, &probe, "docx").ok();
-    eprintln!("DIAG rewritten pPr: {}", ppr_of(&probe, "may strand"));
-    // Probe A (import leg): our odt rewritten as odt. If Writer keeps
-    // fo:widows="1", its import is fine and the docx exporter drops it.
-    // Converted in place: keep.odt now holds Writer's rewrite.
-    let _ = soffice_convert(bin, &op, "odt").ok();
-    eprintln!("DIAG rewritten style: {}", style_of(&op, "1", "1"));
-    let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
-    close(&rt, "odt → Writer → docx");
-}
-
-/// DIAGNOSTIC (temporary): the paragraph-properties carrying the given
-/// widows/orphans counts in an odt on disk.
-fn style_of(path: &std::path::Path, widows: &str, orphans: &str) -> String {
-    let f = std::fs::File::open(path).unwrap();
-    let mut zip = zip::ZipArchive::new(f).unwrap();
-    let mut xml = String::new();
-    use std::io::Read;
-    zip.by_name("content.xml").unwrap().read_to_string(&mut xml).unwrap();
-    let pin = format!("fo:widows=\"{widows}\"");
-    let mut out = Vec::new();
-    let mut rest = xml.as_str();
-    while let Some(at) = rest.find(&pin) {
-        let start = rest[..at].rfind("<style:paragraph-properties").unwrap_or(0);
-        let end = rest[at..].find('>').map(|e| at + e + 1).unwrap_or(rest.len());
-        out.push(rest[start..end].to_string());
-        rest = &rest[end..];
-    }
-    let _ = orphans;
-    if out.is_empty() { format!("no {pin} in content.xml") } else { out.join(" || ") }
-}
-
-/// DIAGNOSTIC (temporary): the raw XML of the converted paragraph
-/// holding `text`, from a docx on disk.
-fn ppr_of(path: &std::path::Path, text: &str) -> String {
-    let f = std::fs::File::open(path).unwrap();
-    let mut zip = zip::ZipArchive::new(f).unwrap();
-    let mut xml = String::new();
-    use std::io::Read;
-    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
-    let Some(at) = xml.find(text) else { return "text not found".into() };
-    let from = xml.floor_char_boundary(at.saturating_sub(900));
-    let end = (at + 200).min(xml.len());
-    xml[from..end].to_string()
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt", true);
+    let Some(rt) = through_lo_to_docx(&d, "keep") else { return };
+    close(&rt, "odt → Writer → docx", false);
 }
 
 /// Fixed and minimum line heights across the format boundary, both
