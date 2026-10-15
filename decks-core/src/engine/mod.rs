@@ -13,13 +13,14 @@
 //! - `table.rs` — tables: grid, cells and the default table style
 //! - `text_body.rs` — paragraph styles, anchor and insets of a text box
 //! - `text_xml.rs` — the pptx text styles a paragraph inherits
+//! - `theme.rs` — deck themes and colour references (DCK-006)
 
 mod model;
 mod notes;
 mod parse;
 mod placeholders;
 pub mod shape;
-pub mod table;
+pub mod theme;
 pub mod chart;
 mod shape_xml;
 pub mod text_body;

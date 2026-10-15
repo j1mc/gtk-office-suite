@@ -342,6 +342,8 @@ impl SpText {
             insets: self.insets,
             autofit: self.autofit,
             placeholder: None,
+            // The caller (parse.rs) stamps the slide's own key after this.
+            placeholder_key: None,
             frame: None,
         }
     }

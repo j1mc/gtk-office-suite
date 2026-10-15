@@ -8,6 +8,26 @@ use letters_core::model::Run;
 pub struct Deck {
     pub slides: Vec<Slide>,
     pub masters: Vec<MasterSlide>,
+    /// The slide size the source package declares, in EMU (pptx `p:sldSz`,
+    /// or an ODP page layout converted at 12700 EMU to the point).
+    /// `None` is the size our own writer emits (10in x 5.625in,
+    /// `SlideScale::DEFAULT_EMU`). Document-level since DCK-006: it used
+    /// to live on every master (`MasterSlide::page_emu`), so the writer
+    /// silently took the first master's and a reorder could change the
+    /// size of the whole deck. The model is always 960x540 whatever this
+    /// is: readers scale onto it and the writers scale back through the
+    /// one conversion (`page_emu`), so a 4:3 or custom-size deck keeps
+    /// its size. An ODP whose pages disagree keeps the first slide page's
+    /// size here and is classified by the loss report (`mixed-page-sizes`),
+    /// never silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<(f64, f64)>,
+    /// One entry per theme part the package names, in package order
+    /// (engine::theme). Each master names its theme by stable id
+    /// (`MasterSlide::theme_id`); empty for formats without themes (ODP)
+    /// and for new documents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub themes: Vec<super::theme::Theme>,
 }
 
 /// Model units per inch: the model slide is 960x540 units for the sheet our
@@ -30,6 +50,12 @@ pub fn slide_page_size_pt() -> (f64, f64) {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slide {
     pub title: String,
+    /// The slide's own background (`p:bg`), as `#rrggbb`. Empty means the
+    /// slide states none and inherits its layout's, then its master's
+    /// (DCK-006): import never turns that absence into white, rendering
+    /// falls back to [`crate::layouts::FALLBACK_BACKGROUND`] only at draw
+    /// time, and the writers omit an empty background. An explicit white
+    /// slide on a coloured master stays white; it does not inherit.
     pub background: String,
     pub objects: Vec<SlideObject>,
     pub notes: String,
@@ -144,16 +170,33 @@ pub struct MasterSlide {
     /// position in `Deck::masters`.
     pub id: u64,
     pub name: String,
+    /// The master's own background (`p:bg`), as `#rrggbb`. Empty means
+    /// the part states none and the master inherits: it is NOT turned
+    /// into white at import (DCK-006). Rendering falls back to the
+    /// documented default (`layouts::FALLBACK_BACKGROUND`) only at draw
+    /// time, and the writers omit an empty background rather than
+    /// freezing the fallback into the package.
     pub background: String,
+    /// The font the master's theme answers with for body text, or empty
+    /// when its theme names none: [`MasterSlide::font_family`] falls
+    /// back to [`MasterSlide::DEFAULT_FONT`] at draw time, but import
+    /// keeps the absence rather than claiming the file said Sans.
     pub default_font: String,
     pub shapes: Vec<SlideObject>,
-    /// The size of the slides in the file this deck came from, in EMU
-    /// (pptx `p:sldSz`, or an odp page layout converted). The model is
-    /// always 960x540 whatever this is: readers scale onto it and the pptx
-    /// writer scales back, so a 4:3 or custom-size deck keeps its size.
-    /// `None` is the pptx writer's default, 10in x 5.625in. A pptx has one
-    /// size for the whole deck; the first master's is the one written.
-    pub page_emu: Option<(f64, f64)>,
+    /// The theme this master inherits from, by [`super::theme::Theme::id`]
+    /// in [`Deck::themes`]; `None` for a master whose part names no theme
+    /// (what this writer used to emit) and for ODP masters. Resolution
+    /// falls back to the default theme, documented on
+    /// [`super::theme::Theme::default_colors`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_id: Option<u64>,
+    /// The master's colour map (`p:clrMap`): presentation names (`bg1`,
+    /// `tx1` …) to the theme slots they draw from. Empty is the identity
+    /// mapping every package without one assumes. Retained so a save
+    /// carries it back, and applied at read time by giving the master's
+    /// resolving theme this remap.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub color_map: std::collections::BTreeMap<String, String>,
     /// Its layouts (decks_core::layouts): the arrangements of placeholders
     /// its slides use, each with any look of its own. Empty for a master
     /// read from a file that has none, and for the default master.
@@ -302,7 +345,8 @@ impl Deck {
             background: "#ffffff".into(),
             default_font: MasterSlide::DEFAULT_FONT.into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         };
         Self {
@@ -318,7 +362,28 @@ impl Deck {
                 layout_id: None,
             }],
             masters: vec![default_master],
+            page_size: None,
+            themes: Vec::new(),
         }
+    }
+
+    /// The slide size to write and export, in EMU: the declared
+    /// [`Deck::page_size`], or the size our own writer emits when the
+    /// deck states none. The one conversion every format and export
+    /// path uses (DCK-006) — never a first-master fallback.
+    pub fn page_emu(&self) -> (f64, f64) {
+        match self.page_size {
+            Some((cx, cy)) if cx > 0.0 && cy > 0.0 => (cx, cy),
+            _ => super::SlideScale::DEFAULT_EMU,
+        }
+    }
+
+    /// The theme `master` inherits from, if the deck retains it.
+    /// `None` resolves against the default theme (a master with no
+    /// theme relationship, or an ODP master): see
+    /// [`super::theme::Theme::default_colors`].
+    pub fn theme_of(&self, master: &MasterSlide) -> Option<&super::theme::Theme> {
+        master.theme_id.and_then(|id| self.themes.iter().find(|t| t.id == id))
     }
 
     /// The position of slide `id`, if it is still in the deck.

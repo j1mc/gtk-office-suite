@@ -270,6 +270,12 @@ pub struct TextBody {
     pub autofit: Option<Autofit>,
     /// The layout placeholder the box fills (decks_core::layouts), if any.
     pub placeholder: Option<crate::layouts::Placeholder>,
+    /// The source placeholder the box was read from (DCK-006): the `p:ph`
+    /// type and `idx` as written, so `layouts::arrange` matches the box
+    /// back to its place by stable identity rather than by nth body
+    /// alone. `None` for authored boxes and formats without indices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_key: Option<crate::layouts::PlaceholderKey>,
     /// The shape the text sits in, drawn under it: a filled or outlined
     /// box holding text (PowerPoint's shape with text, a navy tile with
     /// white figures). `None` is a bare text box.

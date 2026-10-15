@@ -26,6 +26,7 @@ use super::placeholders::{inherited_rect, parse_placeholders, PhKey, Placeholder
 use super::shape::ShapeKind;
 use super::shape_xml::{frame_charts, frame_tables, sp_styles, theme as read_theme, Theme};
 use super::text_xml::{sp_texts, Inherited};
+use crate::layouts::PlaceholderKey;
 
 use std::fs::File;
 use std::path::Path;
@@ -364,6 +365,109 @@ fn read_layout_placeholders(
     (parse_placeholders(&layout_xml), parse_placeholders(&master_xml), inherited)
 }
 
+/// A layout's master and theme parts, through its relationships: the
+/// layout names its master, the master names its theme (ECMA-376 gives
+/// every `p:sldMaster` exactly one theme relationship). Either link may
+/// be absent — what this writer used to emit — and then there is simply
+/// no part on that side.
+fn layout_master_theme_paths(
+    archive: &mut zip::ZipArchive<File>,
+    budget: &mut ZipBudget,
+    layout_path: &str,
+) -> (Option<String>, Option<String>) {
+    let rels_of = |archive: &mut zip::ZipArchive<File>, budget: &mut ZipBudget, part: &str| -> String {
+        let dir = Path::new(part).parent().unwrap_or(Path::new("ppt"));
+        let file = Path::new(part).file_name().unwrap_or_default().to_string_lossy().to_string();
+        archive.optional_part_to_string(&format!("{}/_rels/{}.rels", dir.to_string_lossy(), file), budget)
+    };
+    let target = |base: &str, rels: &str, kind: &str| -> Option<String> {
+        rels.split("Target=\"")
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+            .find(|t| t.contains(kind))
+            .map(|t| part_path(base, t))
+    };
+    let dir = Path::new(layout_path).parent().unwrap_or(Path::new("ppt")).to_string_lossy().into_owned();
+    let layout_rels = rels_of(archive, budget, layout_path);
+    let master = target(&dir, &layout_rels, "slideMaster");
+    let theme = master.as_deref().map(|mp| {
+        let dir = Path::new(mp).parent().unwrap_or(Path::new("ppt")).to_string_lossy().into_owned();
+        target(&dir, &rels_of(archive, budget, mp), "theme")
+    }).flatten();
+    (master, theme)
+}
+
+/// The theme the slides on `layout_path` answer to (DCK-006): the theme
+/// part their master names, or the default theme when the chain names
+/// none. Theme parts are cached by part path and shared with the master
+/// builder below, so slides and masters resolve against the same theme.
+/// Returns the theme and its part path, if it names one.
+fn layout_theme(
+    archive: &mut zip::ZipArchive<File>,
+    budget: &mut ZipBudget,
+    layout_path: &str,
+    theme_path_of: &mut std::collections::HashMap<String, Option<String>>,
+    themes: &mut std::collections::HashMap<String, Theme>,
+) -> (Theme, Option<String>) {
+    if !theme_path_of.contains_key(layout_path) {
+        let (_, theme) = layout_master_theme_paths(archive, budget, layout_path);
+        theme_path_of.insert(layout_path.to_string(), theme);
+    }
+    let path = theme_path_of.get(layout_path).and_then(|t| t.clone());
+    let theme = path
+        .as_deref()
+        .map(|p| {
+            if !themes.contains_key(p) {
+                let xml = archive.optional_part_to_string(p, budget);
+                themes.insert(p.to_string(), read_theme(&xml));
+            }
+            themes.get(p).cloned().unwrap_or_default()
+        })
+        .unwrap_or_default();
+    (theme, path)
+}
+
+/// A master part's colour map (`p:clrMap`): presentation names (`bg1`,
+/// `tx1` …) to the theme slots they draw from. Empty when the part
+/// states none — the identity mapping every such package assumes.
+fn parse_color_map(xml: &str) -> std::collections::BTreeMap<String, String> {
+    if xml.is_empty() {
+        return Default::default();
+    }
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.name().as_ref() == "p:clrMap" => {
+                let mut map = std::collections::BTreeMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+                    if key.contains(':') || key.eq_ignore_ascii_case("xmlns") {
+                        continue;
+                    }
+                    if let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
+                        let v = v.trim().to_string();
+                        if !v.is_empty() {
+                            map.insert(key, v);
+                        }
+                    }
+                }
+                return map;
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Default::default()
+}
+
+/// The slideLayout part a slide's relationships name, if any.
+fn layout_path_of(rels: &std::collections::HashMap<String, String>) -> Option<String> {
+    rels.values().find(|t| t.contains("slideLayout")).map(|t| format!("ppt/{}", t.trim_start_matches("../")))
+}
+
 /// A layout part as the model's layout: its name and kind, its own
 /// background (when it differs from the master's), its decorations, and the
 /// places of its title, subtitle and body placeholders (a place it leaves
@@ -405,7 +509,7 @@ fn read_layout(
         .filter_map(|p| {
             let role = crate::layouts::Placeholder::from_pptx(Some(&p.key.ty))?;
             let r = p.rect.or_else(|| inherited_rect(&p.key, &layout_phs, master_phs))?;
-            Some(LayoutPlaceholder { id: 0, role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y })
+            Some(LayoutPlaceholder { id: 0, role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y, source_ty: p.key.ty.clone(), source_idx: p.key.idx })
         })
         .collect();
     let name = parse_c_sld_name(xml).unwrap_or_else(|| {
@@ -454,8 +558,8 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         Some((cx, cy)) => SlideScale::from_emu(cx, cy),
         None => SlideScale::default(),
     };
-    // Kept on the masters so a save writes the same size back.
-    let page_emu = declared.filter(|&(cx, cy)| cx > 0.0 && cy > 0.0 && (cx, cy) != SlideScale::DEFAULT_EMU);
+    // Kept once on the deck (DCK-006) so a save writes the same size back.
+    let page_size = declared.filter(|&(cx, cy)| cx > 0.0 && cy > 0.0 && (cx, cy) != SlideScale::DEFAULT_EMU);
 
     // 2. Read presentation.xml.rels to resolve slide relationship IDs to paths
     let rels_xml = archive
@@ -543,16 +647,24 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         }
     }
 
-    // The deck's theme colours, which shapes reference through p:style and
-    // schemeClr. A package without a theme part gets the default theme's.
-    let theme = read_theme(&archive.optional_part_to_string("ppt/theme/theme1.xml", &mut budget));
+    // Theme parts by part path, and the theme part per layout: every slide
+    // resolves its shapes and text against its own master's theme
+    // (DCK-006), not the package's first theme part. A chain that names
+    // no theme resolves against the default theme.
+    let mut themes: std::collections::HashMap<String, Theme> = std::collections::HashMap::new();
+    let mut layout_theme_paths: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    // The retained model themes (`Deck.themes`), in package order, and the
+    // theme part path each id was read from: masters that share one part
+    // share one entry. Built with the masters below.
+    let mut model_themes: Vec<super::theme::Theme> = Vec::new();
+    let mut theme_id_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
     let mut slides = Vec::new();
     // Stable ids minted once at import (DCK-005): one counter for the
-    // whole package, so slide, object, master, layout and placeholder ids
-    // are all distinct. Slides and objects are stamped as each slide is
-    // read (the builds below name object ids); masters and layouts when
-    // their parts resolve afterwards.
+    // whole package, so slide, object, master, layout, placeholder and
+    // theme ids are all distinct. Slides and objects are stamped as each
+    // slide is read (the builds below name object ids); masters, layouts
+    // and themes when their parts resolve afterwards.
     let mut fresh = 1u64;
     // Layout part path per slide (slide → layout → master mapping is
     // resolved after the slide loop, when `archive` is free again).
@@ -615,12 +727,21 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             }
         }
 
+        // The layout this slide hangs off, and (through it, the master)
+        // the theme its shapes and text answer to (DCK-006): the theme
+        // part its layout's master names, shared with the master builder
+        // below through the same cache.
+        let layout_path = layout_path_of(&slide_image_rels);
+        let (slide_theme, _) = match layout_path.as_deref() {
+            Some(lp) => layout_theme(&mut archive, &mut budget, lp, &mut layout_theme_paths, &mut themes),
+            None => (Theme::default(), None),
+        };
         let mut objects = Vec::new();
         let mut object_ids: Vec<Option<u32>> = Vec::new();
-        let sp_paint = sp_styles(&slide_xml, &theme, scale.x);
+        let sp_paint = sp_styles(&slide_xml, &slide_theme, scale.x);
         let mut sp_index = 0usize;
         // Tables live in p:graphicFrame, which the walker used to skip.
-        let mut tables = frame_tables(&slide_xml, &theme);
+        let mut tables = frame_tables(&slide_xml, &slide_theme);
         for t in &mut tables {
             t.table.cell_margins = Some((91440.0 * scale.x, 45720.0 * scale.y));
             for cell in t.table.rows.iter_mut().flatten() {
@@ -632,17 +753,12 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
 
         // The layout (and through it, the master) this slide's placeholders
         // inherit their geometry from. Read once per layout.
-        let layout_path = slide_image_rels
-            .values()
-            .find(|t| t.contains("slideLayout"))
-            .map(|t| format!("ppt/{}", t.trim_start_matches("../")));
         if let Some(lp) = &layout_path {
             if !placeholder_cache.contains_key(lp) {
-                let found = read_layout_placeholders(&mut archive, &mut budget, lp, &theme);
+                let found = read_layout_placeholders(&mut archive, &mut budget, lp, &slide_theme);
                 placeholder_cache.insert(lp.clone(), found);
             }
         }
-        let no_inheritance = Inherited::default();
         let (layout_phs, master_phs, inherited): (&[Placeholder], &[Placeholder], &Inherited) = layout_path
             .as_ref()
             .and_then(|lp| placeholder_cache.get(lp))
@@ -650,10 +766,13 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             .unwrap_or((&[], &[], &no_inheritance));
         // Paragraph and run styles of every p:sp, with what the layout and
         // master give them (Nth p:sp, like the paint).
-        let sp_text = sp_texts(&slide_xml, &theme, inherited, scale);
+        let sp_text = sp_texts(&slide_xml, &slide_theme, inherited, scale);
 
         // Parse slide XML using quick-xml event reader
-        let mut background = String::from("#ffffff");
+        // The slide's own background, when it states one. Absence stays
+        // empty (inherits the layout's, then the master's): never white
+        // smuggled in at import (DCK-006).
+        let mut background = String::new();
         {
             // Text inside `a:t` is significant: a run ending in a space
             // ("Plain " + "Bold") is one word boundary, and trimming it
@@ -934,6 +1053,20 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     );
                                 }
                             }
+                            // A theme-slot background (`a:schemeClr`),
+                            // resolved against the slide's own master's
+                            // theme rather than the first theme part.
+                            "a:schemeClr" if in_bg => {
+                                if let Some(val) = e
+                                    .attributes()
+                                    .filter_map(|a| a.ok())
+                                    .find(|a| a.key.as_ref() == "val")
+                                {
+                                    if let Some(color) = slide_theme.slot(&val.value.to_lowercase()) {
+                                        background = format!("#{}", color.to_hex());
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -991,6 +1124,10 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                 if shape.is_tx_box || (shape.has_tx_body && has_text) || role.is_some() {
                                     let (runs, mut body) = shape.resolve(text_style);
                                     body.placeholder = role;
+                                    // The source placeholder this box fills,
+                                    // so a later layout application matches
+                                    // it by stable identity (DCK-006).
+                                    body.placeholder_key = shape.ph.as_ref().map(|k| PlaceholderKey { ty: k.ty.clone(), idx: k.idx });
                                     // A shape holding text keeps its own
                                     // paint under the text: a navy tile's
                                     // white figures used to lose the tile.
@@ -1189,17 +1326,29 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                 let master_path = targets(&layout_rels, "slideMaster").into_iter().next();
                 let master_xml = master_path.as_deref().map(|p| read_part(&mut archive, &mut budget, p)).unwrap_or_default();
                 let master_rels = master_path.as_deref().map(|p| rels_of(&mut archive, &mut budget, p)).unwrap_or_default();
-                // Master rels -> theme part -> body font. A master with no
-                // theme relationship is what this writer used to emit, so
-                // the absence has to fall back rather than fail.
-                let theme_font = targets(&master_rels, "theme")
-                    .into_iter()
-                    .next()
-                    .map(|tp| read_part(&mut archive, &mut budget, &tp))
-                    .and_then(|tx| parse_theme_font(&tx));
+                // The theme this master inherits from (DCK-006): the part
+                // its relationships name, cached by part path so the slides
+                // above resolved the same theme. A master with no theme
+                // relationship is what this writer used to emit, so the
+                // absence resolves against the default theme rather than
+                // failing — and the master's colour map rides on the
+                // resolving copy, not on the retained part.
+                let theme_path = targets(&master_rels, "theme").into_iter().next();
+                let base_theme = theme_path.as_deref().map(|tp| {
+                    if !themes.contains_key(tp) {
+                        let tx = read_part(&mut archive, &mut budget, tp);
+                        themes.insert(tp.to_string(), read_theme(&tx));
+                    }
+                    themes.get(tp).cloned().unwrap_or_default()
+                }).unwrap_or_default();
+                let color_map = parse_color_map(&master_xml);
+                let resolving = base_theme.with_remap(&color_map);
+                // The body font the theme answers with, kept absent (not
+                // Sans) when the theme names none.
+                let theme_font = resolving.fonts().1;
                 let (master_bg, shapes) = match master_path.as_deref() {
-                    Some(mp) => master_shapes(&master_xml, scale, &theme, &mut |id| part_picture(&mut archive, &mut budget, mp, &master_rels, id)),
-                    None => master_shapes(&master_xml, scale, &theme, &mut |_| None),
+                    Some(mp) => master_shapes(&master_xml, scale, &resolving, &mut |id| part_picture(&mut archive, &mut budget, mp, &master_rels, id)),
+                    None => master_shapes(&master_xml, scale, &resolving, &mut |_| None),
                 };
                 // The master's layouts in its own order; a layout its master
                 // doesn't list (or with no master at all) still belongs.
@@ -1213,7 +1362,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                     let xml = if lp == layout_path { layout_xml.clone() } else { read_part(&mut archive, &mut budget, lp) };
                     let rels = rels_of(&mut archive, &mut budget, lp);
                     let mut pictures = |id: &str| part_picture(&mut archive, &mut budget, lp, &rels, id);
-                    layouts.push(read_layout(&xml, lp, &master_phs, master_bg.as_deref(), scale, &theme, &mut pictures));
+                    layouts.push(read_layout(&xml, lp, &master_phs, master_bg.as_deref(), scale, &resolving, &mut pictures));
                 }
                 // What this writer wrote for a master with no layouts: one
                 // empty blank layout. It is no layout.
@@ -1239,15 +1388,29 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                 let mi = masters.len();
                 // A layout-less master keeps a layout's background, as the
                 // one blank layout carried the master's.
-                let layout_bg = if none { parse_layout_background(&layout_xml, scale, &theme) } else { None };
+                let layout_bg = if none { parse_layout_background(&layout_xml, scale, &resolving) } else { None };
+                // The retained theme entry, shared by masters that name the
+                // same part: one entry per part, ids from the session space.
+                let theme_id = theme_path.as_deref().map(|tp| {
+                    *theme_id_of.entry(tp.to_string()).or_insert_with(|| {
+                        let id = fresh;
+                        fresh += 1;
+                        let entry = themes.get(tp).cloned().unwrap_or_default().to_model(id, tp);
+                        model_themes.push(entry);
+                        id
+                    })
+                });
                 masters.push(MasterSlide {
                     // Stamped with the session id below; 0 is never stored.
                     id: 0,
                     name,
-                    background: master_bg.or(layout_bg).unwrap_or_else(|| "#ffffff".into()),
-                    default_font: theme_font.unwrap_or_else(|| MasterSlide::DEFAULT_FONT.into()),
+                    // Absence stays empty (inherits): never white at import.
+                    background: master_bg.or(layout_bg).unwrap_or_default(),
+                    // Absence stays empty (draw-time Sans): never Sans at import.
+                    default_font: theme_font.unwrap_or_default(),
                     shapes,
-                    page_emu: None,
+                    theme_id,
+                    color_map,
                     layouts,
                 });
                 // Stable master, layout and placeholder ids, minted once
@@ -1287,7 +1450,8 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             background: "#ffffff".into(),
             default_font: MasterSlide::DEFAULT_FONT.into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         });
     }
@@ -1306,13 +1470,11 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         });
     }
 
-    for m in &mut masters {
-        m.page_emu = page_emu;
-    }
     // Safety net: anything the paths above left at 0 (a reader branch a
     // later edit adds) gets a session id here, still once per document.
     crate::ops::ensure_all_ids(&mut slides, &mut masters);
-    Ok(Deck { slides, masters })
+    crate::ops::ensure_theme_ids(&slides, &masters, &mut model_themes);
+    Ok(Deck { slides, masters, page_size, themes: model_themes })
 }
 
 /// A shape's `p:cNvPr id`.
@@ -1377,42 +1539,6 @@ fn transition_kind(name: &str) -> Transition {
 /// Without it the name fell out of the part's file path — "slideLayout1"
 /// for a deck we wrote, so a master called "House Style" came back under a
 /// name nobody chose, and the sidebar showed it.
-/// The body font a theme part names, from `a:fontScheme/a:minorFont/a:latin`.
-///
-/// `a:latin` appears under both `a:majorFont` (headings) and `a:minorFont`
-/// (body), so a search for the first `a:latin` in the part returns the
-/// heading font instead — right-looking and wrong whenever the two differ.
-/// This tracks which scheme it is inside and only answers for the body one,
-/// which is the font a reader applies to ordinary text.
-pub fn parse_theme_font(xml: &str) -> Option<String> {
-    if xml.is_empty() {
-        return None;
-    }
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut in_minor = false;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) if e.name().as_ref() == "a:minorFont" => in_minor = true,
-            Ok(Event::End(ref e)) if e.name().as_ref() == "a:minorFont" => in_minor = false,
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e))
-                if in_minor && e.name().as_ref() == "a:latin" =>
-            {
-                return e
-                    .attributes()
-                    .filter_map(|a| a.ok())
-                    .find(|a| a.key.as_ref() == "typeface")
-                    .map(|a| a.value.to_string())
-                    .filter(|f| !f.trim().is_empty());
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    None
-}
 
 pub fn parse_c_sld_name(xml: &str) -> Option<String> {
     if xml.is_empty() {
@@ -1654,6 +1780,19 @@ fn master_shapes(
                     {
                         background =
                             Some(format!("#{}", val.value.to_lowercase()));
+                    }
+                }
+                // A theme-slot background, resolved against the part's
+                // own master's theme (the caller passes it remapped).
+                "a:schemeClr" if in_bg => {
+                    if let Some(val) = e
+                        .attributes()
+                        .filter_map(|a| a.ok())
+                        .find(|a| a.key.as_ref() == "val")
+                    {
+                        if let Some(color) = theme.slot(&val.value.to_lowercase()) {
+                            background = Some(format!("#{}", color.to_hex()));
+                        }
                     }
                 }
                 _ => {}
@@ -2384,7 +2523,7 @@ mod master_tests {
 
 #[cfg(test)]
 mod theme_font_tests {
-    use super::parse_theme_font;
+    use super::super::shape_xml::theme;
 
     /// The heading and body fonts differ, which is the only arrangement
     /// that can tell a correct reader from one that returns the first
@@ -2396,7 +2535,7 @@ mod theme_font_tests {
             <a:majorFont><a:latin typeface=\"Heading Face\"/></a:majorFont>\
             <a:minorFont><a:latin typeface=\"Body Face\"/></a:minorFont>\
             </a:fontScheme></a:themeElements></a:theme>";
-        assert_eq!(parse_theme_font(xml).as_deref(), Some("Body Face"));
+        assert_eq!(theme(xml).fonts(), (Some("Heading Face".into()), Some("Body Face".into())));
     }
 
     /// `a:cs` and `a:ea` sit beside `a:latin` inside the same scheme, and
@@ -2406,23 +2545,23 @@ mod theme_font_tests {
         let xml = "<a:fontScheme><a:minorFont>\
             <a:latin typeface=\"Body Face\"/><a:ea typeface=\"\"/>\
             <a:cs typeface=\"\"/></a:minorFont></a:fontScheme>";
-        assert_eq!(parse_theme_font(xml).as_deref(), Some("Body Face"));
+        assert_eq!(theme(xml).fonts().1.as_deref(), Some("Body Face"));
     }
 
     #[test]
     fn an_empty_typeface_is_no_answer_rather_than_an_empty_one() {
         let xml = "<a:fontScheme><a:minorFont><a:latin typeface=\"\"/>\
             </a:minorFont></a:fontScheme>";
-        assert_eq!(parse_theme_font(xml), None);
+        assert_eq!(theme(xml).fonts(), (None, None));
     }
 
     /// A package written before the theme part existed — which is every
     /// pptx this writer produced until now — has to fall back, not fail.
     #[test]
     fn a_part_with_no_font_scheme_answers_nothing() {
-        assert_eq!(parse_theme_font("<a:theme><a:themeElements/></a:theme>"), None);
-        assert_eq!(parse_theme_font(""), None);
-        assert_eq!(parse_theme_font("not xml at all <<<"), None);
+        assert_eq!(theme("<a:theme><a:themeElements/></a:theme>").fonts(), (None, None));
+        assert_eq!(theme("").fonts(), (None, None));
+        assert_eq!(theme("not xml at all <<<").fonts(), (None, None));
     }
 }
 

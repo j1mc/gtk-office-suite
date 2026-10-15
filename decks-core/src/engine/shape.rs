@@ -202,12 +202,26 @@ impl LinearGradient {
 /// How a shape is painted. `fill: None` is no fill (not a default fill),
 /// `stroke: None` no outline. When `gradient` is set it is what is drawn,
 /// and `fill` holds its mean colour for consumers that can't draw one.
+///
+/// `fill`/`stroke` are the resolved rendering values. `fill_src` and
+/// `stroke_src` are the canonical source beside them (DCK-006): what the
+/// file stated — an explicit no-fill/no-line, or a direct literal or
+/// theme-token colour — with the resolved colour as derived cache. `None`
+/// is no direct statement (a `p:style` reference, a group fill, a
+/// gradient, or predates retention): the cache stays canonical, as
+/// before, and the writers carry it back byte-stable. The writers prefer
+/// a carried reference whenever one is present, so a save keeps the
+/// live theme link instead of freezing the resolved colour.
 #[derive(Clone, Debug, PartialEq)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ShapeStyle {
     pub fill: Option<Color>,
     pub gradient: Option<LinearGradient>,
     pub stroke: Option<Stroke>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_src: Option<super::theme::FillSrc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_src: Option<super::theme::StrokeSrc>,
 }
 
 impl Default for ShapeStyle {
@@ -219,6 +233,8 @@ impl Default for ShapeStyle {
             fill: Some(accent1),
             gradient: None,
             stroke: Some(Stroke { color: accent1.lum(Some(50_000), None), width: 1.0 }),
+            fill_src: None,
+            stroke_src: None,
         }
     }
 }
