@@ -261,7 +261,7 @@ impl Theme {
         if let Some(hex) = self.colors.get(slot) {
             return Color::from_hex(hex);
         }
-        Self::default_colors().get(slot).and_then(Color::from_hex)
+        Self::default_colors().get(slot).and_then(|hex| Color::from_hex(hex))
     }
 
     /// The reference `r` draws as under this theme, if it names a
