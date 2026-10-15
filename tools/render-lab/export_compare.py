@@ -231,13 +231,13 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--baseline")
     ap.add_argument("--update-baseline", action="store_true")
-    ap.add_argument("--app")
+    ap.add_argument("--app", action="append", help="repeatable, as in compare.py")
     args = ap.parse_args()
 
     manifest = json.load(open(os.path.join(args.fixtures, "manifest.json")))
     manifest = [fx for fx in manifest if fx.get("export")]
     if args.app:
-        manifest = [fx for fx in manifest if fx["app"] == args.app]
+        manifest = [fx for fx in manifest if fx["app"] in args.app]
     results, cache = {}, {}
     for fx in manifest:
         key = f"{fx['app']}/{fx['feature']}"

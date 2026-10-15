@@ -7,9 +7,13 @@ and each app's job asks tools/render-lab/real_scope.py whether the change
 reaches it. Getting that answer wrong is silent in the direction of running
 too little — a green check that rendered nothing — so it is pinned here: the
 scope comes from the Cargo manifests rather than a list, and the workflow
-keeps every app's check reporting on every pull request.
+keeps every app's check reporting on every pull request. render-parity.yml
+uses the same scope to start lab jobs only for the apps a change reaches.
 """
 
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -19,6 +23,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "render-real.yml"
+PARITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "render-parity.yml"
+REAL = ".github/workflows/render-real.yml"
+PARITY = ".github/workflows/render-parity.yml"
 sys.path.insert(0, str(REPO_ROOT / "tools" / "render-lab"))
 
 import real_scope  # noqa: E402
@@ -28,8 +35,8 @@ DCK_006 = ["ROADMAP.md", "decks-core/src/engine/shape.rs", "decks-core/src/odp.r
            "decks-core/tests/master_view.rs"]
 
 
-def apps_reached(changed):
-    return {app for app in real_scope.APPS if real_scope.reaching(app, changed)}
+def apps_reached(changed, workflow=REAL):
+    return {app for app in real_scope.APPS if real_scope.reaching(app, changed, workflow=workflow)}
 
 
 class WhatReachesEachApp(unittest.TestCase):
@@ -154,6 +161,90 @@ class TheWorkflowReportsEveryAppOnEveryPullRequest(unittest.TestCase):
         checkout = self.steps[0]
         self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
         self.assertGreaterEqual(int(checkout.get("with", {}).get("fetch-depth", 1)), 2)
+
+
+class EachWorkflowIsInItsOwnScope(unittest.TestCase):
+    """render-parity.yml shares the scope; each workflow reruns every app only
+    when it itself changes, not when the other one does."""
+
+    def test_a_workflow_change_reaches_every_app_it_renders(self):
+        self.assertEqual(apps_reached([REAL], REAL), set(real_scope.APPS))
+        self.assertEqual(apps_reached([PARITY], PARITY), set(real_scope.APPS))
+
+    def test_the_other_workflow_does_not(self):
+        self.assertEqual(apps_reached([PARITY], REAL), set())
+        self.assertEqual(apps_reached([REAL], PARITY), set())
+
+
+class TheCommandLine(unittest.TestCase):
+    def run_main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(real_scope.main(list(argv)), 0)
+        return out.getvalue().strip()
+
+    def changed(self, paths):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        handle.write("\n".join(paths) + "\n")
+        handle.close()
+        return handle.name
+
+    def test_one_app_prints_true_or_false(self):
+        path = self.changed(DCK_006)
+        self.assertEqual(self.run_main("--workflow", REAL, "--app", "decks", "--changed", path), "true")
+        self.assertEqual(self.run_main("--workflow", REAL, "--app", "letters", "--changed", path), "false")
+
+    def test_without_an_app_it_prints_the_apps_reached_as_json(self):
+        self.assertEqual(json.loads(self.run_main("--workflow", PARITY, "--changed", self.changed(DCK_006))),
+                         ["decks"])
+        self.assertEqual(json.loads(self.run_main("--workflow", PARITY, "--changed",
+                                                  self.changed(["docs/TESTING.md"]))), [])
+
+    def test_all_is_every_app(self):
+        self.assertEqual(json.loads(self.run_main("--workflow", PARITY, "--all")), list(real_scope.APPS))
+        self.assertEqual(self.run_main("--workflow", PARITY, "--app", "tables", "--all"), "true")
+
+
+class RenderParityLabsFollowTheScope(unittest.TestCase):
+    """render-parity.yml starts lab jobs only for the apps in scope; its two
+    report jobs report on every pull request and are the verdict."""
+
+    def setUp(self):
+        with open(PARITY_WORKFLOW, encoding="utf-8") as handle:
+            self.jobs = yaml.safe_load(handle)["jobs"]
+
+    def test_the_scope_job_asks_real_scope_for_this_workflow(self):
+        job = self.jobs["scope"]
+        self.assertNotIn("if", job)
+        run = next(step["run"] for step in job["steps"] if step.get("id") == "scope")
+        self.assertIn(f"real_scope.py --workflow {PARITY}", run)
+        self.assertIn("HEAD^1 HEAD", run)
+        self.assertIn("--all", run)
+        self.assertGreaterEqual(int(job["steps"][0].get("with", {}).get("fetch-depth", 1)), 2)
+
+    def test_every_lab_is_a_cell_per_app_in_scope(self):
+        for name in ("lab", "export-lab"):
+            with self.subTest(job=name):
+                job = self.jobs[name]
+                self.assertEqual(job["needs"], "scope")
+                self.assertEqual(job["if"], "needs.scope.outputs.apps != '[]'",
+                                 "an empty matrix is an error, not a skip")
+                self.assertEqual(job["strategy"]["matrix"]["app"], "${{ fromJSON(needs.scope.outputs.apps) }}")
+
+    def test_the_reports_judge_the_scope_and_the_labs(self):
+        for name, lab in (("report", "lab"), ("export-report", "export-lab")):
+            with self.subTest(job=name):
+                job = self.jobs[name]
+                self.assertEqual(job["needs"], ["scope", lab])
+                self.assertEqual(job["if"], "${{ !cancelled() }}")
+                first = job["steps"][0]
+                self.assertEqual(first.get("id"), "inscope")
+                self.assertEqual(first["env"]["SCOPE"], "${{ needs.scope.result }}")
+                self.assertIn('[ "$SCOPE" != success ]', first["run"])
+                last = job["steps"][-1]
+                self.assertEqual(last["env"]["LAB"], f"${{{{ needs.{lab}.result }}}}")
+                self.assertIn('[ "$LAB" != success ]', last["run"])
+                self.assertIn("always()", last["if"])
 
 
 if __name__ == "__main__":
