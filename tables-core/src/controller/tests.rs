@@ -1279,8 +1279,14 @@
         let (engine, _) = crate::io::load_xlsx_workbook(path.to_str().unwrap()).unwrap();
         assert_eq!(engine.formula(1, 0).as_deref(), Some("A1+B1"), "the formula survived the round trip");
         assert_eq!(engine.cell(1, 0), "5");
-        assert_eq!(engine.input_at(0, 5, 0), "", "a derived spill cell has no input to flatten");
+        // The reload re-spills, so the derived cell reads "2" again — but
+        // it holds no input, and the file stores no constant there that
+        // could block the spill.
+        assert_eq!(engine.editable_input_at(0, 5, 0), "", "a derived spill cell has no input to flatten");
         assert_eq!(engine.cell_at(0, 5, 0), "2", "the spill recomputes on load");
+        let mut wb: calamine::Xlsx<_> = calamine::open_workbook(path.to_str().unwrap()).unwrap();
+        let range = calamine::Reader::worksheet_range(&mut wb, "Sheet1").unwrap();
+        assert!(range.get_value((5, 0)).is_none(), "a derived spill cell was flattened into the file");
     }
 
     /// TBL-006: `mutate_sheet` cannot smuggle values or a resize past the
