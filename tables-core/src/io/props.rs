@@ -1413,21 +1413,33 @@ Due &lt;Friday&gt;</t></r></text></comment>
 /// where Excel and Calc open on its Contents (render-real
 /// `dpas-return-2025-to-2026-data-template`).
 pub fn opening_sheet(path: &str) -> usize {
-    let Ok(f) = std::fs::File::open(path) else { return 0 };
-    let Ok(mut zip) = zip::ZipArchive::new(f) else { return 0 };
+    sheet_visibility(path).map_or(0, |(active, hidden)| pick_opening(active, &hidden))
+}
+
+/// The first sheet a workbook prints: its first visible one, whichever
+/// sheet it was left on. Calc's PDF export starts there, so the render
+/// lab's dump shows this sheet to compare like with like; a user still
+/// opens on [`opening_sheet`]. Dumping the opening sheet scored the
+/// exceptional learning support form, left on its third sheet, against
+/// the first sheet Calc printed (render-real, amber to red).
+pub fn first_printed_sheet(path: &str) -> usize {
+    sheet_visibility(path).map_or(0, |(_, hidden)| pick_opening(None, &hidden))
+}
+
+/// The sheet a workbook was left on and whether each sheet is hidden.
+fn sheet_visibility(path: &str) -> Option<(Option<usize>, Vec<bool>)> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(f).ok()?;
     let mut budget = ZipBudget::default();
-    if budget.check_entry_count(zip.len()).is_err() {
-        return 0;
-    }
-    let (active, hidden) = if let Ok(workbook) = zip.part_to_string("xl/workbook.xml", &mut budget) {
-        xlsx_opening(&workbook)
+    budget.check_entry_count(zip.len()).ok()?;
+    if let Ok(workbook) = zip.part_to_string("xl/workbook.xml", &mut budget) {
+        Some(xlsx_opening(&workbook))
     } else if let Ok(content) = zip.part_to_string("content.xml", &mut budget) {
         let settings = zip.optional_part_to_string("settings.xml", &mut budget);
-        ods_opening(&content, &settings)
+        Some(ods_opening(&content, &settings))
     } else {
-        return 0;
-    };
-    pick_opening(active, &hidden)
+        None
+    }
 }
 
 /// The active sheet if it is visible, else the first visible one.
@@ -1513,5 +1525,24 @@ mod opening_tests {
         assert_eq!(pick(&settings("Notes")), 2);
         assert_eq!(pick(&settings("Data")), 1, "a hidden active table is passed over");
         assert_eq!(pick(""), 1, "no settings: the first visible table");
+    }
+
+    /// The render lab's dump compares against Calc's PDF, which starts at
+    /// the first visible sheet, not the one the file was left on.
+    #[test]
+    fn a_workbook_prints_from_its_first_visible_sheet_wherever_it_was_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("left-on-third.xlsx");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        w.start_file("xl/workbook.xml", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(
+            &mut w,
+            br#"<workbook><bookViews><workbookView activeTab="2"/></bookViews><sheets><sheet name="Data" sheetId="1" state="hidden" r:id="rId1"/><sheet name="Rules" sheetId="2" r:id="rId2"/><sheet name="Costs" sheetId="3" r:id="rId3"/></sheets></workbook>"#,
+        )
+        .unwrap();
+        w.finish().unwrap();
+        let path = path.to_str().unwrap();
+        assert_eq!(opening_sheet(path), 2, "a user opens where the file was left");
+        assert_eq!(first_printed_sheet(path), 1, "printing starts at the first visible sheet");
     }
 }

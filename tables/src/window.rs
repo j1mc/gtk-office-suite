@@ -2133,8 +2133,14 @@ impl TablesWindow {
         // Format dispatch lives in tables_core::io::load_workbook so every
         // open route (CLI, dialog, drag-and-drop) supports the same formats.
         let (engine, sheets) = load_workbook(path)?;
-        // The sheet the file was left on, never a hidden one.
-        let opening = tables_core::io::opening_sheet(path).min(sheets.len().saturating_sub(1));
+        // The sheet the file was left on, never a hidden one; for the
+        // render lab's dump, the first sheet Calc prints.
+        let opening = if suite_common::render_dump::active() {
+            tables_core::io::first_printed_sheet(path)
+        } else {
+            tables_core::io::opening_sheet(path)
+        }
+        .min(sheets.len().saturating_sub(1));
         let names = sheets
             .iter()
             .map(|sheet| sheet.name.clone())
