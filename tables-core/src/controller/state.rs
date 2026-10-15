@@ -147,7 +147,7 @@ impl WorkbookState {
         }
         self.engine.set_active_sheet(index)?;
         self.active_sheet = index;
-        self.sync_active_sheet();
+        self.sync_all_sheets();
         Ok(())
     }
 
@@ -172,7 +172,9 @@ impl WorkbookState {
         self.engine.delete_sheet(index)?;
         self.sheets.remove(index);
         self.active_sheet = self.engine.active_sheet();
-        self.sync_active_sheet();
+        // Dependents elsewhere can turn to #REF!: refresh every
+        // projection, not just the newly shown sheet's.
+        self.sync_all_sheets();
         Ok(())
     }
 
@@ -181,6 +183,9 @@ impl WorkbookState {
         self.engine.reorder_sheets(new_order)?;
         self.sheets = new_order.iter().map(|&i| self.sheets[i].clone()).collect();
         self.active_sheet = self.engine.active_sheet();
+        // The engine re-parses every formula against the new positions
+        // and recalculates: refresh every projection with it.
+        self.sync_all_sheets();
         Ok(())
     }
 
