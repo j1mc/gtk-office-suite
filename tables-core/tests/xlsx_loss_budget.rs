@@ -117,6 +117,12 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     s.print_area = Some((0, 0, 5, 2));
     // A second sheet with a chart and a rule of its own.
     engine.add_sheet("Later").unwrap();
+    // TBL-006: the model is a projection — its content needs the engine
+    // inputs the writer saves, not just display text.
+    engine.set_active_sheet(1).unwrap();
+    engine.set_cell_text(0, 0, "1").unwrap();
+    engine.set_cell_text(1, 0, "2").unwrap();
+    engine.set_active_sheet(0).unwrap();
     let mut t = SheetModel::new("Later", ROWS, COLS, engine.sheet_id_at(1).unwrap());
     t.data[0][0] = "1".into();
     t.data[1][0] = "2".into();
