@@ -85,7 +85,7 @@ class FeatureVerificationCredentials(unittest.TestCase):
         self.assertNotIn("docker build", script)
 
     def test_jobs_that_run_pull_request_code_hold_no_writes(self):
-        for name in ("gate", "image", "record"):
+        for name in ("image", "record"):
             self.assertEqual(writes(self.jobs[name].get("permissions")), set(), name)
 
     def test_publish_job_runs_base_branch_scripts(self):

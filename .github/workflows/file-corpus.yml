@@ -2,14 +2,21 @@ name: Real-file open edit reopen
 
 on:
   pull_request:
+    # The corpus and the harness this journey runs on, not every GUI test:
+    # `tests/gui/**` started three LibreOffice-installing jobs for each
+    # change to test_smoke.py, which this workflow does not run.
     paths:
       - 'interop/**'
-      - 'tests/gui/**'
+      - 'tests/gui/test_file_corpus.py'
+      - 'tests/gui/framework/**'
+      - 'tests/gui/conftest.py'
+      - 'tests/gui/run_gui_tests.sh'
       - 'tests/test_open_corpus.py'
       - '.github/workflows/file-corpus.yml'
   # Also nightly, so an app change that breaks opening real files shows up
-  # within a day even though the PR lane only runs for harness changes
-  # (running it on every app PR would put a LibreOffice install on each).
+  # within a day even though the PR lane only runs for corpus and harness
+  # changes (running it on every app PR would put a LibreOffice install on
+  # each).
   schedule:
     - cron: '30 4 * * *'
   workflow_dispatch:

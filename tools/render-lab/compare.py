@@ -833,12 +833,14 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--baseline")
     ap.add_argument("--update-baseline", action="store_true")
-    ap.add_argument("--app")
+    # Repeatable: the combine job in render-parity.yml compares only the apps
+    # a pull request reaches (`--app letters --app decks`).
+    ap.add_argument("--app", action="append")
     args = ap.parse_args()
 
     manifest = json.load(open(os.path.join(args.fixtures, "manifest.json")))
     if args.app:
-        manifest = [fx for fx in manifest if fx["app"] == args.app]
+        manifest = [fx for fx in manifest if fx["app"] in args.app]
     results, cache, agreement, printed = {}, {}, {}, {}
     for fx in manifest:
         key = f"{fx['app']}/{fx['feature']}"

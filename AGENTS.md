@@ -57,8 +57,9 @@ units) ← `suite-common` (GTK helpers: dialogs, toasts, SuiteApp/SuiteWindow)
   `render-lab-out/report.html` before claiming a visual feature works. See
   `docs/RENDER-PARITY-ROADMAP.md`.
 - **Let CI do the heavy runs.** A local machine is often slower than CI. Push
-  a draft PR early: `render-parity.yml` renders each app in its own parallel
-  job, and `ci.yml` runs clippy (`-D warnings`) and the tests. Then
+  a draft PR early: `render-parity.yml` renders each app your change can
+  reach in its own parallel job, and `ci.yml` runs clippy (`-D warnings`)
+  and the tests. Then
   `gh run download <run> -n render-parity-report` gives you every image,
   `report.html` and `baseline.proposed.json` (the baseline that run would
   lock in). Look at the images, then commit that baseline. Locally, run
