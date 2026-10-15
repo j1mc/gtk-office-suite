@@ -128,7 +128,9 @@ fn show_settings(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>) {
     notice.set_wrap(true);
     notice.set_xalign(0.0);
     let protect = gtk::CheckButton::with_label(&suite_common::i18n("Protect this sheet"));
-    protect.set_active(current.protected);
+    // Opening the dialog is asking to protect, as in Excel and Calc:
+    // unticking it is how the dialog unprotects.
+    protect.set_active(true);
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
