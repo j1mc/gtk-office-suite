@@ -226,8 +226,9 @@ pub fn parse_slide_size(xml: &str) -> Option<(f64, f64)> {
 /// The break is carried *inside* the runs rather than only in the derived
 /// text, because `SlideObject::TextBox` requires concatenated run text to
 /// equal `text`. A paragraph that contributed no run of its own cannot
-/// carry it, so nothing is recorded for it and a wholly empty paragraph
-/// (a blank line) is still dropped — as it was before this.
+/// carry it: a blank paragraph between runs becomes a second break on the
+/// run before, and blank paragraphs ahead of the first run lead its text
+/// (`push_run`).
 fn close_paragraphs(runs: &mut [Run], count: usize) {
     if let Some(last) = runs.last_mut() {
         for _ in 0..count {
@@ -293,10 +294,19 @@ impl PendingShape {
 
     /// Record one `a:t`'s text as a run, breaking the line first if a
     /// paragraph closed since the last one.
-    fn push_run(&mut self, text: String) {
+    fn push_run(&mut self, mut text: String) {
         let cur = self.paras_seen.saturating_sub(1);
         if self.runs.is_empty() {
+            // Blank paragraphs ahead of the first run are lines too: a
+            // top-anchored tile that opens with two empty paragraphs sets
+            // its figure two lines down (#1397), so they lead this run's
+            // text as breaks of their own, sized like it.
+            let lead = std::mem::take(&mut self.pending_breaks);
+            for k in 0..lead {
+                self.line_paras.push((cur + k).saturating_sub(lead));
+            }
             self.line_paras.push(cur);
+            text.insert_str(0, &"\n".repeat(lead));
         } else {
             // n closed paragraphs since the last run: the n-1 empty ones
             // between, then this one.
@@ -1734,7 +1744,11 @@ fn master_shapes(
     let paints = sp_styles(xml, theme, scale.x);
     let mut sp_count = 0usize;
     impl Pending {
-        fn push_run(&mut self, text: String) {
+        fn push_run(&mut self, mut text: String) {
+            // Leading blank paragraphs keep their lines, as on a slide.
+            if self.runs.is_empty() {
+                text.insert_str(0, &"\n".repeat(self.pending_breaks));
+            }
             close_paragraphs(&mut self.runs, self.pending_breaks);
             self.pending_breaks = 0;
             self.runs.push(Run { text, style: self.cur_style.clone() });
