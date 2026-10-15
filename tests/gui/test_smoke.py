@@ -7653,6 +7653,245 @@ class DecksInlineTextSmoke(DecksCanvasGeometry, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "decks crashed editing slide text")
 
 
+class DecksRichTextJourney(DecksCanvasGeometry):
+    """What the DCK-007 rich text journeys share: the text session and the
+    box as the snapshot reports them, opening the editor with a real
+    double-click, and Save As through the real file chooser."""
+
+    AID = "org.tunaos.decks"
+
+    def _snap(self):
+        return self.trigger_snapshot(self.AID)
+
+    def _session(self):
+        return self._snap().get("text_session")
+
+    def _boxes(self):
+        return [o for o in self._snap()["slides"][0]["objects"] if o["kind"] == "TextBox"]
+
+    def _box(self):
+        boxes = self._boxes()
+        return boxes[-1] if boxes else None
+
+    @staticmethod
+    def _styled(runs, key):
+        return "".join(r["text"] for r in (runs or []) if r["style"].get(key))
+
+    def _control(self, name, role):
+        return self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == name and n.roleName == role and n.showing,
+                                       retry=False, requireResult=False),
+            bool, description=f"the {name} control")
+
+    def _new_text_box(self):
+        self.gapplication_action(self.AID, "new-document")
+        self.wait_until(lambda: self._snap()["slides"], bool, description="a new deck")
+        self.gapplication_action(self.AID, "add-text-box")
+        return self.wait_until(self._box, bool, description="the added text box")
+
+    def _open_editor(self):
+        from dogtail import rawinput
+
+        obj = self._box()
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2, obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Slide text editor", retry=False, requireResult=False),
+            lambda n: n is not None and n.showing, description="the slide text editor")
+        return self.wait_until(self._session, bool, description="an open text session")
+
+    def _save_as(self, path):
+        """Save As through the file chooser; the saved package's parts."""
+        import subprocess
+        import zipfile
+        from dogtail import tree
+
+        if os.path.exists(path):
+            os.remove(path)
+        subprocess.run(["gapplication", "action", self.AID, "save-file-as"])
+        entry = self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text" and n.showing,
+                                        retry=False, requireResult=False),
+            bool, description="the Save As name entry")
+        entry.text = path
+        time.sleep(0.3)  # pacing: no state to wait on before the next input
+        self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button" and n.showing,
+                                        retry=False, requireResult=False),
+            bool, description="the Save button").do_action(0)
+
+        def parts():
+            try:
+                with zipfile.ZipFile(path) as z:
+                    return {n: z.read(n).decode("utf-8", "replace") for n in z.namelist()}
+            except (OSError, zipfile.BadZipFile):
+                return None
+        return self.wait_until(parts, bool, interval=0.25, description=f"{os.path.basename(path)} on disk")
+
+
+class DecksRichTextRangeSmoke(DecksRichTextJourney, BaseGUITestCase):
+    """DCK-007: range formatting in the native editor. Type a paragraph,
+    select one word by keys, format only it (Ctrl+B, the bar's Underline),
+    add a paragraph, cancel; reopen and do it again, commit; undo/redo; a
+    document undo while the editor is open is refused rather than undoing
+    a slide; save as PPTX and ODP and reopen each."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-rich-text-")
+        self.isolate_autosave_state()
+        super().setUp()
+
+    def _type_and_format(self):
+        from dogtail import rawinput
+
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Alpha Beta Gamma")
+        self.wait_until(self._session, lambda s: s and s["text"] == "Alpha Beta Gamma",
+                        description="the typed text in the session")
+        rawinput.keyCombo("Home")
+        for _ in range(6):
+            rawinput.keyCombo("Right")
+        for _ in range(4):
+            rawinput.keyCombo("<Shift>Right")
+        self.wait_until(self._session, lambda s: (s["start"], s["end"]) == (6, 10),
+                        description="Beta selected by keys")
+        rawinput.keyCombo("<Control>b")
+        self.wait_until(self._session, lambda s: self._styled(s["runs"], "bold") == "Beta",
+                        description="Ctrl+B making only the selection bold")
+        self._control("Underline Selection (Ctrl+U)", "toggle button").do_action(0)
+        self.wait_until(self._session, lambda s: self._styled(s["runs"], "underline") == "Beta",
+                        description="the bar's Underline acting on the selection only")
+        rawinput.keyCombo("End")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("Second")
+        return self.wait_until(self._session, lambda s: s["text"] == "Alpha Beta Gamma\nSecond",
+                               description="Enter making a second paragraph")
+
+    def _check(self, box, what):
+        self.assertEqual(box["text"], "Alpha Beta Gamma\nSecond", what)
+        self.assertEqual(self._styled(box["runs"], "bold"), "Beta", f"{what}: {box['runs']}")
+        self.assertEqual(self._styled(box["runs"], "underline"), "Beta", f"{what}: {box['runs']}")
+
+    def test_select_by_keys_format_cancel_commit_undo_and_save_both_formats(self):
+        from dogtail import rawinput
+
+        before = self._new_text_box()
+        self._open_editor()
+        session = self._type_and_format()
+        self.assertEqual(self._box()["text"], before["text"], "the session is not the document")
+        # Ctrl+Z inside the session is the session's own undo: the new
+        # paragraph's word comes off, and the slide is untouched.
+        rawinput.keyCombo("<Control>z")
+        self.wait_until(self._session, lambda s: s["text"] != session["text"],
+                        description="Ctrl+Z undoing inside the session")
+        rawinput.keyCombo("<Control><Shift>z")
+        self.wait_until(self._session, lambda s: s["text"] == session["text"],
+                        description="Ctrl+Shift+Z redoing inside the session")
+        # The deck's undo, from automation, is refused while the session is
+        # open: it would have taken the added text box away.
+        self.gapplication_action(self.AID, "undo")
+        self.assertEqual(len(self._boxes()), 1, "a document undo ran under the open text session")
+        self.assertIsNotNone(self._session(), "the session survived the refused undo")
+        rawinput.keyCombo("Escape")
+        self.wait_until(self._session, lambda s: s is None, description="Escape ending the session")
+        box = self._box()
+        self.assertEqual((box["text"], self._styled(box["runs"], "bold")), (before["text"], ""),
+                         "cancel left the box as it was")
+
+        self._open_editor()
+        self._type_and_format()
+        rawinput.keyCombo("<Control>Return")
+        self.wait_until(self._session, lambda s: s is None, description="Ctrl+Return committing the session")
+        self._check(self._box(), "committed")
+        self.gapplication_action(self.AID, "undo")
+        self.wait_until(self._box, lambda b: b["text"] == before["text"], description="one undo for the whole session")
+        self.gapplication_action(self.AID, "redo")
+        self._check(self.wait_until(self._box, lambda b: b["text"] != before["text"], description="redo"), "redone")
+
+        root = self.temp_dir(prefix="decks-rich-text-save-")
+        pptx = os.path.join(root, "range.pptx")
+        slide = self._save_as(pptx)["ppt/slides/slide1.xml"]
+        self.assertRegex(slide, r'<a:rPr[^>]* b="1"[^>]* u="sng"[^>]*/?>(?:(?!</a:r>).)*<a:t>Beta</a:t>',
+                         "Beta was not saved bold and underlined")
+        self.relaunch_app(launch_args=[pptx])
+        self._check(self.wait_until(self._box, lambda b: b and "Second" in b["text"], interval=0.3,
+                                    description="the reopened PPTX"), "PPTX reopened")
+        odp = os.path.join(root, "range.odp")
+        content = self._save_as(odp)["content.xml"]
+        self.assertIn('fo:font-weight="bold"', content, "no bold text style in the ODP")
+        self.relaunch_app(launch_args=[odp])
+        self._check(self.wait_until(self._box, lambda b: b and "Second" in b["text"], interval=0.3,
+                                    description="the reopened ODP"), "ODP reopened")
+        self.assertIsNone(self.process.poll(), "decks crashed in the rich text journey")
+
+
+class DecksImeBidiSmoke(DecksRichTextJourney, BaseGUITestCase):
+    """DCK-007: complex scripts and input-method composition in the native
+    editor. Hebrew with digits, CJK, a combining accent and an emoji typed
+    in; a character composed through GTK's own input method (Ctrl+Shift+U
+    preedit) is not text until it is committed; two Shift+Left presses
+    select two grapheme clusters (three code points) exactly; a preedit
+    still open when Apply is pressed is not saved; the text survives PPTX
+    and ODP save and reopen byte for byte. A real IME and Orca are manual
+    DCK-019 evidence, not this journey."""
+
+    app_name = "decks"
+    BASE = "Hi שלום 123 東京 "
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-ime-bidi-")
+        self.isolate_autosave_state()
+        super().setUp()
+
+    def test_complex_scripts_preedit_and_grapheme_selection(self):
+        from dogtail import rawinput
+
+        self._new_text_box()
+        self._open_editor()
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText(self.BASE)
+        self.wait_until(self._session, lambda s: s and s["text"] == self.BASE,
+                        description="Hebrew, digits and CJK typed in logical order")
+        rawinput.keyCombo("<Control><Shift>u")
+        rawinput.typeText("6587")
+        time.sleep(0.5)  # settling: gives a wrong outcome its chance before the check that it didn't happen
+        self.assertEqual(self._session()["text"], self.BASE, "input-method preedit reached the text")
+        rawinput.keyCombo("space")
+        composed = self.BASE + "文"
+        self.wait_until(self._session, lambda s: s["text"] == composed, description="the composed character committed")
+        rawinput.typeText("e\u0301😀")
+        full = composed + "e\u0301😀"
+        self.wait_until(self._session, lambda s: s["text"] == full, description="a combining accent and an emoji")
+        rawinput.keyCombo("<Shift>Left")
+        rawinput.keyCombo("<Shift>Left")
+        start = len(composed.encode("utf-8"))
+        self.wait_until(self._session, lambda s: (s["start"], s["end"]) == (start, len(full.encode("utf-8"))),
+                        description="two grapheme clusters selected by two Shift+Left")
+        rawinput.keyCombo("<Control>b")
+        self.wait_until(self._session, lambda s: self._styled(s["runs"], "bold") == "e\u0301😀",
+                        description="exactly the selected clusters bold")
+        # A preedit still open when Apply is pressed is not committed text.
+        rawinput.keyCombo("End")
+        rawinput.keyCombo("<Control><Shift>u")
+        rawinput.typeText("41")
+        time.sleep(0.5)  # settling: the preedit is on screen, not in the text
+        self._control("Apply", "push button").do_action(0)
+        self.wait_until(self._session, lambda s: s is None, description="Apply ending the session")
+        box = self.wait_until(self._box, lambda b: b["text"] == full, description="the committed text, no preedit")
+        self.assertEqual(self._styled(box["runs"], "bold"), "e\u0301😀")
+        root = self.temp_dir(prefix="decks-ime-bidi-save-")
+        for ext in ("odp", "pptx"):
+            path = os.path.join(root, f"scripts.{ext}")
+            self._save_as(path)
+            self.relaunch_app(launch_args=[path])
+            box = self.wait_until(self._box, lambda b: b and b["text"] == full, interval=0.3,
+                                  description=f"the reopened {ext.upper()}")
+            self.assertEqual(self._styled(box["runs"], "bold"), "e\u0301😀", ext)
+        self.assertIsNone(self.process.poll(), "decks crashed editing complex scripts")
+
+
 class DecksCanvasDragSmoke(DecksCanvasGeometry, BaseGUITestCase):
     """Dragging an object on the canvas moves it in the model.
 

@@ -5,7 +5,8 @@ A fixture proves we draw what we read. This proves we write what we draw:
 tests/gui/test_edit_render.py edits a new document through the real GUI
 (type, bold, a bullet / a cell format / a shape), saves it with Save As
 and reopens it. Run here with EDIT_RENDER_OUT pointing into the fixtures
-directory, each saved file joins manifest.json as `<app>/edited-journey`,
+directory, each saved file joins manifest.json as `<app>/<feature>`
+(`edited-journey`, and Decks' range-formatted `rich-text-edited`, DCK-007),
 so the rest of the lab treats it like any fixture: LibreOffice renders the
 saved file (lo_render.py), our app opens it (capture.py), and compare.py
 scores and ratchets the pair.
@@ -29,14 +30,19 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-JOURNEYS = {
-    "letters": ("LettersEditRenderJourney", "docx",
-                "A paragraph ending in two bold words, then a bulleted item, then a table cell entry, as typed and saved by Letters"),
-    "tables": ("TablesEditRenderJourney", "xlsx",
-               "Item/Amount header in bold over two rows (Paper 12, Ink 30), as entered and saved by Tables"),
-    "decks": ("DecksEditRenderJourney", "pptx",
-              "One slide with a double-click-edited title and an added shape, as saved and reopened by Decks"),
-}
+# (app, feature, journey, extension, what the fixture shows)
+JOURNEYS = [
+    ("letters", "edited-journey", "LettersEditRenderJourney", "docx",
+     "A paragraph ending in two bold words, then a bulleted item, then a table cell entry, as typed and saved by Letters"),
+    ("tables", "edited-journey", "TablesEditRenderJourney", "xlsx",
+     "Item/Amount header in bold over two rows (Paper 12, Ink 30), as entered and saved by Tables"),
+    ("decks", "edited-journey", "DecksEditRenderJourney", "pptx",
+     "One slide with a double-click-edited title and an added shape, as saved and reopened by Decks"),
+    ("decks", "rich-text-edited", "DecksRichTextEditRenderJourney", "pptx",
+     "A text box typed in place: 'Alpha Beta Gamma' with only Beta, selected by keys, bold, underlined "
+     "and red, then a second, centred italic paragraph, as saved by Decks"),
+]
+FEATURES = {feature for _, feature, _, _, _ in JOURNEYS}
 
 
 def print_like_the_fixtures(xlsx):
@@ -78,13 +84,13 @@ def main():
     fixtures = os.path.abspath(args.fixtures)
     manifest_path = os.path.join(fixtures, "manifest.json")
     manifest = json.load(open(manifest_path))
-    manifest = [fx for fx in manifest if fx["feature"] != "edited-journey"]
+    manifest = [fx for fx in manifest if fx["feature"] not in FEATURES]
     out = os.path.join(fixtures, "edited")
     failures = 0
-    for app, (journey, ext, expect) in JOURNEYS.items():
+    for app, feature, journey, ext, expect in JOURNEYS:
         if args.app and app != args.app:
             continue
-        saved = os.path.join(out, app, f"edited-journey.{ext}")
+        saved = os.path.join(out, app, f"{feature}.{ext}")
         if not args.manifest_only:
             if os.path.exists(saved):
                 os.remove(saved)
@@ -95,13 +101,13 @@ def main():
             )
             if run.returncode != 0 or not os.path.exists(saved):
                 failures += 1
-                print(f"edit {app}: journey failed; no edited-journey fixture", file=sys.stderr)
+                print(f"edit {app}: journey failed; no {feature} fixture", file=sys.stderr)
                 continue
             if app == "tables":
                 print_like_the_fixtures(saved)
         manifest.append({
             "app": app,
-            "feature": "edited-journey",
+            "feature": feature,
             "file": os.path.relpath(saved, fixtures),
             "expect": expect,
             "needs": None,
