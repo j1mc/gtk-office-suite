@@ -40,6 +40,15 @@ pub fn save_sheets_to_xlsx_with_engine(
     suite_common_core::atomic_save::atomic_write_bytes(std::path::Path::new(path), &bytes)
 }
 
+/// The text to save for a non-formula cell: the engine's editable input.
+/// An empty input means no input — either a truly empty cell (the blank
+/// path below) or a derived spill cell, whose displayed value must not be
+/// flattened into a constant that would block the spill on reload.
+/// (Formula cells never reach here: they save through `formula_at`.)
+fn save_value_text(engine: &TablesEngine, sheet: usize, row: usize, col: usize) -> String {
+    engine.editable_input_at(sheet, row, col)
+}
+
 /// Render the workbook to an in-memory xlsx buffer without touching disk —
 /// shared by the real save path (which then writes it atomically) and
 /// autosave (which writes it into a crash-recovery snapshot slot instead).
@@ -109,7 +118,21 @@ pub fn save_sheets_to_xlsx_bytes(
                         continue;
                     }
                 }
-                let val = &sh.data[r][c];
+                // The value from the engine's editable input, not the
+                // projection: displayed text written back as input would
+                // flatten formulas — and spill results — into constants
+                // that block the spill on reload. Without a live engine
+                // the projection is all there is (the engine-less save
+                // path), and plain values round-trip identically either
+                // way.
+                let owned;
+                let val = match engine {
+                    Some(eng) => {
+                        owned = save_value_text(eng, si, r, c);
+                        &owned
+                    }
+                    None => &sh.data[r][c],
+                };
                 if val.is_empty() {
                     // An empty cell can still be styled: a boxed or filled
                     // blank is part of what the sheet looks like. Most empty
@@ -152,7 +175,10 @@ pub fn save_sheets_to_xlsx_bytes(
 
         for (mr, mc, rows, cols) in &sh.merges {
             let (lr, lc) = (mr + (*rows).max(1) - 1, mc + (*cols).max(1) - 1);
-            let val = sh.data[*mr][*mc].clone();
+            let val = match engine {
+                Some(eng) => save_value_text(eng, si, *mr, *mc),
+                None => sh.data[*mr][*mc].clone(),
+            };
             let format = cell_format(&sh.formats[*mr][*mc], &with_sheet_font(&sh.styles[*mr][*mc], sh, &wb_font), &sh.borders[*mr][*mc], &sh.cell_protections[*mr][*mc]).unwrap_or_default();
             sheet
                 .merge_range(
@@ -873,9 +899,9 @@ mod tests {
         let path = dir.path().join("f.xlsx");
 
         let mut e = engine();
-        e.set_cell_text(0, 0, "2");
-        e.set_cell_text(0, 1, "3");
-        e.set_cell_text(1, 0, "=A1+B1");
+        e.set_cell_text(0, 0, "2").unwrap();
+        e.set_cell_text(0, 1, "3").unwrap();
+        e.set_cell_text(1, 0, "=A1+B1").unwrap();
         e.evaluate();
         let mut sheet = SheetModel::new("S", 3, 3, 0);
         sheet.data[0][0] = "2".into();
@@ -897,12 +923,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.xlsx");
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "2");
-        engine.set_cell_text(0, 1, "=A1*2");
+        engine.set_cell_text(0, 0, "2").unwrap();
+        engine.set_cell_text(0, 1, "=A1*2").unwrap();
         engine.add_sheet("Sheet2").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "3");
-        engine.set_cell_text(0, 1, "=A1*3");
+        engine.set_cell_text(0, 0, "3").unwrap();
+        engine.set_cell_text(0, 1, "=A1*3").unwrap();
 
         let first = SheetModel::new("Sheet1", 3, 3, 0);
         let second = SheetModel::new("Sheet2", 3, 3, 1);
@@ -924,10 +950,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi-load.xlsx");
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "4");
+        engine.set_cell_text(0, 0, "4").unwrap();
         engine.add_sheet("Rates").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "=Sheet1!A1*5");
+        engine.set_cell_text(0, 0, "=Sheet1!A1*5").unwrap();
         engine.set_active_sheet(0).unwrap();
         let mut first = SheetModel::new("Sheet1", 3, 3, 0);
         first.sync_from_engine(&engine);
@@ -992,12 +1018,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("names-rt.xlsx");
         let mut engine = TablesEngine::new(4, 2).unwrap();
-        engine.set_cell_text(0, 0, "21");
+        engine.set_cell_text(0, 0, "21").unwrap();
         engine
             .model
             .new_defined_name("Rate", None, "Sheet1!$A$1")
             .unwrap();
-        engine.set_cell_text(1, 0, "=Rate*2");
+        engine.set_cell_text(1, 0, "=Rate*2").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 2, 0);
         sheet.sync_from_engine(&engine);
