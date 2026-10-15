@@ -16,7 +16,7 @@ use crate::undo::{obj_bounds, set_obj_origin};
 
 /// Where a moving build comes from (in) or goes to (out).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Edge {
     Left,
     Right,
@@ -26,7 +26,7 @@ pub enum Edge {
 
 /// How an object builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum BuildEffect {
     /// At once.
     Appear,
@@ -63,7 +63,7 @@ impl BuildEffect {
 /// (`out` true) with `effect`, on its own click. Identity, not z-position:
 /// reordering never retargets a build, and deleting an object drops its
 /// builds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Build {
     pub object: u64,
     pub effect: BuildEffect,

@@ -1439,19 +1439,31 @@ impl DecksWindow {
             let orphan = suite_common::autosave::AutosaveSlot::new(state_dir.clone(), orphan_id);
             let Some((bytes, meta)) = orphan.read() else { continue };
             let ext = if meta.kind == "odp" { "odp" } else { "pptx" };
-            let tmp = suite_common::autosave::recovery_scratch_path(&state_dir, ext);
-            if std::fs::write(&tmp, &bytes).is_err() {
-                continue;
-            }
-            let recovered = self.open_path(&tmp.to_string_lossy()).is_ok();
-            let _ = std::fs::remove_file(&tmp);
-            if !recovered {
-                continue;
-            }
-            // open_path() pointed file_path at the temp recovery file and
-            // marked the installed deck saved — recovered content targets
-            // the *original* path (or none) and must count as dirty so
-            // the close guard offers to save it.
+            // One versioned payload or a package-shaped migration input —
+            // never a guess. Whatever does not install here leaves the
+            // orphan for the next launch, as before.
+            let unresolved = match decks_core::recovery::decode_snapshot(&bytes) {
+                decks_core::recovery::SnapshotKind::Versioned(session) => {
+                    let session = *session;
+                    // Document, context and revision land as one session:
+                    // the next save is as safe as the crashed one's was.
+                    self.controller.install_recovered_session(session.deck, session.context, session.revision);
+                    session.unresolved_assets
+                }
+                decks_core::recovery::SnapshotKind::Package(package) => {
+                    let Ok(deck) = crate::persistence::read_legacy_package(&state_dir, package.as_slice(), ext) else {
+                        continue;
+                    };
+                    // Legacy snapshots carry no context: the session makes
+                    // no source-loss claims about them, and the next save
+                    // treats the deck on its own findings.
+                    self.controller.install_recovered_session(deck, None, 0);
+                    Vec::new()
+                }
+                decks_core::recovery::SnapshotKind::Unreadable => continue,
+            };
+            // Recovered content targets the *original* path (or none) and
+            // is dirty, so the close guard offers to save it.
             match meta.original_path.as_ref().map(|p| p.to_str()) {
                 // Never saved: no identity to restore.
                 None => *self.file_path.borrow_mut() = None,
@@ -1471,12 +1483,6 @@ impl DecksWindow {
                     err.present(Some(&self.window));
                 }
             }
-            // The scratch file open_path just read is already deleted: its
-            // provenance would pin a ghost. Recovery adopts the snapshot's
-            // bytes with no context, so the next save inspects the live
-            // original instead (DCK-002; versioned payload is DCK-003).
-            self.controller.clear_source_context();
-            self.controller.dirty.set(true);
             // Names the original when it has one the session can hold;
             // a rejected non-UTF-8 identity shows as Untitled rather than
             // mojibake claiming to be the file's name.
@@ -1485,6 +1491,27 @@ impl DecksWindow {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Untitled".to_string());
             self.window.set_title(Some(&format!("{name} (Recovered) — Decks")));
+            if !unresolved.is_empty() {
+                // Capture gaps are told once, here: the next save's
+                // missing-media preflight names the pictures again on its
+                // own, without this dialog repeating every save.
+                let mut shown = unresolved.clone();
+                shown.truncate(5);
+                let mut body = format!(
+                    "The recovered document is missing {} picture(s) its snapshot could not hold:\n\n{}",
+                    unresolved.len(),
+                    shown.join("\n"),
+                );
+                if unresolved.len() > shown.len() {
+                    body.push_str(&format!("\n…and {} more", unresolved.len() - shown.len()));
+                }
+                let dlg = adw::AlertDialog::builder()
+                    .heading(suite_common::i18n("Recovered With Missing Pictures"))
+                    .body(&body)
+                    .build();
+                dlg.add_response("ok", &suite_common::i18n("_OK"));
+                dlg.present(Some(&self.window));
+            }
             // Order and failure handling: AutosaveSlot::adopt_recovered.
             if self.autosave_slot.adopt_recovered(&bytes, &meta) {
                 orphan.clear_or_report();

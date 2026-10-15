@@ -15,18 +15,18 @@ quick-xml = "0.42"
 # NamedTempFile for extracted images (gh-268): production code writes
 # document-embedded images to /tmp, which must not use predictable paths.
 tempfile = "3"
-# RFC-0001 Phase 3 (feature `collab`, off by default): the deck as a Loro
-# document with a movable tree (collab.rs). `serde` alone derives the
-# model's serialization, which `collab` stores per field. None of these is
-# built without the features.
+# Recovery snapshots (recovery.rs) serialize the canonical deck in every
+# build, so `serde`/`serde_json` are ordinary dependencies now, like in
+# letters-core — not gated behind a feature. `collab` only adds the Loro
+# document layer on top of the model's serialization.
 loro = { version = "1.16", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", features = ["float_roundtrip"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+base64 = "0.22"
 
 [features]
 default = []
-serde = ["dep:serde"]
-collab = ["serde", "dep:loro", "dep:serde_json"]
+collab = ["dep:loro"]
 
 [dev-dependencies]
 proptest = "1"

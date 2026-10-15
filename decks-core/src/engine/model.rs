@@ -4,7 +4,7 @@ use letters_core::model::Run;
 //
 // Split out of engine.rs (issue #247).
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Deck {
     pub slides: Vec<Slide>,
     pub masters: Vec<MasterSlide>,
@@ -27,7 +27,7 @@ pub fn slide_page_size_pt() -> (f64, f64) {
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slide {
     pub title: String,
     pub background: String,
@@ -67,7 +67,7 @@ impl Slide {
 /// and ODF's `fo:clip`. The rest is stretched to the picture's box, which
 /// is how PowerPoint and Impress draw a picture, cropped or not.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Crop {
     pub left: f64,
     pub top: f64,
@@ -109,7 +109,7 @@ impl Crop {
 
 /// A slide transition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Transition {
     #[default]
     None,
@@ -136,7 +136,7 @@ impl Transition {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MasterSlide {
     /// Stable identity within the session (DCK-005). Readers assign ids
     /// once at import; 0 means not assigned yet (`ops::ensure_all_ids`).
@@ -195,7 +195,7 @@ impl MasterSlide {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum SlideObject {
     TextBox {
         text: String,
@@ -222,7 +222,7 @@ pub enum SlideObject {
     /// A picture, stretched to its box after `crop` trims its source.
     Image {
         path: String, x: f64, y: f64, w: f64, h: f64, rotation: f64,
-        #[cfg_attr(feature = "serde", serde(default))]
+        #[serde(default)]
         crop: Crop,
     },
     /// A table (engine::table): a grid of styled cells in a box.

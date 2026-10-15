@@ -19,7 +19,7 @@ pub use suite_common_core::charts::ChartKind;
 
 /// A chart's kind, series name and points.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ChartData {
     pub kind: ChartKind,
     /// The series' name, its legend entry; empty for none.

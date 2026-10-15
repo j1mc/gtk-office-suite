@@ -299,6 +299,41 @@ impl DecksController {
         *self.selection.borrow_mut() = first;
     }
 
+    /// Clone of the session's source context for a recovery snapshot, if
+    /// the session holds one. Snapshots carry the pin, never the live
+    /// session's cell: encoding must not observe an edit landing halfway
+    /// through it.
+    pub fn source_context_snapshot(&self) -> Option<crate::provenance::DeckSourceContext> {
+        self.source_context.borrow().clone()
+    }
+
+    /// Install a recovered session as one transaction: the deck, its
+    /// source context (or none, for legacy snapshots that carry none and
+    /// must make no source-loss claims), and the revision the snapshot
+    /// pinned — never piecemeal. Recovered work is dirty even when its
+    /// last persisted revision matches an old source, and history starts
+    /// empty: the snapshot holds committed state, not the undo past.
+    pub fn install_recovered_session(
+        &self,
+        deck: crate::engine::Deck,
+        context: Option<crate::provenance::DeckSourceContext>,
+        revision: u64,
+    ) {
+        *self.slides.borrow_mut() = deck.slides;
+        *self.masters.borrow_mut() = deck.masters;
+        crate::ops::ensure_all_ids(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut());
+        *self.source_context.borrow_mut() = context;
+        *self.history.borrow_mut() = History::default();
+        self.undo_sels.borrow_mut().clear();
+        self.redo_sels.borrow_mut().clear();
+        self.merge_chain.set(false);
+        self.revision.set(revision);
+        self.saved_revision.set(None);
+        self.dirty.set(true);
+        let first = self.slides.borrow().first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
+        *self.selection.borrow_mut() = first;
+    }
+
     /// Drop the session's provenance: recovery adopts a snapshot's bytes,
     /// not its source, so the next save falls back to inspecting the live
     /// original instead of pinning a deleted scratch file.

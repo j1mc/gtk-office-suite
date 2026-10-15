@@ -1536,6 +1536,57 @@ class DecksRecoveryIsItselfProtectedSmoke(BaseGUITestCase):
         self.eventually(_settled)
 
 
+class DecksRichRecoverySmoke(BaseGUITestCase):
+    """Decks: a kill between autosave and save loses nothing the snapshot
+    promised (DCK-003). Two different objects go in through the same
+    actions every other Decks journey uses, the deck is snapshotted, and
+    after a kill and relaunch the recovered window shows the same slides
+    and object kinds — the versioned payload's end-to-end shape, with the
+    semantic richness (notes, styles, masters, assets) held by
+    decks-core/tests/snapshot_fidelity.rs instead of AT-SPI scraping."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self._state_dir = self.isolate_autosave_state(prefix="decks-rich-recovery-state-")
+        self._snapshot_path = self.isolate_snapshot(prefix="decks-rich-recovery-")
+        super().setUp()
+
+    def _snapshot_files(self):
+        snap_dir = os.path.join(self._state_dir, "decks")
+        if not os.path.isdir(snap_dir):
+            return []
+        return [f for f in os.listdir(snap_dir) if f.endswith(".snapshot")]
+
+    def _kinds(self, snap):
+        return sorted(o["kind"] for s in snap["slides"] for o in s["objects"])
+
+    def test_kill_then_relaunch_keeps_every_object(self):
+        aid = "org.tunaos.decks"
+        self.gapplication_action(aid, "new-document")
+        self.gapplication_action(aid, "add-text-box")
+        self.gapplication_action(aid, "add-shape")
+        self.gapplication_action(aid, "autosave-now")
+        def _settled():
+            self.assertEqual(len(self._snapshot_files()), 1, "precondition: one snapshot to recover")
+        self.eventually(_settled)
+        before = self.trigger_snapshot(aid)
+        self.assertEqual(before["slide_count"], 1)
+        self.assertIn("TextBox", self._kinds(before))
+        self.assertIn("Shape", self._kinds(before))
+
+        self.relaunch_app(crash=True)
+        def _settled():
+            frame = self.app.child(roleName="frame")
+            self.assertIn("Recovered", frame.name, f"relaunch did not recover: {frame.name!r}")
+        self.eventually(_settled)
+
+        after = self.trigger_snapshot(aid)
+        self.assertEqual(after["slide_count"], before["slide_count"], "recovery lost a slide")
+        self.assertEqual(self._kinds(after), self._kinds(before), "recovery lost or changed an object")
+        self.assertIsNone(self.process.poll(), "decks crashed rendering the recovered deck")
+
+
 class LettersRecoveryIsItselfProtectedSmoke(BaseGUITestCase):
     """Letters: a recovered tab must survive a second crash.
 

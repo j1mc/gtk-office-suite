@@ -1721,3 +1721,312 @@ fn serialization_failure_retains_last_generation() {
     slot.write(&bytes, &meta).expect("a later generation lands");
     assert!(policy.succeeded().is_some(), "the recovery is told");
 }
+
+/// The 1×1 PNG the reader tests use: a real picture with real bytes.
+const RECOVERY_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D',
+    b'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0,
+    12, b'I', b'D', b'A', b'T', 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 3, 0,
+    1, 0x9e, 0xdd, 0x22, 0x71, 0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42,
+    0x60, 0x82,
+];
+
+/// Recovery keeps the opaque graph and the pictures (DCK-003): a session
+/// opened from a package with carried parts, edited, snapshotted and
+/// decoded comes back with the same identities, the same carried bytes
+/// for the next save, and pictures that survive their files being
+/// deleted before the relaunch.
+#[test]
+fn recovery_keeps_opaque_graph_and_assets() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pic = dir.path().join("pic.png");
+    std::fs::write(&pic, RECOVERY_PNG).expect("picture");
+    let deck = deck_of(vec![slide_of(
+        vec![
+            text_box("opaque", 10.0, 10.0),
+            SlideObject::Image {
+                path: pic.to_string_lossy().to_string(),
+                x: 10.0, y: 100.0, w: 30.0, h: 30.0,
+                rotation: 0.0,
+                crop: Default::default(),
+            },
+        ],
+        "say it",
+        "#112233",
+    )]);
+    // The source holds one carried part the model never sees.
+    let src = dir.path().join("src.pptx");
+    decks_core::write_deck(src.to_str().unwrap(), &deck).expect("source");
+    const CARRIED_NAME: &str = "customXml/item1.xml";
+    const CARRIED_BYTES: &[u8] = b"<props><tag>kept</tag></props>";
+    {
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&src).expect("reopen");
+        let mut zip = zip::ZipWriter::new_append(file).expect("append");
+        zip.start_file(CARRIED_NAME, zip::write::SimpleFileOptions::default()).expect("part");
+        zip.write_all(CARRIED_BYTES).expect("bytes");
+        zip.finish().expect("finish");
+    }
+    let (opened, context) = decks_core::read_deck_with_context(src.to_str().unwrap()).expect("open");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_opened_deck(opened, context);
+    let before = decks_core::snapshot::provenance_snapshot(&controller).expect("context at open");
+    assert!(
+        before.carried_names.contains(&CARRIED_NAME.to_string()),
+        "the carried part is pinned: {:?}",
+        before.carried_names,
+    );
+    // One edit: the snapshot pins a non-zero revision and a dependency.
+    controller.add_slide(1, slide_of(vec![text_box("second", 10.0, 10.0)], "", ""));
+    let rev = controller.revision();
+    assert!(rev > 0, "the snapshot pins a real revision");
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    // The picture's file vanishes before the relaunch.
+    std::fs::remove_file(&pic).expect("delete the picture");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    let back = *back;
+    assert!(back.unresolved_assets.is_empty(), "captured pictures restage: {:?}", back.unresolved_assets);
+    assert_eq!(back.revision, rev, "the revision travels with the snapshot");
+    // Same identities the crashed session had.
+    let before_ids: Vec<u64> = controller.deck().slides.iter().map(|s| s.ids.slide).collect();
+    let after_ids: Vec<u64> = back.deck.slides.iter().map(|s| s.ids.slide).collect();
+    assert_eq!(before_ids, after_ids, "slide identities survive recovery");
+    // The picture points at bytes, not at the deleted file.
+    let image_path = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::Image { path, .. } => Some(path.clone()),
+        _ => None,
+    }).expect("the picture survives");
+    assert_ne!(image_path, pic.to_string_lossy().to_string(), "the deleted file is not referenced");
+    assert_eq!(std::fs::read(&image_path).expect("restaged bytes read"), RECOVERY_PNG);
+    // Reinstalled as one session, the next save is as safe as the
+    // crashed one's: same carried names and inventory, source intact,
+    // and the save carries the same bytes.
+    let recovered = decks_core::DecksController::new(vec![], vec![]);
+    recovered.install_recovered_session(back.deck, back.context, back.revision);
+    assert!(recovered.dirty.get(), "recovered work counts as dirty");
+    let after = decks_core::snapshot::provenance_snapshot(&recovered).expect("context reinstalled");
+    assert_eq!(after.carried_names, before.carried_names);
+    assert_eq!(after.opaque_names, before.opaque_names);
+    assert_eq!(after.format, "pptx");
+    assert!(after.structure_changed, "the stored dependency survives");
+    assert_eq!(recovered.source_state(), decks_core::SourceState::Intact);
+    let out = dir.path().join("out.pptx");
+    decks_core::write_deck_with_context(
+        out.to_str().unwrap(),
+        &recovered.deck(),
+        &recovered.carried_for_save(),
+    ).expect("the next save carries");
+    let file = std::fs::File::open(&out).expect("saved");
+    let mut zip = zip::ZipArchive::new(file).expect("reopen saved");
+    let mut buf = Vec::new();
+    use std::io::Read as _;
+    zip.by_name(CARRIED_NAME).expect("carried part saved").read_to_end(&mut buf).expect("read");
+    assert_eq!(buf, CARRIED_BYTES, "the carried part is byte-identical through recovery");
+}
+
+/// A picture lost before the snapshot does not lose the snapshot
+/// (DCK-003): the edits are still protected, the path is preserved for
+/// repair, and the gap is listed.
+#[test]
+fn recovery_without_snapshot_bytes_reports_gaps() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gone = dir.path().join("gone.png");
+    let deck = deck_of(vec![slide_of(
+        vec![
+            text_box("kept", 10.0, 10.0),
+            SlideObject::Image {
+                path: gone.to_string_lossy().to_string(),
+                x: 10.0, y: 10.0, w: 30.0, h: 30.0,
+                rotation: 0.0,
+                crop: Default::default(),
+            },
+        ],
+        "",
+        "",
+    )]);
+    let controller = decks_core::DecksController::new(deck.slides, deck.masters);
+    // The canonical snapshot succeeds without the picture — and without
+    // an interchange fallback, which cannot be built without it.
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx")
+        .expect("the edits are protected despite the missing picture");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    assert!(
+        back.unresolved_assets.iter().any(|u| u.contains("gone.png")),
+        "the gap is listed: {:?}",
+        back.unresolved_assets,
+    );
+    let kept = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::TextBox { text, .. } => Some(text.clone()),
+        _ => None,
+    }).expect("the text box survives");
+    assert_eq!(kept, "kept");
+    let kept_path = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::Image { path, .. } => Some(path.clone()),
+        _ => None,
+    }).expect("the picture node survives");
+    assert_eq!(kept_path, gone.to_string_lossy().to_string(), "the path is preserved for repair");
+}
+
+/// The full editable document round-trips the canonical snapshot:
+/// notes, run styles, masters with layouts, builds and tables come back
+/// JSON-identical, and the recovered deck saves and reopens in both
+/// formats.
+#[test]
+fn recovery_rich_state_round_trip() {
+    use decks_core::builds::{Build, BuildEffect};
+    use decks_core::layouts::{Layout, LayoutKind, LayoutPlaceholder, Placeholder};
+    let cell = |t: &str| decks_core::engine::table::TableCell {
+        runs: vec![Run { text: t.into(), style: Default::default() }],
+        fill: None,
+        col_span: 1,
+        row_span: 1,
+        covered: false,
+    };
+    let slide = slide_of(
+        vec![
+            SlideObject::TextBox {
+                text: "loud".into(),
+                x: 10.0, y: 10.0, w: 200.0, h: 50.0,
+                rotation: 0.0,
+                runs: vec![styled_run("loud")],
+                body: Default::default(),
+            },
+            SlideObject::Table {
+                x: 10.0, y: 200.0, w: 300.0, h: 100.0,
+                rotation: 0.0,
+                table: decks_core::engine::table::TableData {
+                    col_widths: vec![150.0, 150.0],
+                    row_heights: vec![50.0, 50.0],
+                    rows: vec![vec![cell("a"), cell("b")], vec![cell("c"), cell("d")]],
+                    first_row: true,
+                    band_row: false,
+                    accent: None,
+                    cell_margins: None,
+                },
+            },
+        ],
+        "say it out loud",
+        "#204060",
+    );
+    let mut deck = Deck {
+        slides: vec![slide],
+        masters: vec![MasterSlide {
+            id: 0,
+            name: "House".into(),
+            background: "#aabbcc".into(),
+            default_font: "Cantarell".into(),
+            shapes: vec![text_box("footer", 20.0, 500.0)],
+            page_emu: None,
+            layouts: vec![Layout {
+                id: 0,
+                name: "Title".into(),
+                kind: LayoutKind::Title,
+                background: None,
+                shapes: vec![],
+                placeholders: vec![LayoutPlaceholder {
+                    id: 0,
+                    role: Placeholder::Title,
+                    x: 10.0, y: 10.0, w: 300.0, h: 80.0,
+                }],
+            }],
+        }],
+    };
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck.slides[0].master_id = Some(deck.masters[0].id);
+    deck.slides[0].layout_id = Some(deck.masters[0].layouts[0].id);
+    deck.slides[0].builds = vec![Build {
+        object: deck.slides[0].ids.objects[0],
+        effect: BuildEffect::Dissolve,
+        out: false,
+    }];
+    let controller = decks_core::DecksController::new(deck.slides, deck.masters);
+    controller.add_slide(1, slide_of(vec![text_box("second", 10.0, 10.0)], "", ""));
+    let rev = controller.revision();
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    assert_eq!(back.revision, rev);
+    assert!(back.context.is_none(), "a new document pins no context");
+    assert!(back.unresolved_assets.is_empty());
+    let before = serde_json::to_value(controller.deck()).expect("before serializes");
+    let after = serde_json::to_value(&back.deck).expect("after serializes");
+    assert_eq!(before, after, "the canonical state is identical");
+    // The recovered deck saves and reopens in both formats.
+    for kind in FORMATS {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("recovered.{kind}"));
+        decks_core::write_deck(path.to_str().unwrap(), &back.deck).expect("save after recovery");
+        let reopened = decks_core::read_deck(path.to_str().unwrap()).expect("reopen after recovery");
+        assert_eq!(reopened.slides.len(), 2, "{kind}: slide count");
+        assert_eq!(reopened.slides[0].notes, "say it out loud", "{kind}: notes");
+    }
+}
+
+/// Package-shaped snapshots from before the versioned payload stay
+/// readable migration input — and install with no context, so the
+/// restored document makes no source-loss claims it no longer possesses.
+#[test]
+fn legacy_package_snapshot_recovers_without_claims() {
+    let deck = deck_of(vec![slide_of(vec![text_box("legacy", 10.0, 10.0)], "old note", "")]);
+    // Exactly what the old autosave wrote: bare package bytes.
+    let package = decks_core::write_deck_bytes("pptx", &deck).expect("legacy-shaped bytes");
+    let decks_core::recovery::SnapshotKind::Package(staged) = decks_core::recovery::decode_snapshot(&package) else {
+        panic!("package-shaped bytes must decode as a package");
+    };
+    assert_eq!(staged, package);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.pptx");
+    std::fs::write(&path, &staged).expect("stage");
+    let back = decks_core::read_deck(path.to_str().unwrap()).expect("legacy bytes open");
+    assert_eq!(back.slides[0].notes, "old note", "the work is still there");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_recovered_session(back, None, 0);
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None,
+        "a legacy recovery claims no provenance",
+    );
+    assert!(controller.dirty.get(), "recovered work counts as dirty");
+    assert_eq!(controller.revision(), 0);
+    assert_ne!(controller.deck().slides[0].ids.slide, 0, "reader-zeroed ids are assigned once, on install");
+}
+
+/// A source replaced between snapshot and relaunch keeps its stored loss
+/// report but carries nothing: the restored document never claims the
+/// safety its original revision had.
+#[test]
+fn recovery_after_source_replacement_keeps_no_carry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src.pptx");
+    decks_core::write_deck(
+        src.to_str().unwrap(),
+        &deck_of(vec![slide_of(vec![text_box("first", 10.0, 10.0)], "", "")]),
+    ).expect("source");
+    let (opened, context) = decks_core::read_deck_with_context(src.to_str().unwrap()).expect("open");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_opened_deck(opened, context);
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    // The original is replaced while the app is dead.
+    decks_core::write_deck(
+        src.to_str().unwrap(),
+        &deck_of(vec![slide_of(vec![text_box("stranger", 10.0, 10.0)], "", "")]),
+    ).expect("replace");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    let back = *back;
+    let recovered = decks_core::DecksController::new(vec![], vec![]);
+    recovered.install_recovered_session(back.deck, back.context, back.revision);
+    assert_eq!(recovered.source_state(), decks_core::SourceState::Replaced);
+    assert!(
+        recovered.carried_for_save().is_empty(),
+        "a replaced source carries nothing from the old revision",
+    );
+    let facts = decks_core::snapshot::provenance_snapshot(&recovered).expect("degraded context installed");
+    assert!(!facts.opaque_complete, "another revision's inventory is never advertised complete");
+}
