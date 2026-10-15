@@ -76,6 +76,64 @@ struct RawParas {
     cells: Vec<RawPara>,
     /// Per body-level table, in order: how many body paragraphs precede it.
     tables_at: Vec<usize>,
+    /// Every section's properties, in document order: the paragraph-level
+    /// ones, then the body's last (`RawSection::para` `None`).
+    sections: Vec<RawSection>,
+}
+
+/// One `w:sectPr` as the file spells it, in twips: a section's page,
+/// columns, break type and default header and footer references.
+#[derive(Clone, Default)]
+struct RawSection {
+    /// The body paragraph whose properties hold it (the section ends with
+    /// that paragraph); `None` for the body's last, which ends the
+    /// document.
+    para: Option<usize>,
+    /// `w:pgSz` width and height.
+    size: [Option<f64>; 2],
+    /// `w:pgMar` top, right, bottom, left.
+    margins: [Option<f64>; 4],
+    /// `w:cols` `w:num` and `w:space`. (`w:type`, the break's kind, is not
+    /// kept: every break here starts a new page, `loss` names the others.)
+    columns: Option<u32>,
+    column_gap: Option<f64>,
+    /// The `r:id`s of the `default` header and footer references.
+    header: Option<String>,
+    footer: Option<String>,
+}
+
+/// Record a child of a scanned `w:sectPr` (`w:pgSz`, `w:pgMar`, `w:cols`,
+/// the header and footer references) into `sect`.
+fn raw_section_child(sect: &mut RawSection, e: &quick_xml::events::BytesStart<'_>) {
+    let number = |v: &str| v.trim().parse::<f64>().ok();
+    let qname = e.name();
+    let name: &str = qname.as_ref();
+    let mut reference_default = false;
+    let mut reference_id = None;
+    for a in e.attributes().with_checks(false).flatten() {
+        let key: &str = a.key.as_ref();
+        let value: &str = &a.value;
+        match (name, key) {
+            ("w:pgSz", "w:w") => sect.size[0] = number(value),
+            ("w:pgSz", "w:h") => sect.size[1] = number(value),
+            ("w:pgMar", "w:top") => sect.margins[0] = number(value),
+            ("w:pgMar", "w:right") => sect.margins[1] = number(value),
+            ("w:pgMar", "w:bottom") => sect.margins[2] = number(value),
+            ("w:pgMar", "w:left") => sect.margins[3] = number(value),
+            ("w:cols", "w:num") => sect.columns = value.trim().parse::<u32>().ok(),
+            ("w:cols", "w:space") => sect.column_gap = number(value),
+            ("w:headerReference" | "w:footerReference", "w:type") => reference_default = value.trim() == "default",
+            ("w:headerReference" | "w:footerReference", "r:id") => reference_id = Some(value.trim().to_string()),
+            _ => {}
+        }
+    }
+    if reference_default {
+        match name {
+            "w:headerReference" => sect.header = reference_id,
+            "w:footerReference" => sect.footer = reference_id,
+            _ => {}
+        }
+    }
 }
 
 fn raw_paragraph_props(path: &str) -> RawParas {
@@ -124,10 +182,44 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                 _ => None,
             }
         }
+        // Inside a section's properties the scan records (`in_sect`), and
+        // inside its `w:sectPrChange` (the old value, not the section's).
+        let mut in_sect = false;
+        let mut sect_change = 0usize;
+        // Where a `w:sectPr` starting now belongs: a body paragraph's own
+        // properties (the paragraph's index), the body's last (`Some(None)`)
+        // or neither (a table's or text box's paragraph, or a change's).
+        fn sect_owner(out: &RawParas, in_para: bool, ppr_depth: u32, table_depth: usize, txbx_depth: usize, list: Option<usize>, sect_change: usize) -> Option<Option<usize>> {
+            if table_depth > 0 || txbx_depth > 0 || sect_change > 0 {
+                None
+            } else if !in_para {
+                Some(None)
+            } else if ppr_depth == 1 && list == Some(0) {
+                Some(Some(out.body.len().checked_sub(1)?))
+            } else {
+                None
+            }
+        }
         loop {
             match reader.read_event()? {
                 quick_xml::events::Event::Eof => break,
+                // A recorded section's children: its page, columns and
+                // references. Nothing else the scan reads sits in there.
+                quick_xml::events::Event::Start(e) | quick_xml::events::Event::Empty(e)
+                    if in_sect && sect_change == 0 && e.name().as_ref() != "w:sectPrChange" =>
+                {
+                    if let Some(sect) = out.sections.last_mut() {
+                        raw_section_child(sect, &e);
+                    }
+                }
                 quick_xml::events::Event::Start(e) => match e.name().as_ref() {
+                    "w:sectPr" => {
+                        if let Some(para) = sect_owner(&out, in_para, ppr_depth, table_depth, txbx_depth, list, sect_change) {
+                            out.sections.push(RawSection { para, ..Default::default() });
+                            in_sect = true;
+                        }
+                    }
+                    "w:sectPrChange" if in_sect => sect_change += 1,
                     "w:tbl" => {
                         if table_depth == 0 {
                             out.tables_at.push(out.body.len());
@@ -162,6 +254,12 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                     _ => {}
                 },
                 quick_xml::events::Event::End(e) => match e.name().as_ref() {
+                    "w:sectPr" => {
+                        if sect_change == 0 {
+                            in_sect = false;
+                        }
+                    }
+                    "w:sectPrChange" => sect_change = sect_change.saturating_sub(1),
                     "w:tbl" => table_depth = table_depth.saturating_sub(1),
                     "w:txbxContent" => txbx_depth = txbx_depth.saturating_sub(1),
                     "w:tabs" => in_tabs = false,
@@ -191,6 +289,11 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                     _ => {}
                 },
                 quick_xml::events::Event::Empty(e) => match e.name().as_ref() {
+                    "w:sectPr" => {
+                        if let Some(para) = sect_owner(&out, in_para, ppr_depth, table_depth, txbx_depth, list, sect_change) {
+                            out.sections.push(RawSection { para, ..Default::default() });
+                        }
+                    }
                     // A `w:p` with nothing in it is still a paragraph.
                     "w:p" => {
                         if txbx_depth == 0 {
@@ -546,12 +649,16 @@ fn read_on_this_thread(path: &str) -> Result<Document, String> {
     }
     crate::docx_toc::restore(&mut read);
     // Page-number fields in the header and footer, as "{page}"/"{total}".
-    let (header, footer) = header_footer_templates(path);
-    if header.is_some() {
-        read.header = header;
-    }
-    if footer.is_some() {
-        read.footer = footer;
+    // A file of several sections has its first section's read so already
+    // (`read_sections`).
+    if read.sections.is_empty() {
+        let (header, footer) = header_footer_templates(path);
+        if header.is_some() {
+            read.header = header;
+        }
+        if footer.is_some() {
+            read.footer = footer;
+        }
     }
     let [(header_pictures, header_alignment), (footer_pictures, footer_alignment)] = header_footer_extras(path);
     (read.header_pictures, read.header_alignment) = (header_pictures, header_alignment);
@@ -865,7 +972,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     // otherwise the two disagree about what a paragraph is and pairing
     // them would misattribute a property to its neighbour.
     let body = doc.paragraphs();
-    let RawParas { body: raw, cells: raw_cells, tables_at } = raw_paragraph_props(path);
+    let RawParas { body: raw, cells: raw_cells, tables_at, sections: raw_sections } = raw_paragraph_props(path);
     let raw = (raw.len() == body.len()).then_some(raw);
     let tables = doc.tables();
     // Where each table sits: the number of body paragraphs before it.
@@ -1092,6 +1199,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_paragraphs.push(paragraphs);
     }
     table_spans.retain(|_, spans| !spans.is_empty());
+    // Each table's paragraph count, for where the sections end.
+    let table_lens: Vec<usize> = table_paragraphs.iter().map(Vec::len).collect();
     // In reverse, so each insertion leaves the earlier positions valid;
     // tables at one position keep their order.
     for (ti, cells) in table_paragraphs.into_iter().enumerate().rev() {
@@ -1115,7 +1224,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_rows = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, row_heights(t)?))).collect();
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
 
-    Ok(Document {
+    let mut read = Document {
         paragraphs,
         footnotes,
         header: doc.header_text(),
@@ -1134,7 +1243,123 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_fills,
         sections: Vec::new(),
         next_section_id: 0,
-    })
+    };
+    // A file of several sections (`crate::sections`), read only from a
+    // scan whose paragraphs and tables are rdocx's: a section's end is a
+    // position in them. A file of one section reads as it always did.
+    let sectioned = match (&raw, &tables_at) {
+        (Some(_), Some(tables_at)) if raw_sections.len() >= 2 => read_sections(path, &raw_sections, &kept_before, tables_at, &table_lens, &read.paragraphs),
+        _ => None,
+    };
+    if let Some((sections, header, footer)) = sectioned.filter(|(s, _, _)| crate::sections::is_valid(&read, s)) {
+        read.page = Some(sections[0].geometry);
+        read.header = header;
+        read.footer = footer;
+        read.next_section_id = sections.len() as u32;
+        read.sections = sections;
+    }
+    Ok(read)
+}
+
+/// The sections of a file whose section properties (`raw`, in document
+/// order) are more than one, with the first section's header and footer
+/// text (the document's own, `Document::header`), or `None` when they
+/// come to fewer than two sections.
+///
+/// A paragraph's `w:sectPr` ends its section after that body paragraph
+/// (`b`): at `kept_before[b + 1]`, the paragraphs kept before the next
+/// one, plus the cells of every table before it (`tables_at[t] <= b`); a
+/// table right after it starts the next section. A section left with no
+/// paragraph (its paragraph was a dropped separator or page break) goes,
+/// its own header and footer passing to the next if that one has none,
+/// as Word would show them there. Every break starts a new page here: a
+/// continuous, even- or odd-page break reads as one.
+///
+/// A page value a section leaves out is the one before's (the first's,
+/// `PageGeometry::default()`'s); columns are one, 18pt apart, unless
+/// `w:cols` says otherwise, as `read_page_geometry` reads them. A
+/// section's header and footer are its `default` references' text, PAGE
+/// and NUMPAGES as "{page}" and "{total}"; one without a reference
+/// continues the one before (`None`).
+fn read_sections(
+    path: &str,
+    raw: &[RawSection],
+    kept_before: &[usize],
+    tables_at: &[usize],
+    table_lens: &[usize],
+    paragraphs: &[Paragraph],
+) -> Option<(Vec<crate::model::DocSection>, Option<String>, Option<String>)> {
+    let n = paragraphs.len();
+    let body_len = kept_before.len().checked_sub(1)?;
+    // A file whose last section has no `w:sectPr` of its own (the body
+    // ends without one) still has that section, with nothing set.
+    let tail = RawSection::default();
+    let raw: Vec<&RawSection> = raw.iter().chain(raw.last().filter(|s| s.para.is_some()).map(|_| &tail)).collect();
+
+    let mut zip = std::fs::File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok());
+    let rels = zip.as_mut().and_then(|z| part_text(z, "word/_rels/document.xml.rels")).unwrap_or_default();
+    let mut story = |id: Option<&String>| -> Option<String> {
+        let part = crate::docx_fields::relationship_target(&rels, id?)?;
+        Some(crate::docx_fields::story_text(&part_text(zip.as_mut()?, &part)?))
+    };
+    // Whether `para` continues the table the paragraph before it is in:
+    // a section cannot start there.
+    let table = |i: usize| paragraphs.get(i).and_then(|p| p.style.table_cell).map(|c| c.table);
+    let in_table = |i: usize| i > 0 && table(i).is_some() && table(i) == table(i - 1);
+
+    let mut sections: Vec<crate::model::DocSection> = Vec::new();
+    let mut previous = PageGeometry::default();
+    let mut start = 0usize;
+    // The header and footer of a section that went, for the next.
+    let mut carried: (Option<String>, Option<String>) = (None, None);
+    for s in raw {
+        let mut end = match s.para {
+            Some(b) => {
+                let b = b.min(body_len.checked_sub(1)?);
+                let cells: usize = tables_at.iter().zip(table_lens).filter(|(at, _)| **at <= b).map(|(_, len)| *len).sum();
+                kept_before[b + 1] + cells
+            }
+            None => n,
+        }
+        .clamp(start, n);
+        while end > start && end < n && in_table(end) {
+            end -= 1;
+        }
+        let twips = |v: Option<f64>, or: f64| v.map_or(or, |t| t / 20.0);
+        let geometry = PageGeometry {
+            width_pt: twips(s.size[0], previous.width_pt),
+            height_pt: twips(s.size[1], previous.height_pt),
+            margin_top_pt: twips(s.margins[0], previous.margin_top_pt),
+            margin_right_pt: twips(s.margins[1], previous.margin_right_pt),
+            margin_bottom_pt: twips(s.margins[2], previous.margin_bottom_pt),
+            margin_left_pt: twips(s.margins[3], previous.margin_left_pt),
+            columns: s.columns.and_then(|c| u8::try_from(c).ok()).filter(|c| *c > 0).unwrap_or(1),
+            column_gap_pt: twips(s.column_gap, 18.0),
+        };
+        previous = geometry;
+        let (carried_header, carried_footer) = std::mem::take(&mut carried);
+        let header = story(s.header.as_ref()).or(carried_header);
+        let footer = story(s.footer.as_ref()).or(carried_footer);
+        if end <= start {
+            carried = (header, footer);
+            continue;
+        }
+        sections.push(crate::model::DocSection {
+            id: sections.len() as u32,
+            range: crate::model::ParagraphRange::new(start, end),
+            geometry,
+            header,
+            footer,
+        });
+        start = end;
+    }
+    if sections.len() < 2 {
+        return None;
+    }
+    // The first section's header and footer are the document's own.
+    let header = sections[0].header.take();
+    let footer = sections[0].footer.take();
+    Some((sections, header, footer))
 }
 
 /// A table's shaded cells (`w:shd w:fill`), when any cell is; "auto" is
@@ -1191,6 +1416,154 @@ const SEPARATOR_STYLE: &str = "LettersTableSeparator";
 /// follows it, or another table does.
 fn needs_separator(after: &[Paragraph]) -> bool {
     after.first().is_none_or(|p| p.style.table_cell.is_some())
+}
+
+/// Write the separator paragraph (`SEPARATOR_STYLE`) after a table, with
+/// its (trivial) entry in `post`, which runs with the paragraphs.
+fn add_separator(out: &mut rdocx::Document, post: &mut Vec<ParaPost>) {
+    out.add_paragraph("")
+        .style(SEPARATOR_STYLE)
+        .space_before(rdocx::Length::pt(0.0))
+        .space_after(rdocx::Length::pt(0.0))
+        .line_spacing(1.0);
+    post.push(ParaPost::trivial());
+}
+
+/// A section's `w:sectPr`, in schema order: its header and footer
+/// references (`refs`), a next-page break, its page size (landscape when
+/// wider than tall), margins and columns, in twips.
+fn section_properties_xml(refs: &str, page: &PageGeometry) -> String {
+    let twips = |pt: f64| (pt * 20.0).round() as i64;
+    let orient = if page.width_pt > page.height_pt { " w:orient=\"landscape\"" } else { "" };
+    // The gap is written for one column too, so it reads back as it was.
+    let num = if page.columns > 1 { format!(" w:num=\"{}\"", page.columns) } else { String::new() };
+    format!(
+        "<w:sectPr>{refs}<w:type w:val=\"nextPage\"/><w:pgSz w:w=\"{}\" w:h=\"{}\"{orient}/>\
+         <w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>\
+         <w:cols{num} w:space=\"{}\"/></w:sectPr>",
+        twips(page.width_pt),
+        twips(page.height_pt),
+        twips(page.margin_top_pt),
+        twips(page.margin_right_pt),
+        twips(page.margin_bottom_pt),
+        twips(page.margin_left_pt),
+        twips(page.column_gap_pt),
+    )
+}
+
+/// `package` with each section's properties written over the `w:sectPr`
+/// the writer left for it (`sections`, a document of several): the n-th
+/// `w:sectPr` in document order is the n-th section's, the paragraph
+/// breaks' and then the body's last.
+///
+/// The first section shows the document's own header and footer (rdocx's
+/// parts, which its references on the body's last `w:sectPr` name) unless
+/// it has its own. A section with its own text gets a part of its own
+/// (`word/lettersSectionHeader{k}.xml`), its "{page}" and "{total}" as
+/// fields; one without continues the one before and gets no reference.
+/// A paragraph's `w:sectPr` goes last in its properties, where the
+/// schema has it, whatever the post pass put after it.
+fn with_sections(package: &[u8], sections: &[crate::model::DocSection]) -> Result<Vec<u8>, String> {
+    const HEADER_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
+    const FOOTER_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
+    const HEADER_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+    const FOOTER_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+    const DOCUMENT: &str = "word/document.xml";
+    const RELS: &str = "word/_rels/document.xml.rels";
+    const TYPES: &str = "[Content_Types].xml";
+    let mut zin = zip::ZipArchive::new(std::io::Cursor::new(package)).map_err(|e| e.to_string())?;
+    let missing = |name: &str| format!("the package has no {name}");
+    let document = part_text(&mut zin, DOCUMENT).ok_or_else(|| missing(DOCUMENT))?;
+    let mut rels = part_text(&mut zin, RELS).ok_or_else(|| missing(RELS))?;
+    let mut types = part_text(&mut zin, TYPES).ok_or_else(|| missing(TYPES))?;
+    let spans = crate::docx_fields::section_properties(&document);
+    if spans.len() != sections.len() {
+        return Err(format!("{} section properties written for {} sections", spans.len(), sections.len()));
+    }
+    // rdocx's references to the document's own header and footer.
+    fn default_tag<'a>(sect: &'a str, element: &str) -> Option<&'a str> {
+        sect.match_indices(&format!("<{element} ")).find_map(|(at, _)| {
+            let tag = &sect[at..at + sect[at..].find('>')? + 1];
+            tag.contains("w:type=\"default\"").then_some(tag)
+        })
+    }
+    let body_last = &document[spans[spans.len() - 1].clone()];
+    let own = [default_tag(body_last, "w:headerReference"), default_tag(body_last, "w:footerReference")];
+
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut new_rels = String::new();
+    let mut new_types = String::new();
+    let mut props: Vec<String> = Vec::with_capacity(sections.len());
+    for (k, s) in sections.iter().enumerate() {
+        let mut refs = String::new();
+        for (is_header, text, own) in [(true, &s.header, own[0]), (false, &s.footer, own[1])] {
+            let (element, kind, content_type, rel_type) =
+                if is_header { ("w:headerReference", "Header", HEADER_TYPE, HEADER_REL) } else { ("w:footerReference", "Footer", FOOTER_TYPE, FOOTER_REL) };
+            match text {
+                Some(text) => {
+                    let file = format!("lettersSection{kind}{k}.xml");
+                    let id = format!("rIdLettersSection{kind}{k}");
+                    let (xml, _) = crate::docx_anchors::header_footer_part(is_header, text, &[], Alignment::Left);
+                    parts.push((format!("word/{file}"), crate::docx_fields::fields(&xml)));
+                    new_rels.push_str(&format!("<Relationship Id=\"{id}\" Type=\"{rel_type}\" Target=\"{file}\"/>"));
+                    new_types.push_str(&format!("<Override PartName=\"/word/{file}\" ContentType=\"{content_type}\"/>"));
+                    refs.push_str(&format!("<{element} w:type=\"default\" r:id=\"{id}\"/>"));
+                }
+                None if k == 0 => refs.push_str(own.unwrap_or_default()),
+                None => {}
+            }
+        }
+        props.push(section_properties_xml(&refs, &s.geometry));
+    }
+
+    let mut xml = document;
+    let last = spans.len() - 1;
+    for (k, span) in spans.into_iter().enumerate().rev() {
+        if k == last {
+            xml.replace_range(span, &props[k]);
+            continue;
+        }
+        let from = span.start;
+        xml.replace_range(span, "");
+        let close = xml[from..].find("</w:pPr>").map(|c| from + c);
+        let change = xml[from..].find("<w:pPrChange").map(|c| from + c);
+        let at = match (change, close) {
+            (Some(change), Some(close)) if change < close => change,
+            (_, Some(close)) => close,
+            _ => from,
+        };
+        xml.insert_str(at, &props[k]);
+    }
+    if let Some(at) = rels.rfind("</Relationships>") {
+        rels.insert_str(at, &new_rels);
+    }
+    if let Some(at) = types.rfind("</Types>") {
+        types.insert_str(at, &new_types);
+    }
+
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for i in 0..zin.len() {
+        let mut part = zin.by_index(i).map_err(|e| e.to_string())?;
+        let name = part.name().to_string();
+        let data = match name.as_str() {
+            DOCUMENT => xml.as_bytes().to_vec(),
+            RELS => rels.as_bytes().to_vec(),
+            TYPES => types.as_bytes().to_vec(),
+            _ => {
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut part, &mut data).map_err(|e| e.to_string())?;
+                data
+            }
+        };
+        out.start_file(name, options).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut out, &data).map_err(|e| e.to_string())?;
+    }
+    for (name, xml) in parts {
+        out.start_file(name, options).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut out, xml.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(out.finish().map_err(|e| e.to_string())?.into_inner())
 }
 
 /// Read a DOCX and retain package members this reader does not interpret.
@@ -1289,6 +1662,12 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     // Tracked changes, written as bracketed text and made w:ins/w:del below.
     let mut revisions: Vec<crate::model::Revision> = Vec::new();
     let paras = &doc.paragraphs;
+    // A document of several sections (`crate::sections`) breaks after each
+    // one's last paragraph, and its section properties are written whole
+    // below (`with_sections`). One of one section writes as it always has.
+    let sections: &[crate::model::DocSection] = if crate::sections::is_valid(doc, &doc.sections) { &doc.sections } else { &[] };
+    // The section the next break starts.
+    let mut next_section = 1usize;
     // Comment threads: marker runs where each one's text starts and ends,
     // made range elements below. `open` are the threads the text written
     // so far is in; a thread with no text is written, empty, first.
@@ -1318,6 +1697,20 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     let mut word = WordNumbers::default();
     let mut i = 0;
     while i < paras.len() {
+        // A new section starts here: the one before ends on the paragraph
+        // last written. A table cannot carry the break, so one that ends a
+        // section gets the separator after it when it has none already
+        // (it has when another table follows); the reader drops it and
+        // ends the section after the table, where it was.
+        if sections.get(next_section).is_some_and(|s| s.range.start == i) {
+            next_section += 1;
+            if paras[i - 1].style.table_cell.is_some() && !needs_separator(&paras[i..]) {
+                add_separator(&mut out, &mut post);
+            }
+            if let Some(mut last) = out.last_paragraph_mut() {
+                last.set_section_break(rdocx::SectionBreak::NextPage);
+            }
+        }
         // Consecutive paragraphs sharing a table id become one rdocx table.
         if let Some(tc0) = paras[i].style.table_cell {
             let start = i;
@@ -1455,12 +1848,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // ends the document or meets another; the reader drops it
             // again (`SEPARATOR_STYLE`).
             if needs_separator(&paras[i..]) {
-                out.add_paragraph("")
-                    .style(SEPARATOR_STYLE)
-                    .space_before(rdocx::Length::pt(0.0))
-                    .space_after(rdocx::Length::pt(0.0))
-                    .line_spacing(1.0);
-                post.push(ParaPost::trivial());
+                add_separator(&mut out, &mut post);
             }
             continue;
         }
@@ -1812,6 +2200,14 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         bytes
     } else {
         crate::docx_comments::add_parts(&bytes, &doc.comments).map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?
+    };
+    // A document of several sections: each one's page, header and footer,
+    // over the document's last pass, and ahead of the fields below, which
+    // find the document's header and footer through the first section.
+    let bytes = if sections.is_empty() {
+        bytes
+    } else {
+        with_sections(&bytes, sections).map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?
     };
     // "{page}" and "{total}" in the header and footer become Word's PAGE
     // and NUMPAGES fields, so every page shows its own number.
