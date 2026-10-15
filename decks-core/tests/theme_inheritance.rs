@@ -139,7 +139,7 @@ fn multiple_themes_keep_local_overrides() {
             _ => None,
         })
         .collect();
-    assert_eq!(fills, vec![Some(Color(0xFF, 0, 0)), Some(Color(0, 0, 0x80))], "inheritor moved, override stayed: {fills:?}");
+    assert_eq!(fills, vec![Some(Color(0xFF, 0, 0)), Some(Color(0, 0x80, 0))], "inheritor moved, override stayed: {fills:?}");
 
     // A second save through the retained model changes nothing.
     let again = dir.path().join("again.pptx");
@@ -168,7 +168,7 @@ fn theme_colours_resolve_to_the_same_hex_in_odp() {
             _ => None,
         })
         .collect();
-    assert_eq!(fills, vec![Some(Color(0xFF, 0, 0)), Some(Color(0, 0, 0x80))], "{fills:?}");
+    assert_eq!(fills, vec![Some(Color(0xFF, 0, 0)), Some(Color(0, 0x80, 0))], "{fills:?}");
     assert_eq!(back.slides[1].objects.len(), 1);
     let blue = match &back.slides[1].objects[0] {
         SlideObject::Shape { style, .. } => style.fill,

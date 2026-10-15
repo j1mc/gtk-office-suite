@@ -58,7 +58,7 @@ fn ocean() -> Vec<SlideObject> {
         w: 960.0,
         h: 540.0,
         rotation: 0.0,
-        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None, fill_src: None, stroke_src: None },
+        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None, fill_src: None, stroke_src: Some(StrokeSrc::NoLine) },
     }]
 }
 
