@@ -6,21 +6,48 @@
 // flattened (see read()). Fidelity is measured by tests/docx.rs and the
 // LO-authored corpus in tests/lo_parity.rs.
 
-use crate::model::{Alignment, Document, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParaStyle, Run, RunStyle};
+use crate::model::{Alignment, BorderStyle, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParaBorder, ParaBorders, ParaStyle, Run, RunStyle, TabAlign, TabLeader, TabStop};
 use rdocx_oxml::shared::ST_Jc;
 
 /// The body-paragraph properties rdocx does not hand back, in twips.
 ///
-/// Two unrelated gaps share one scan of `word/document.xml`: the
-/// strict-OOXML indents rdocx never parses, and the tab stops it parses
-/// but exposes only as a count (`tab_stop_count`), with no positions.
+/// Several unrelated gaps share one scan of `word/document.xml`: the
+/// strict-OOXML indents rdocx never parses, the tab stops it parses but
+/// exposes only as a count (`tab_stop_count`), with no positions,
+/// alignments or leaders, the line rule (`line_spacing` reports the
+/// length but not exact vs atLeast), and the per-side paragraph borders
+/// (only the bottom edge has a reader).
 #[derive(Clone, Default)]
 struct RawPara {
     start_twips: Option<f64>,
     end_twips: Option<f64>,
-    tab_twips: Vec<f64>,
+    tabs: Vec<RawTab>,
     /// Direct `w:contextualSpacing` (rdocx does not model it).
     contextual: bool,
+    /// Direct `w:lineRule` of the paragraph's `w:spacing`.
+    line_rule: Option<String>,
+    /// Direct `w:pBdr` edges: top, left, bottom, right. `None` is no
+    /// direct edge; `Some(None)` is a direct edge the model drops
+    /// (nil, or an unmodelled look), which still suppresses the style's.
+    borders: [Option<Option<RawBorder>>; 4],
+}
+
+/// A tab stop as the file spells it: its position in twips, its
+/// alignment (`w:val`) and its leader (`w:leader`).
+#[derive(Clone, Copy)]
+struct RawTab {
+    twips: f64,
+    align: TabAlign,
+    leader: TabLeader,
+}
+
+/// One `w:pBdr` edge as the file spells it: a modelled look, an RRGGBB
+/// colour and a width in points.
+#[derive(Clone)]
+struct RawBorder {
+    style: BorderStyle,
+    color: String,
+    width_pt: f64,
 }
 
 /// Per body paragraph: strict-spelled indents and tab-stop positions.
@@ -73,6 +100,30 @@ fn raw_paragraph_props(path: &str) -> RawParas {
         // a tab character inside a run. Only the former has a position,
         // so the flag is what keeps a tabbed line from inventing stops.
         let mut in_tabs = false;
+        // The paragraph whose properties the scan is inside, if the scan
+        // pushed one for it: `w:p` inside a text box (`w:txbxContent`)
+        // is not a body paragraph, so it pushes none and sets none of
+        // these. Without the box guard a text box's paragraphs threw the
+        // positional pairing off and the whole scan was discarded.
+        let mut txbx_depth = 0usize;
+        let mut in_para = false;
+        // Inside the paragraph's own `w:pPr` (depth 1; a `w:pPrChange`
+        // holds the old value, not the paragraph's), and outside any
+        // `w:rPr` (a run's `w:spacing` is letter spacing, and a paragraph
+        // mark's sits in the `w:pPr`'s own `w:rPr`).
+        let mut ppr_depth = 0u32;
+        let mut rpr_depth = 0u32;
+        let mut in_pbdr = false;
+        // The paragraph list the current paragraph feeds, if any: what
+        // `last_mut` below appends the scanned properties to.
+        let mut list: Option<usize> = None;
+        let last = |out: &mut RawParas, list: Option<usize>| -> Option<&mut RawPara> {
+            match list {
+                Some(0) => out.body.last_mut(),
+                Some(1) => out.cells.last_mut(),
+                _ => None,
+            }
+        };
         loop {
             match reader.read_event()? {
                 quick_xml::events::Event::Eof => break,
@@ -83,34 +134,70 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         }
                         table_depth += 1;
                     }
+                    "w:txbxContent" => txbx_depth += 1,
                     "w:tabs" => in_tabs = true,
                     "w:p" => {
-                        if let Some(list) = at(&mut out, table_depth) {
-                            list.push(RawPara::default());
+                        if txbx_depth == 0 {
+                            if let Some(fed) = at(&mut out, table_depth) {
+                                fed.push(RawPara::default());
+                                list = Some(table_depth.min(1));
+                                in_para = true;
+                            }
+                        }
+                    }
+                    "w:pPr" => {
+                        if in_para {
+                            ppr_depth += 1;
+                        }
+                    }
+                    "w:rPr" => rpr_depth += 1,
+                    "w:pBdr" => {
+                        if in_para && ppr_depth == 1 {
+                            in_pbdr = true;
                         }
                     }
                     _ => {}
                 },
                 quick_xml::events::Event::End(e) => match e.name().as_ref() {
                     "w:tbl" => table_depth = table_depth.saturating_sub(1),
+                    "w:txbxContent" => txbx_depth = txbx_depth.saturating_sub(1),
                     "w:tabs" => in_tabs = false,
+                    "w:p" => {
+                        if txbx_depth == 0 {
+                            in_para = false;
+                            ppr_depth = 0;
+                            in_pbdr = false;
+                        }
+                    }
+                    "w:pPr" => {
+                        ppr_depth = ppr_depth.saturating_sub(1);
+                        if ppr_depth == 0 {
+                            in_pbdr = false;
+                        }
+                    }
+                    "w:rPr" => rpr_depth = rpr_depth.saturating_sub(1),
+                    "w:pBdr" => in_pbdr = false,
                     _ => {}
                 },
                 quick_xml::events::Event::Empty(e) => match e.name().as_ref() {
                     // A `w:p` with nothing in it is still a paragraph.
                     "w:p" => {
-                        if let Some(list) = at(&mut out, table_depth) {
-                            list.push(RawPara::default());
+                        if txbx_depth == 0 {
+                            if let Some(fed) = at(&mut out, table_depth) {
+                                fed.push(RawPara::default());
+                            }
                         }
                     }
                     "w:tab" if in_tabs => {
-                        let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) else { continue };
+                        let Some(last) = last(&mut out, list) else { continue };
                         let mut pos = None;
                         let mut val = None;
+                        let mut leader = None;
                         for a in e.attributes().with_checks(false).flatten() {
                             match a.key.as_ref() {
                                 "w:pos" => pos = a.value.trim().parse::<f64>().ok(),
                                 "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
+                                "w:leader" => leader = Some(a.value.trim().to_ascii_lowercase()),
                                 _ => {}
                             }
                         }
@@ -121,21 +208,35 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         // list's numbering gap, not user tab stops. An
                         // allowlist keeps each of those from arriving as
                         // a phantom stop the document never had.
-                        let keep = matches!(
-                            val.as_deref().unwrap_or("left"),
-                            "left" | "start" | "center" | "centre" | "right" | "end" | "decimal"
-                        );
-                        if let (Some(v), true) = (pos, keep) {
-                            last.tab_twips.push(v);
+                        let align = match val.as_deref().unwrap_or("left") {
+                            "left" | "start" => Some(TabAlign::Left),
+                            "center" | "centre" => Some(TabAlign::Center),
+                            "right" | "end" => Some(TabAlign::Right),
+                            "decimal" => Some(TabAlign::Decimal),
+                            _ => None,
+                        };
+                        // `heavy` is a thick rule the model has no look
+                        // for: it draws as an underscore, and the save
+                        // dialog says so (`loss::content_a_save_drops`).
+                        let leader = match leader.as_deref().unwrap_or("none") {
+                            "none" => Some(TabLeader::None),
+                            "dot" => Some(TabLeader::Dot),
+                            "hyphen" => Some(TabLeader::Hyphen),
+                            "underscore" | "heavy" => Some(TabLeader::Underscore),
+                            "middledot" => Some(TabLeader::MiddleDot),
+                            _ => None,
+                        };
+                        if let (Some(v), Some(align), Some(leader)) = (pos, align, leader) {
+                            last.tabs.push(RawTab { twips: v, align, leader });
                         }
                     }
                     "w:contextualSpacing" => {
-                        if let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) {
+                        if let Some(last) = last(&mut out, list) {
                             last.contextual = on_off(&e);
                         }
                     }
                     "w:ind" => {
-                        let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) else { continue };
+                        let Some(last) = last(&mut out, list) else { continue };
                         for a in e.attributes().with_checks(false).flatten() {
                             let v = || {
                                 a.value.trim().parse::<f64>().ok()
@@ -147,6 +248,26 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                             }
                         }
                     }
+                    "w:spacing" => {
+                        if in_para && ppr_depth == 1 && rpr_depth == 0 {
+                            let Some(last) = last(&mut out, list) else { continue };
+                            for a in e.attributes().with_checks(false).flatten() {
+                                if a.key.as_ref() == "w:lineRule" {
+                                    last.line_rule = Some(a.value.trim().to_ascii_lowercase());
+                                }
+                            }
+                        }
+                    }
+                    "w:top" | "w:left" | "w:bottom" | "w:right" if in_pbdr => {
+                        let Some(last) = last(&mut out, list) else { continue };
+                        let idx = match e.name().as_ref() {
+                            "w:top" => 0,
+                            "w:left" => 1,
+                            "w:bottom" => 2,
+                            _ => 3,
+                        };
+                        last.borders[idx] = Some(raw_border(&e));
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -155,6 +276,40 @@ fn raw_paragraph_props(path: &str) -> RawParas {
         Ok(out)
     }
     scan(path).unwrap_or_default()
+}
+
+/// One `w:pBdr` edge as a modelled border, if its look is one the model
+/// keeps. Anything else (`w:val` wave, triple, inset and the rest) reads
+/// as no border here, and the save dialog names it (`loss`), never a
+/// silent restyle.
+fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
+    let mut val = None;
+    let mut sz = None;
+    let mut color = None;
+    for a in e.attributes().with_checks(false).flatten() {
+        match a.key.as_ref() {
+            "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
+            "w:sz" => sz = a.value.trim().parse::<f64>().ok(),
+            "w:color" => color = Some(a.value.trim().to_ascii_uppercase()),
+            _ => {}
+        }
+    }
+    let style = match val.as_deref().unwrap_or("single") {
+        "nil" | "none" => return None,
+        "single" | "thick" => BorderStyle::Single,
+        "double" => BorderStyle::Double,
+        "dotted" => BorderStyle::Dotted,
+        "dashed" | "dashSmallGap" => BorderStyle::Dashed,
+        _ => return None,
+    };
+    // "auto" is Word's current-text colour, which here is black; anything
+    // that is not six hex digits cannot go back into a file, so it reads
+    // as black too rather than corrupting the save.
+    let color = match color.as_deref() {
+        Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_string(),
+        _ => "000000".to_string(),
+    };
+    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0 })
 }
 
 /// Lay the scanned properties over what rdocx read. Transitional wins
@@ -167,7 +322,104 @@ fn apply_strict_indents(style: &mut ParaStyle, raw: &RawPara) {
     if style.right_indent_pt == 0.0 {
         if let Some(tw) = raw.end_twips { style.right_indent_pt = tw / 20.0; }
     }
-    style.tab_stops_pt = raw.tab_twips.iter().map(|tw| tw / 20.0).collect();
+    apply_raw_typography(style, raw);
+}
+
+/// Lay the scanned direct typography over what rdocx read: tab stops
+/// with their alignments and leaders. rdocx exposes stops as a count
+/// only, so the scan is the only source.
+fn apply_raw_typography(style: &mut ParaStyle, raw: &RawPara) {
+    style.tab_stops_pt = raw
+        .tabs
+        .iter()
+        .map(|t| TabStop { pos_pt: t.twips / 20.0, align: t.align, leader: t.leader })
+        .collect();
+}
+
+/// A paragraph's borders: its style chain's edges, with the scanned
+/// direct edges over them. A direct edge the model drops (nil, or an
+/// unmodelled look) still suppresses the style's, as Word draws it.
+fn para_borders(raw: Option<&RawPara>, styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
+    let base = styled_borders(styled);
+    let Some(raw) = raw else { return base };
+    let [top, left, bottom, right] = &raw.borders;
+    let pick = |direct: &Option<Option<RawBorder>>, fallback: Option<ParaBorder>| {
+        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt })).unwrap_or(fallback)
+    };
+    ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) }
+}
+
+/// A style chain's `w:pBdr` edges as modelled borders.
+fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
+    let edge = |b: Option<&rdocx_oxml::borders::CT_BorderEdge>| b.and_then(styled_edge_border);
+    match &styled.borders {
+        Some(b) => ParaBorders {
+            top: edge(b.top.as_ref()),
+            left: edge(b.left.as_ref()),
+            bottom: edge(b.bottom.as_ref()),
+            right: edge(b.right.as_ref()),
+        },
+        None => ParaBorders::default(),
+    }
+}
+
+/// One style-chain border edge as a modelled border, if its look is one
+/// the model keeps (see `raw_border`).
+fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBorder> {
+    use rdocx_oxml::shared::ST_Border;
+    let style = match e.val {
+        ST_Border::None => return None,
+        ST_Border::Single | ST_Border::Thick => BorderStyle::Single,
+        ST_Border::Double => BorderStyle::Double,
+        ST_Border::Dotted => BorderStyle::Dotted,
+        ST_Border::Dashed => BorderStyle::Dashed,
+        _ => return None,
+    };
+    let color = match e.color.as_deref() {
+        Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_uppercase(),
+        _ => "000000".to_string(),
+    };
+    Some(ParaBorder { style, color, width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0) })
+}
+
+/// A paragraph's fixed or minimum line height: the direct `w:spacing`
+/// length when its rule is exact/atLeast, else the style chain's.
+/// The auto rule is already a multiple (`line_spacing_multiple`).
+fn para_line_height(
+    direct_multiple: Option<f64>,
+    direct_len: Option<rdocx::Length>,
+    raw_rule: Option<&str>,
+    styled: &rdocx_oxml::properties::CT_PPr,
+) -> Option<LineHeight> {
+    if direct_multiple.is_some() {
+        return None;
+    }
+    if let Some(len) = direct_len {
+        let pt = len.to_pt();
+        return match raw_rule.or(styled.line_rule.as_deref()) {
+            Some("atLeast") | Some("atleast") => Some(LineHeight::Minimum(pt)),
+            _ => Some(LineHeight::Exact(pt)),
+        };
+    }
+    let line = styled.line_spacing?;
+    let pt = f64::from(line.0) / 20.0;
+    match styled.line_rule.as_deref() {
+        Some("exact") => Some(LineHeight::Exact(pt)),
+        Some("atLeast") | Some("atleast") => Some(LineHeight::Minimum(pt)),
+        _ => None,
+    }
+}
+
+/// A paragraph's shading fill: its own `w:shd`, else its style's.
+/// "auto" is no fill; the fill is an RRGGBB claim.
+fn para_shading(direct: Option<&str>, styled: &rdocx_oxml::properties::CT_PPr) -> Option<String> {
+    let fill = direct
+        .filter(|f| !f.eq_ignore_ascii_case("auto") && !f.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            styled.shading.as_ref().and_then(|s| s.fill.clone()).filter(|f| !f.eq_ignore_ascii_case("auto") && !f.is_empty())
+        })?;
+    Some(fill.trim_start_matches('#').to_uppercase())
 }
 
 /// An OOXML on/off element's value: present means on, unless `w:val`
@@ -495,7 +747,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         if p.style_id() == Some("HorizontalLine") && p.text().is_empty() {
             continue;
         }
-        let mut para = map_paragraph(&doc, p, None);
+        let mut para = map_paragraph(&doc, p, None, raw.as_ref().and_then(|s| s.get(i)));
         // A run-level break after this paragraph's text belongs to the
         // paragraph that follows, which is where LibreOffice puts the
         // break it converts from an ODF `fo:break-before`. The trailing
@@ -533,9 +785,6 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         let direct_contextual = raw.as_ref().and_then(|s| s.get(i)).is_some_and(|r| r.contextual);
         let is_contextual = direct_contextual || style_id.as_deref().is_some_and(|id| contextual_ids.contains(id));
         contextual.push((style_id, is_contextual));
-        if let Some(r) = raw.as_ref().and_then(|s| s.get(i)) {
-            apply_strict_indents(&mut para.style, r);
-        }
         list_indent_from_declared(&doc, p, &mut para.style);
         word_numbers.push(counter.number(&doc, p, &mut para.style));
         paragraphs.push(para);
@@ -635,10 +884,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                             cell_index += 1;
                             // An empty paragraph is a line of the cell:
                             // a form's answer box is a cell of them.
-                            let mut para = map_paragraph(&doc, &cp, table.style_id());
-                            if let Some(r) = raw_cell {
-                                apply_strict_indents(&mut para.style, r);
-                            }
+                            let mut para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
                             keep(para);
                         }
                         // A table nested in a cell belongs to its outer
@@ -649,7 +895,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                         rdocx::CellItemRef::Table(nested) => {
                             for_each_nested_paragraph(&nested, &mut |cp| {
                                 if !cp.text().is_empty() {
-                                    keep(map_paragraph(&doc, cp, table.style_id()));
+                                    keep(map_paragraph(&doc, cp, table.style_id(), None));
                                 }
                             });
                         }
@@ -1852,7 +2098,9 @@ fn for_each_nested_paragraph(table: &rdocx::TableRef<'_>, f: &mut dyn FnMut(&rdo
 }
 
 /// `table_style` is the style of the table a cell paragraph is in.
-fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style: Option<&str>) -> Paragraph {
+/// `raw` is the scan's direct properties for this paragraph, when the
+/// scan paired them (indents, tab stops, line rule, borders).
+fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style: Option<&str>, raw: Option<&RawPara>) -> Paragraph {
     let heading = p.style_id().and_then(style_id_to_heading);
     // LO uses "Quotations"; Word uses "Quote"/"IntenseQuote".
     let block_quote = matches!(p.style_id(), Some("Quote") | Some("Quotations") | Some("IntenseQuote") | Some("BlockQuote") | Some("BlockQuotation"));
@@ -1887,6 +2135,10 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
     let page_break_before = p.is_page_break_before() || run_page_break(p).leading;
     // Keep with next: the paragraph's own setting, else its style's.
     let keep_with_next = p.keep_with_next_value().or(styled.keep_next).unwrap_or(false);
+    // Keep lines together, and widow/orphan control: the paragraph's own
+    // setting, else its style's.
+    let keep_lines = p.keep_together_value().or(styled.keep_lines).unwrap_or(false);
+    let widow_control = p.widow_control_value().or(styled.widow_control);
     let numbering = paragraph_numbering(doc, p);
     let (list, list_level) = match numbering {
         // The item's own level says bullet or number: a numbered list's
@@ -2044,7 +2296,15 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         style: ParaStyle {
             heading, alignment, list, code_block, block_quote,
             list_level, list_start,
-            named_style, page_break_before, keep_with_next,
+            named_style, page_break_before, keep_with_next, keep_lines, widow_control,
+            line_height: para_line_height(
+                p.line_spacing_multiple(),
+                p.line_spacing(),
+                raw.and_then(|r| r.line_rule.as_deref()),
+                &styled,
+            ),
+            shading: para_shading(p.shading_fill(), &styled),
+            borders: para_borders(raw, &styled),
             // Absent means "inherit": the paragraph looks the way its style
             // chain says, which the model has no styles to express, so the
             // inherited value is read into the paragraph. Reading only
@@ -2078,6 +2338,9 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         },
         runs,
     };
+    if let Some(r) = raw {
+        apply_strict_indents(&mut para.style, r);
+    }
     normalize(&mut para);
     para
 }

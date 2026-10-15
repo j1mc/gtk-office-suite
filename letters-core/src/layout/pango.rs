@@ -263,10 +263,16 @@ impl PangoShaper {
             let mut tabs = pango::TabArray::new(1, false);
             tabs.set_tab(0, pango::TabAlign::Right, to_units(req.width_pt));
             layout.set_tabs(Some(&tabs));
-        } else if !req.tab_stops_pt.is_empty() {
-            let mut tabs = pango::TabArray::new(req.tab_stops_pt.len() as i32, false);
-            for (i, t) in req.tab_stops_pt.iter().enumerate() {
-                tabs.set_tab(i as i32, pango::TabAlign::Left, to_units(*t));
+        } else if !req.tab_stops.is_empty() {
+            let mut tabs = pango::TabArray::new(req.tab_stops.len() as i32, false);
+            for (i, t) in req.tab_stops.iter().enumerate() {
+                let align = match t.align {
+                    crate::model::TabAlign::Center => pango::TabAlign::Center,
+                    crate::model::TabAlign::Right => pango::TabAlign::Right,
+                    crate::model::TabAlign::Decimal => pango::TabAlign::Decimal,
+                    crate::model::TabAlign::Left => pango::TabAlign::Left,
+                };
+                tabs.set_tab(i as i32, align, to_units(t.pos_pt));
             }
             layout.set_tabs(Some(&tabs));
         }
@@ -438,6 +444,14 @@ fn bullet_path(cr: &cairo::Context, x: f64, baseline: f64, size: f64) {
     let r = size * 0.155;
     cr.new_path();
     cr.arc(x + r, baseline - size * 0.28, r, 0.0, std::f64::consts::TAU);
+}
+
+/// How far a double border's inner hairline sits from its outer one: one
+/// full edge width toward the box's centre.
+fn edge_offset(x0: f64, y0: f64, x1: f64, y1: f64, left: f64, top: f64, right: f64, bottom: f64, by: f64) -> (f64, f64) {
+    let (dx, dy) = ((left + right) / 2.0 - (x0 + x1) / 2.0, (top + bottom) / 2.0 - (y0 + y1) / 2.0);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+    (dx / len * by, dy / len * by)
 }
 
 /// The built-in image loader: PNG through Cairo.
@@ -866,6 +880,130 @@ impl Typeset {
         }
     }
 
+    /// A tab stop's leader across its tab's gap on `line`: the stop's
+    /// leader glyph (dot, hyphen, underscore, middle dot) tiled from the
+    /// tab to the text, as Writer draws it. Each line's tabs consume the
+    /// paragraph's stops from the first, as Word numbers them.
+    fn draw_tab_leaders(&self, cr: &cairo::Context, para: usize, layout: &pango::Layout, line: &pango::LayoutLine, x_pt: f64, baseline_pt: f64) {
+        let Some(p) = self.doc.paragraphs.get(para) else { return };
+        if p.style.toc.is_some() {
+            return;
+        }
+        let text = layout.text();
+        let start = line.start_index().max(0) as usize;
+        let end = start + line.length().max(0) as usize;
+        let mut stop_idx = 0usize;
+        let mut at = start;
+        while let Some(rel) = text.get(at..end).and_then(|t| t.find('\t')) {
+            let tab = at + rel;
+            let glyph = match p.style.tab_stops_pt.get(stop_idx).map(|s| s.leader) {
+                Some(crate::model::TabLeader::Dot) => ".",
+                Some(crate::model::TabLeader::Hyphen) => "-",
+                Some(crate::model::TabLeader::Underscore) => "_",
+                Some(crate::model::TabLeader::MiddleDot) => "·",
+                _ => {
+                    stop_idx += 1;
+                    at = tab + 1;
+                    continue;
+                }
+            };
+            stop_idx += 1;
+            let from = x_pt + to_pt(line.index_to_x(tab as i32, false));
+            let to = x_pt + to_pt(line.index_to_x(tab as i32, true));
+            let glyph_runs = [crate::model::Run::plain(glyph)];
+            let mut req = paragraph_request(p, 1000.0, &self.opts);
+            req.runs = &glyph_runs;
+            req.right_tab = false;
+            let glyph_layout = self.shaper.layout(&req);
+            let Some(glyph_line) = glyph_layout.line_readonly(0) else { at = tab + 1; continue };
+            let w = to_pt(glyph_line.index_to_x(1, false)).max(1.0);
+            // Dots breathe; rules join up.
+            let step = if glyph == "." || glyph == "·" { w * 1.5 } else { w };
+            let mut x = to - w - step * 0.5;
+            while x >= from + w * 0.5 {
+                cr.move_to(x, baseline_pt);
+                pangocairo::functions::show_layout_line(cr, &glyph_line);
+                x -= step;
+            }
+            at = tab + 1;
+        }
+    }
+
+    /// A paragraph's shading and borders: the fill, then each set edge
+    /// as its own segment, so a box split across pages opens where the
+    /// paragraph continues. Under the text, like a table cell's fill.
+    fn draw_para_box(
+        &self,
+        cr: &cairo::Context,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        fill: Option<&str>,
+        borders: &crate::model::ParaBorders,
+        top_edge: bool,
+        bottom_edge: bool,
+    ) {
+        use crate::model::BorderStyle;
+        if let Some((r, g, b)) = fill.and_then(parse_hex) {
+            let _ = cr.save();
+            cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
+            cr.rectangle(x, y, w, h);
+            let _ = cr.fill();
+            let _ = cr.restore();
+        }
+        for (edge, (x0, y0), (x1, y1)) in [
+            (borders.top.filter(|_| top_edge), (x, y), (x + w, y)),
+            (borders.bottom.filter(|_| bottom_edge), (x, y + h), (x + w, y + h)),
+            (borders.left, (x, y), (x, y + h)),
+            (borders.right, (x + w, y), (x + w, y + h)),
+        ] {
+            let Some(edge) = edge else { continue };
+            let Some((r, g, b)) = parse_hex(&edge.color) else { continue };
+            let lw = edge.width_pt.clamp(0.25, 12.0);
+            let _ = cr.save();
+            cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
+            match edge.style {
+                BorderStyle::Single => {
+                    cr.set_line_width(lw);
+                    cr.move_to(x0, y0);
+                    cr.line_to(x1, y1);
+                    let _ = cr.stroke();
+                }
+                BorderStyle::Dashed => {
+                    cr.set_line_width(lw);
+                    cr.set_dash(&[3.0 * lw, 2.0 * lw], 0.0);
+                    cr.move_to(x0, y0);
+                    cr.line_to(x1, y1);
+                    let _ = cr.stroke();
+                }
+                BorderStyle::Dotted => {
+                    cr.set_line_width(lw);
+                    cr.set_line_cap(cairo::LineCap::Round);
+                    cr.set_dash(&[0.1, 1.5 * lw], 0.0);
+                    cr.move_to(x0, y0);
+                    cr.line_to(x1, y1);
+                    let _ = cr.stroke();
+                }
+                BorderStyle::Double => {
+                    // Two hairlines a full width apart, centred on the
+                    // edge: the outer where Word puts it, the inner
+                    // inside the box.
+                    let inner = lw / 3.0;
+                    cr.set_line_width(inner.max(0.25));
+                    let (dx, dy) = edge_offset(x0, y0, x1, y1, x, y, x + w, y + h, lw);
+                    cr.move_to(x0, y0);
+                    cr.line_to(x1, y1);
+                    let _ = cr.stroke();
+                    cr.move_to(x0 + dx, y0 + dy);
+                    cr.line_to(x1 + dx, y1 + dy);
+                    let _ = cr.stroke();
+                }
+            }
+            let _ = cr.restore();
+        }
+    }
+
     /// Length of paragraph `para`'s layout text, in chars.
     pub fn layout_len(&self, para: usize) -> usize {
         self.doc.paragraphs.get(para).map_or(0, |p| super::layout_text(&p.runs).chars().count())
@@ -885,6 +1023,8 @@ impl Typeset {
                         pangocairo::functions::show_layout_line(cr, &l);
                         if self.doc.paragraphs.get(*p).is_some_and(|p| p.style.toc.is_some()) {
                             self.draw_leader(cr, *p, &layout, &l, *x_pt, *baseline_pt);
+                        } else {
+                            self.draw_tab_leaders(cr, *p, &layout, &l, *x_pt, *baseline_pt);
                         }
                     }
                 }
@@ -900,7 +1040,7 @@ impl Typeset {
                         alignment: Alignment::Left,
                         width_pt: *box_width_pt,
                         first_line_indent_pt: 0.0,
-                        tab_stops_pt: Vec::new(),
+                        tab_stops: Vec::new(),
                         right_tab: false,
                         defaults: &self.opts,
                     };
@@ -1000,6 +1140,9 @@ impl Typeset {
                     cr.rectangle(x0, y0, x1 - x0, y1 - y0);
                     let _ = cr.stroke();
                     let _ = cr.restore();
+                }
+                Item::ParaBox { x_pt, y_pt, width_pt, height_pt, fill, borders, top_edge, bottom_edge, .. } => {
+                    self.draw_para_box(cr, *x_pt, *y_pt, *width_pt, *height_pt, fill.as_deref(), borders, *top_edge, *bottom_edge);
                 }
             }
         }
@@ -1238,7 +1381,7 @@ mod tests {
                 alignment: Alignment::Left,
                 width_pt: w,
                 first_line_indent_pt: 0.0,
-                tab_stops_pt: Vec::new(),
+                tab_stops: Vec::new(),
                 right_tab: false,
                 defaults: opts,
             }
