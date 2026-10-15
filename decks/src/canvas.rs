@@ -1376,13 +1376,15 @@ mod font_tests {
 
     /// `a:fillRect` places the stretched picture: a left inset of -100%
     /// doubles its width leftwards, so only its yellow half is on the slide.
+    /// (Sampled clear of the slide's left edge, where the navy half's
+    /// last column is filtered into the first yellow one.)
     #[test]
     fn a_background_picture_honours_its_fill_rect() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = slide(None);
         let fill = decks_core::engine::FillRect { left: -1.0, ..Default::default() };
         s.background_picture = Some(BackgroundPicture { path: two_tone_png(dir.path()), fill });
-        let (px, _) = export_pixels(s, &[(20, 20), (940, 520)]);
+        let (px, _) = export_pixels(s, &[(300, 20), (940, 520)]);
         assert!(px.iter().all(|p| near(*p, [255, 217, 0])), "all yellow: {px:?}");
     }
 
