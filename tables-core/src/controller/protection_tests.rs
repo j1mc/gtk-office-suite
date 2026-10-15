@@ -83,22 +83,22 @@ fn mixed_format_and_note_operations_are_atomic() {
     assert_rejected(&mut controller, |c| c.format_selection("Bold", |style| style.bold = true));
     assert_rejected(&mut controller, |c| c.border_selection(BorderPreset::All, BorderStyle::Solid, (0.0, 0.0, 0.0)));
     assert_rejected(&mut controller, |c| { c.set_note(2, 0, Some("overwrite".into())); });
-    assert_rejected(&mut controller, |c| c.mutate_sheet("Compound metadata", |sheet| {
+    assert_rejected(&mut controller, |c| { c.mutate_sheet("Compound metadata", |sheet| {
         sheet.styles[1][0].italic = true;
         sheet.notes[2][0] = None;
-    }));
+    }); });
 }
 
 #[test]
 fn protected_sort_structure_and_lock_changes_are_atomic() {
     let mut controller = mixed_sheet(true);
-    assert_rejected(&mut controller, |c| c.sort_column(0, SortDirection::Ascending));
+    assert_rejected(&mut controller, |c| { c.sort_column(0, SortDirection::Ascending); });
     for axis in [Axis::Rows, Axis::Cols] {
         assert_rejected(&mut controller, |c| c.insert_lines(axis, 1, 1));
         assert_rejected(&mut controller, |c| c.delete_lines(axis, 1, 1));
     }
     assert_rejected(&mut controller, |c| c.toggle_merge());
-    assert_rejected(&mut controller, |c| c.mutate_sheet("Freeze", |sheet| sheet.frozen_rows = 1));
+    assert_rejected(&mut controller, |c| { c.mutate_sheet("Freeze", |sheet| sheet.frozen_rows = 1); });
     assert_rejected(&mut controller, |c| c.set_cell_locked(2, 0, false));
     assert_rejected(&mut controller, |c| { assert!(!c.begin_resize()); });
     let old = controller.state.borrow().sheet().col_widths[0];

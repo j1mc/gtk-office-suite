@@ -1280,7 +1280,7 @@
         assert_eq!(engine.formula(1, 0).as_deref(), Some("A1+B1"), "the formula survived the round trip");
         assert_eq!(engine.cell(1, 0), "5");
         assert_eq!(engine.input_at(0, 5, 0), "", "a derived spill cell has no input to flatten");
-        assert_eq!(engine.cell(0, 5, 0), "2", "the spill recomputes on load");
+        assert_eq!(engine.cell_at(0, 5, 0), "2", "the spill recomputes on load");
     }
 
     /// TBL-006: `mutate_sheet` cannot smuggle values or a resize past the
