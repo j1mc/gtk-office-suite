@@ -288,6 +288,81 @@ def letters(img):
     save(x, "indents", "First paragraph has a 0.5in first-line indent; second is indented 1in on the left")
 
     x = doc()
+    for n in range(44):
+        x.add_paragraph(f"Filler line {n + 1}")
+    p = x.add_paragraph(("Kept together. " + LOREM) * 3)
+    p.paragraph_format.keep_together = True
+    p = x.add_paragraph(("No widow control. " + LOREM) * 3)
+    p.paragraph_format.widow_control = False
+    save(x, "keep-widow", "A six-line paragraph kept together moves whole past the page break; the next allows widowed lines")
+
+    x = doc()
+    p = x.add_paragraph(LOREM * 2)
+    p.paragraph_format.line_spacing = Pt(28)
+    p = x.add_paragraph(LOREM * 2)
+    # python-docx spells a Length as an exact rule; atLeast needs raw XML.
+    pPr = p._p.get_or_add_pPr()
+    spacing = OxmlElement("w:spacing")
+    spacing.set(qn("w:line"), "560")
+    spacing.set(qn("w:lineRule"), "atLeast")
+    pPr.append(spacing)
+    p = x.add_paragraph(LOREM * 2)
+    p.paragraph_format.line_spacing = 1.5
+    save(x, "exact-line-spacing", "Exact 28pt, minimum 28pt and 1.5-spaced paragraphs")
+
+    x = doc()
+    from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
+    p = x.add_paragraph()
+    p.add_run("Chapter 1\t1")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(6), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+    p = x.add_paragraph()
+    p.add_run("Total\t12.99")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.DECIMAL, WD_TAB_LEADER.DOTS)
+    p = x.add_paragraph()
+    p.add_run("Signed\tby hand")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.CENTER, WD_TAB_LEADER.DASHES)
+    save(x, "tab-leaders", "Right, decimal and centre tab stops with dot and dash leaders")
+
+    x = doc()
+
+    def shade(paragraph, fill):
+        pPr = paragraph._p.get_or_add_pPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:fill"), fill)
+        pPr.append(shd)
+
+    def borders(paragraph, edges):
+        # edges: side -> (style, eighths-of-a-point, color).
+        pPr = paragraph._p.get_or_add_pPr()
+        pbdr = OxmlElement("w:pBdr")
+        for side, (val, sz, color) in edges.items():
+            edge = OxmlElement(f"w:{side}")
+            edge.set(qn("w:val"), val)
+            edge.set(qn("w:sz"), str(sz))
+            edge.set(qn("w:space"), "1")
+            edge.set(qn("w:color"), color)
+            pbdr.append(edge)
+        pPr.append(pbdr)
+
+    p = x.add_paragraph("A shaded paragraph. " + LOREM)
+    shade(p, "D9D9D9")
+    p = x.add_paragraph("A paragraph with a red rule below. " + LOREM)
+    borders(p, {"bottom": ("single", 6, "FF0000")})
+    p = x.add_paragraph("A boxed paragraph. " + LOREM)
+    borders(p, {"top": ("single", 4, "000000"), "left": ("single", 4, "000000"),
+                "bottom": ("single", 4, "000000"), "right": ("single", 4, "000000")})
+    p = x.add_paragraph("A paragraph with a dashed blue bar on the left. " + LOREM)
+    borders(p, {"left": ("dashed", 12, "0000FF")})
+    save(x, "para-shading-borders", "A grey-shaded paragraph, a red rule, a boxed paragraph and a dashed blue left bar")
+
+    x = doc()
+    x.add_paragraph("Decomposed accents: cafe\u0301 nai\u0308ve (e plus combining acute, i plus combining diaeresis).")
+    x.add_paragraph("Vietnamese stacked marks: tie\u0302\u0301ng Vi\u00ea\u0323t.")
+    x.add_paragraph("Precomposed for contrast: café naïve.")
+    save(x, "combining-marks", "Combining accents and stacked Vietnamese marks beside precomposed text")
+
+    x = doc()
     for t in ("Apples", "Oranges", "Pears"):
         x.add_paragraph(t, style="List Bullet")
     save(x, "bullet-list", "Three items with real bullet glyphs and hanging indent (not literal '- ')")

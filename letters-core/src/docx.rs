@@ -737,7 +737,8 @@ fn para_post_pass(xml: &str, specs: &[ParaPost]) -> String {
                         .into_iter()
                         .filter_map(|t| fixed[end..].find(t).map(|e| end + e))
                         .min()
-                        .unwrap_or_else(|| fixed.find("</w:pPr>").unwrap_or(fixed.len()));
+                        .or_else(|| fixed.find("</w:pPr>"));
+                    let Some(slot) = slot else { break };
                     fixed.insert_str(slot, &pbdr);
                 }
             } else {
