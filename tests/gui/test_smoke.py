@@ -5434,6 +5434,110 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed during filter undo/redo")
 
 
+class TablesProtectionSettingsSmoke(TablesCellEntryMixin, BaseGUITestCase):
+    """TBL-005: the Sheet Protection dialog applies protection and its
+    permissions as one undo step, Cancel changes nothing, a protected
+    hidden formula shows its value but leaves the formula bar empty, and a
+    cell the selection permissions exclude cannot be jumped to."""
+
+    app_name = "tables"
+    AID = "org.tunaos.tables"
+    UNSELECTABLE = "This sheet's protection doesn't allow selecting that cell."
+
+    setUp = TablesSheetStructureSmoke.setUp
+    _act = TablesSheetStructureSmoke._act
+    _cells = TablesSheetStructureSmoke._cells
+    _wait_cells = TablesSheetStructureSmoke._wait_cells
+    _select = TablesSheetStructureSmoke._select
+    _formula = TablesSheetStructureSmoke._formula
+
+    def _fx(self):
+        return self.app.child(name="Formula input", roleName="text").text
+
+    def _snapshot_sheet(self):
+        return self._cells()[1]["sheet"]
+
+    def _dialog(self, protect=None, uncheck=()):
+        """Open Sheet Protection; optionally click the protect box and
+        uncheck permissions; return a function that presses a button."""
+        self._act("protection-settings")
+        self.wait_for_node(name="Sheet Protection")
+
+        def check(label):
+            return self.wait_until(
+                lambda: self.app.findChild(lambda n: n.roleName == "check box" and n.name == label and n.showing,
+                                           retry=False, requireResult=False),
+                bool, description=f"the {label} check box")
+        if protect is not None and check("Protect this sheet").checked != protect:
+            check("Protect this sheet").do_action(0)
+        for label in uncheck:
+            box = check(label)
+            if box.checked:
+                box.do_action(0)
+            self.wait_until(lambda: check(label).checked, lambda c: not c, description=f"{label} to clear")
+
+        def press(name):
+            self.wait_for_node(name=name, roleName="push button").do_action(0)
+            self.wait_until(
+                lambda: self.app.findChild(lambda n: n.name == "Sheet Protection" and n.showing,
+                                           retry=False, requireResult=False),
+                lambda n: n is None, description="the protection dialog to close")
+        return press
+
+    def test_settings_dialog_hides_formulas_and_restricts_selection(self):
+        from dogtail import rawinput
+        self._formula("A1", "=6*7", 0, 0)
+        self._formula("B1", "=A1+1", 0, 1)
+        self._select("A1")
+        self._act("toggle-formula-hidden")
+        self.wait_until(lambda: self._snapshot_sheet()["active_cell"]["formula_hidden"], bool,
+                        description="A1's formula to be marked hidden")
+        self._select("B1")
+        self._act("toggle-cell-locked")
+        self.wait_until(lambda: self._snapshot_sheet()["active_cell"]["locked"], lambda locked: not locked,
+                        description="B1 to be unlocked")
+
+        # Cancel changes nothing.
+        self._dialog(protect=True)("Cancel")
+        self.assertFalse(self._snapshot_sheet()["protected"], "Cancel protected the sheet")
+
+        # Protect, allowing only unlocked cells to be selected: one step.
+        self._dialog(protect=True, uncheck=("Select locked cells",))("Apply")
+        sheet = self.wait_until(self._snapshot_sheet, lambda s: s["protected"],
+                                description="Apply to protect the sheet")
+        self.assertFalse(sheet["permissions"]["selectLockedCells"], sheet["permissions"])
+        self.assertTrue(sheet["permissions"]["selectUnlockedCells"], sheet["permissions"])
+        self.assertEqual(sheet["selection"], [0, 1, 0, 1], "the unlocked active cell stays selected")
+        rawinput.keyCombo("<Control>g")
+        self.wait_until(lambda: self._focused("Cell reference"), bool, description="the name box")
+        rawinput.typeText("A1")
+        rawinput.keyCombo("Return")
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == self.UNSELECTABLE and n.showing,
+                                       retry=False, requireResult=False),
+            bool, description="the refused jump to a locked cell to say why")
+        self.assertEqual(self._snapshot_sheet()["selection"], [0, 1, 0, 1], "a locked cell was selected")
+
+        # One undo restores the unprotected sheet; protect again keeping
+        # selection: A1 shows 42 but its formula stays out of the bar.
+        self._act("undo")
+        self.wait_until(lambda: self._snapshot_sheet()["protected"], lambda p: not p,
+                        description="one undo to remove the protection settings")
+        self._dialog(protect=True)("Apply")
+        self.wait_until(lambda: self._snapshot_sheet()["protected"], bool, description="the sheet protected again")
+        self._select("A1")
+        self.wait_until(self._grid, lambda text: "cell A1: 42" in text, description="A1's value on the grid")
+        self.assertEqual(self._fx(), "", "the formula bar showed a hidden formula")
+        rawinput.keyCombo("Return")
+        self.assertEqual(self._cells()[0][(0, 0)], ("42", "6*7"), "committing the empty bar changed A1")
+
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._snapshot_sheet()["protected"], lambda p: not p, description="unprotect")
+        self._select("A1")
+        self.wait_until(self._fx, lambda text: text == "=6*7", description="the formula back in the bar")
+        self.assertIsNone(self.process.poll(), "tables crashed in the protection settings journey")
+
+
 class TablesNamedRangeSmoke(BaseGUITestCase):
     """Named ranges (#113): Define Name captures the current selection;
     typing that name into the name box (instead of a cell reference)

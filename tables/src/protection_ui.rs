@@ -121,18 +121,17 @@ fn set(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>, protection: S
 /// it allows, applied together as one undo step. Cancel changes nothing.
 fn show_settings(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>) {
     let current = ctl.borrow().state.borrow().sheet().protection.clone();
-    let dialog = adw::AlertDialog::new(
-        Some(&suite_common::i18n("Sheet Protection")),
-        Some(&suite_common::i18n(
-            "Protection stops changes to locked cells in spreadsheet apps. It is not a security \
-             measure and does not encrypt the file.",
-        )),
-    );
+    let notice = gtk::Label::new(Some(&suite_common::i18n(
+        "Protection stops changes to locked cells in spreadsheet apps. It is not a security \
+         measure and does not encrypt the file.",
+    )));
+    notice.set_wrap(true);
+    notice.set_xalign(0.0);
+    let protect = gtk::CheckButton::with_label(&suite_common::i18n("Protect this sheet"));
+    protect.set_active(current.protected);
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
-    let protect = gtk::CheckButton::with_label(&suite_common::i18n("Protect this sheet"));
-    protect.set_active(current.protected);
     let mut checks = Vec::new();
     for permission in &PERMISSIONS {
         let mut probe = current.clone();
@@ -149,7 +148,12 @@ fn show_settings(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>) {
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
     // The protect switch comes first, as the dialog's subject.
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(24);
+    content.set_margin_start(24);
+    content.set_margin_end(24);
+    content.append(&notice);
     content.append(&protect);
     content.append(&heading);
     content.append(&list);
@@ -157,28 +161,33 @@ fn show_settings(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>) {
         .child(&content)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true)
-        .max_content_height(420)
+        .max_content_height(480)
         .build();
-    dialog.set_extra_child(Some(&scroller));
-    dialog.add_responses(&[("cancel", &suite_common::i18n("_Cancel")), ("apply", &suite_common::i18n("_Apply"))]);
-    dialog.set_response_appearance("apply", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("apply"));
-    dialog.set_close_response("cancel");
-    let (ctl, grid, refresh) = (ctl.clone(), grid.clone(), refresh.clone());
-    dialog.connect_response(None, move |_, response| {
-        if response != "apply" {
+    let suite_common::dialogs::ActionDialog { dialog, action } = suite_common::dialogs::action_dialog(
+        &suite_common::i18n("Sheet Protection"),
+        &suite_common::i18n("_Apply"),
+        420,
+        &scroller,
+    );
+    {
+        let grid = grid.clone();
+        dialog.connect_closed(move |_| {
             grid.grab_focus();
-            return;
-        }
-        let mut protection = current.clone();
-        protection.protected = protect.is_active();
-        for (permission, check) in PERMISSIONS.iter().zip(&checks) {
-            *(permission.field)(&mut protection) = check.is_active();
-        }
-        set(&ctl, &grid, &refresh, protection);
-    });
-    let parent = grid.root();
-    dialog.present(parent.as_ref());
+        });
+    }
+    {
+        let (ctl, grid, refresh, dialog) = (ctl.clone(), grid.clone(), refresh.clone(), dialog.clone());
+        action.connect_clicked(move |_| {
+            let mut protection = current.clone();
+            protection.protected = protect.is_active();
+            for (permission, check) in PERMISSIONS.iter().zip(&checks) {
+                *(permission.field)(&mut protection) = check.is_active();
+            }
+            dialog.close();
+            set(&ctl, &grid, &refresh, protection);
+        });
+    }
+    dialog.present(grid.root().as_ref());
 }
 
 /// Toggle the active cell's lock (or, with `hidden`, its hidden-formula
