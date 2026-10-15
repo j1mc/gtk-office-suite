@@ -38,6 +38,7 @@
 //! | 7 | Pictures the file names but does not contain | explicit-loss (`missing-pictures`): dangling `image` relationship targets per slide | explicit-loss (`missing-pictures`): dangling image `href`s per document part | loss unit tests (a dangling target cannot ship in `interop/corpus.json`, whose validator requires every relationship/manifest target to exist) | `pptx_drops`, `odp_drops` below |
 //! | 8 | A source that cannot be inspected (missing, corrupt, over budget) | blocked (`source-inspection-failed`): no save, not even a confirmed one | blocked (`source-inspection-failed`) | loss unit tests, `hostile_packages.rs`, `malformed_inputs.rs` | `inspect_source`, `scan_part` below |
 //! | 9 | Anything in a package Decks itself wrote | clean: no warning in either format | clean | `package_consistency.rs`, `a_deck_decks_wrote_loses_nothing` below | — |
+//! | 10 | Slides on differently-sized pages (DCK-006) | not applicable: one `p:sldSz` per deck | explicit-loss (`mixed-page-sizes`): the first slide page's size is kept | loss unit test below | `mixed_page_sizes` in `odp_drops` |
 //!
 //! Detection is namespace/relationship-aware bounded parsing, not
 //! prefix-sensitive substring search: element and attribute names compare by
@@ -64,6 +65,11 @@ const SMARTART: (&str, &str) = ("smartart", "SmartArt graphics");
 const ANIMATION: (&str, &str) = ("animations", "Emphasis and motion-path animations");
 const CHARTS: (&str, &str) = ("multi-series-charts", "Charts with more than one series");
 const MISSING: (&str, &str) = ("missing-pictures", "Pictures missing from the file");
+/// Slides on differently-sized pages (DCK-006): ODP lets each `draw:page`
+/// use a page layout of its own, while the deck model (and pptx) keeps one
+/// size — the reader normalises to the first slide page's. A save must warn
+/// rather than silently keep that choice.
+const MIXED_SIZES: (&str, &str) = ("mixed-page-sizes", "Slides on differently-sized pages");
 
 fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location: &str, detail: &str) {
     // Deduplicate on the full triple, not just id and location: one slide
@@ -272,6 +278,82 @@ fn odp_drops<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, names: &BTre
         if tags.iter().any(|t| t.local == "chart") && tags.iter().filter(|t| t.local == "series").count() > 1 {
             record(report, CHARTS, &object, "only the first chart series is kept");
         }
+    }
+    mixed_page_sizes(zip, names, budget, report)?;
+    Ok(())
+}
+
+/// Warn when an ODP's slides use page layouts of different sizes: the
+/// reader keeps the first slide page's size on the deck and normalises the
+/// rest onto it, so saving (either format) bakes that choice in.
+/// Attribute names compare by local name, so writer-chosen prefixes never
+/// matter; a `page-layout-properties` that is not its layout's first child
+/// element is not that layout's and is ignored rather than misattributed.
+fn mixed_page_sizes<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    names: &BTreeSet<String>,
+    budget: &mut ZipBudget,
+    report: &mut CompatibilityReport,
+) -> Result<(), String> {
+    use std::collections::HashMap;
+    let content = scan_part(zip, "content.xml", budget)?;
+    let styles = if names.contains("styles.xml") {
+        scan_part(zip, "styles.xml", budget)?
+    } else {
+        String::new()
+    };
+    // Page-layout name to (width, height) in points.
+    let mut layouts: HashMap<String, (f64, f64)> = HashMap::new();
+    for xml in [&content, &styles] {
+        let tags = start_tags(xml);
+        for (j, t) in tags.iter().enumerate() {
+            if t.local != "page-layout-properties" {
+                continue;
+            }
+            let Some(prev) = j.checked_sub(1).and_then(|i| tags.get(i)) else { continue };
+            if prev.local != "page-layout" {
+                continue;
+            }
+            let (Some(name), Some(w), Some(h)) = (
+                attr_value(prev.attrs, "name").map(str::to_string),
+                attr_value(t.attrs, "page-width").and_then(crate::odp::parse_length_pt),
+                attr_value(t.attrs, "page-height").and_then(crate::odp::parse_length_pt),
+            ) else {
+                continue;
+            };
+            if w > 0.0 && h > 0.0 {
+                layouts.insert(name, (w, h));
+            }
+        }
+    }
+    // Master-page name to its page-layout name (empty elements in styles.xml).
+    let mut master_layout: HashMap<String, String> = HashMap::new();
+    for t in start_tags(&styles).iter().filter(|t| t.local == "master-page") {
+        if let (Some(m), Some(l)) = (attr_value(t.attrs, "name"), attr_value(t.attrs, "page-layout-name")) {
+            master_layout.insert(m.to_string(), l.to_string());
+        }
+    }
+    // Each slide's page size, in hundredths of a point, in document order.
+    let mut sizes: BTreeSet<(i64, i64)> = BTreeSet::new();
+    for t in start_tags(&content).iter().filter(|t| t.local == "page") {
+        let size = attr_value(t.attrs, "master-page-name")
+            .and_then(|m| master_layout.get(m))
+            .and_then(|l| layouts.get(l))
+            .map(|&(w, h)| ((w * 100.0).round() as i64, (h * 100.0).round() as i64));
+        if let Some(size) = size {
+            sizes.insert(size);
+        }
+    }
+    if sizes.len() > 1 {
+        let mut list: Vec<String> =
+            sizes.iter().map(|(w, h)| format!("{}x{}pt", *w as f64 / 100.0, *h as f64 / 100.0)).collect();
+        list.sort();
+        record(
+            report,
+            MIXED_SIZES,
+            "content.xml",
+            &format!("slides use differently-sized pages ({}); the save keeps the first page's size", list.join(", ")),
+        );
     }
     Ok(())
 }
@@ -988,5 +1070,46 @@ mod tests {
         assert_eq!(resolve("ppt/slides", "../media/a.png"), "ppt/media/a.png");
         assert_eq!(resolve("ppt/slides", "/ppt/media/a.png"), "ppt/media/a.png");
         assert_eq!(resolve("ppt/slides", "./b.png"), "ppt/slides/b.png");
+    }
+
+    /// Differently-sized slide pages warn; uniform ones do not. Aliased
+    /// namespace prefixes prove the scan compares local names: `d:page`
+    /// is a slide whatever prefix the writer chose.
+    #[test]
+    fn mixed_odp_page_sizes_warn_and_uniform_ones_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let styles = |second: &str| format!(
+            "<office:document-styles>\
+             <office:automatic-styles>\
+             <style:page-layout style:name=\"PM1\">\
+             <style:page-layout-properties fo:page-width=\"28cm\" fo:page-height=\"21cm\"/>\
+             </style:page-layout>\
+             <style:page-layout style:name=\"PM2\">\
+             <style:page-layout-properties fo:page-width=\"25cm\" fo:page-height=\"{second}\"/>\
+             </style:page-layout>\
+             </office:automatic-styles>\
+             <office:master-styles>\
+             <s:master-page s:name=\"M1\" s:page-layout-name=\"PM1\"/>\
+             <s:master-page s:name=\"M2\" s:page-layout-name=\"PM2\"/>\
+             </office:master-styles>\
+             </office:document-styles>"
+        );
+        let content = |second: &str| format!(
+            "<office:document-content><office:body><office:presentation>\
+             <d:page d:master-page-name=\"M1\"/>\
+             <d:page d:master-page-name=\"{second}\"/>\
+             </office:presentation></office:body></office:document-content>"
+        );
+        let mixed = dir.path().join("mixed.odp");
+        package(&mixed, &[("content.xml", &content("M2")), ("styles.xml", &styles("25cm"))]);
+        let r = content_a_save_drops(mixed.to_str().unwrap());
+        let findings: Vec<&UnsupportedFeature> =
+            r.features.iter().filter(|f| f.id == "mixed-page-sizes").collect();
+        assert_eq!(findings.len(), 1, "{:?}", ids(&r));
+        assert!(findings[0].detail.contains("first page's size"), "{}", findings[0].detail);
+        let uniform = dir.path().join("uniform.odp");
+        package(&uniform, &[("content.xml", &content("M1")), ("styles.xml", &styles("21cm"))]);
+        let r = content_a_save_drops(uniform.to_str().unwrap());
+        assert!(!ids(&r).contains(&"mixed-page-sizes"), "{:?}", ids(&r));
     }
 }

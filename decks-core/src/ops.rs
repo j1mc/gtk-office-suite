@@ -232,16 +232,21 @@ pub fn ensure_all_ids(slides: &mut [Slide], masters: &mut [MasterSlide]) {
     }
 }
 
-/// A fresh id, after [`ensure_ids`].
-pub fn next_id(slides: &[Slide]) -> u64 {
-    max_id(slides) + 1
-}
-
-/// One more than every slide, object, tombstone, master, layout and
-/// placeholder id in the session: what a fresh stable id for any of
-/// those spaces must clear.
-pub fn next_session_id(slides: &[Slide], masters: &[MasterSlide]) -> u64 {
-    max_id(slides).max(max_master_id(masters)) + 1
+/// Give every theme without an id a fresh one, after every slide, object,
+/// master, layout and placeholder id in the session, so the one session
+/// id space stays collision-free. Readers call this once after import
+/// alongside [`ensure_all_ids`]; assigned ids never change. Idempotent.
+pub fn ensure_theme_ids(slides: &[Slide], masters: &[MasterSlide], themes: &mut [crate::engine::theme::Theme]) {
+    let mut next = max_id(slides)
+        .max(max_master_id(masters))
+        .max(themes.iter().map(|t| t.id).max().unwrap_or(0))
+        + 1;
+    for t in themes.iter_mut() {
+        if t.id == 0 {
+            t.id = next;
+            next += 1;
+        }
+    }
 }
 
 fn slide_pos(slides: &[Slide], id: u64) -> Option<usize> {
@@ -513,7 +518,8 @@ mod tests {
             background: bg.into(),
             default_font: "Sans".into(),
             shapes: vec![SlideObject::Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0, rotation: 0.0 }],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         };
         let mut doc = DeckDoc { slides: vec![slide("a", 1)], masters: vec![master("#ffffff")] };

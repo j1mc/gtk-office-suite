@@ -161,6 +161,9 @@ pub(crate) fn read_page_layouts(xml: &str, scale: (f64, f64)) -> Vec<PageLayout>
                     y: g("svg:y") * scale.1,
                     w: g("svg:width") * scale.0,
                     h: g("svg:height") * scale.1,
+                    // ODF has no placeholder indices: match by role alone.
+                    source_ty: String::new(),
+                    source_idx: None,
                 });
             }
             Ok(Event::End(e)) if e.name().as_ref() == "style:presentation-page-layout" => {
@@ -190,7 +193,8 @@ mod tests {
             background: "#ffffff".into(),
             default_font: "Sans".into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: crate::layouts::standard(),
         };
         let xml = format!(

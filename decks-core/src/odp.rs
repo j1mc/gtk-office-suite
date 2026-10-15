@@ -60,15 +60,17 @@ fn rotate_point(a: f64, x: f64, y: f64) -> (f64, f64) {
 
 thread_local! {
     // Points per model unit across and down, for the deck being written:
-    // its page (`MasterSlide::page_emu`) over the model's 960x540. A deck
+    // its page (`Deck.page_size`, DCK-006) over the model's 960x540. A deck
     // with no size of its own is written on this writer's 960x540pt page,
     // one point to the unit. `write_bytes` sets it for the length of a write.
     static PAGE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((1.0, 1.0)) };
 }
 
-/// The page this writer puts `deck` on, in points.
+/// The page this writer puts `deck` on, in points: the deck's own size
+/// (DCK-006), never a first-master fallback. A deck with no size of its
+/// own goes on the writer's 960x540pt page, one point to the unit.
 fn page_pt(deck: &Deck) -> (f64, f64) {
-    match deck.masters.first().and_then(|m| m.page_emu) {
+    match deck.page_size {
         Some((cx, cy)) if cx > 0.0 && cy > 0.0 => (cx / 12700.0, cy / 12700.0),
         _ => DEFAULT_PAGE_PT,
     }
@@ -1507,7 +1509,7 @@ fn parse_pages(
     let mut paras: Vec<crate::engine::ParaStyle> = Vec::new();
     let body_of = |frame_style: &Option<String>, paras: &mut Vec<crate::engine::ParaStyle>| {
         let (anchor, insets) = text_defs.frame(frame_style.as_deref(), scale);
-        crate::engine::TextBody { paras: std::mem::take(paras), anchor, insets, autofit: None, placeholder: None, frame: None }
+        crate::engine::TextBody { paras: std::mem::take(paras), anchor, insets, autofit: None, placeholder: None, placeholder_key: None, frame: None }
     };
 
     // `svg:x`/`svg:y` place an unrotated shape; a rotated one carries
@@ -1581,9 +1583,11 @@ fn parse_pages(
                     ids.clear();
                     last_id = None;
                     builds = Default::default();
+                    // Absence stays empty (inherits): never white smuggled
+                    // in at import (DCK-006).
                     let bg = attr(e, "draw:style-name")
                         .and_then(|n| page_bg.get(&n).cloned())
-                        .unwrap_or_else(|| "#ffffff".into());
+                        .unwrap_or_default();
                     // A slide is named by draw:name; a master page by its
                     // style:name, which is an ODF style token and so is
                     // escaped (LibreOffice writes "Title_20_Slide").
@@ -1990,12 +1994,13 @@ pub fn read(path: &str) -> Result<Deck, String> {
     // Read before any coordinate, since every one of them is relative to it.
     let page_pt = parse_page_size_pt(&styles).unwrap_or(DEFAULT_PAGE_PT);
     let scale = (960.0 / page_pt.0, 540.0 / page_pt.1);
-    // The page size, kept for a pptx save (12700 EMU to the point). This
-    // writer's own page is 960x540pt, left as the default.
-    let page_emu = (page_pt != DEFAULT_PAGE_PT).then_some((page_pt.0 * 12700.0, page_pt.1 * 12700.0));
+    // The page size, kept once on the deck for a pptx save (12700 EMU to
+    // the point, DCK-006). This writer's own page is 960x540pt, left as
+    // the default.
+    let page_size = (page_pt != DEFAULT_PAGE_PT).then_some((page_pt.0 * 12700.0, page_pt.1 * 12700.0));
 
-    let doc_font = parse_default_graphic_font(&styles)
-        .unwrap_or_else(|| MasterSlide::DEFAULT_FONT.into());
+    // Absence stays empty (draw-time Sans): never Sans at import (DCK-006).
+    let doc_font = parse_default_graphic_font(&styles).unwrap_or_default();
 
     let charts = read_chart_objects(&mut zip, &mut budget);
 
@@ -2036,7 +2041,9 @@ pub fn read(path: &str) -> Result<Deck, String> {
             background: page.slide.background,
             default_font: doc_font.clone(),
             shapes: page.slide.objects,
-            page_emu: None,
+            // ODP has no theme parts: resolves against the default.
+            theme_id: None,
+            color_map: Default::default(),
             layouts: mine.into_iter().map(|p| p.layout.clone()).collect(),
         });
         // Stable master, layout and placeholder ids, minted once at
@@ -2077,15 +2084,13 @@ pub fn read(path: &str) -> Result<Deck, String> {
             background: "#ffffff".into(),
             default_font: doc_font.clone(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         });
     }
 
-    for m in &mut masters {
-        m.page_emu = page_emu;
-    }
-    let mut deck = Deck { slides: Vec::new(), masters };
+    let mut deck = Deck { slides: Vec::new(), masters, page_size, themes: Vec::new() };
     let slide_pages = {
         let mut resolve = |href: &str| extract_picture(href, &mut zip, &mut budget);
         parse_pages(&content, "draw:page", &page_bg, &text_styles, &text_defs, &graphic_defs, scale, &mut resolve, &charts, &mut fresh)?
@@ -2386,7 +2391,8 @@ mod tests {
                 background: "#204060".into(),
                 default_font: "Sans".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
             slides: vec![Slide {
@@ -2400,6 +2406,8 @@ mod tests {
                 ids: Default::default(),
                 layout_id: None,
             }],
+            page_size: None,
+            themes: Vec::new(),
         };
         let styles = styles_xml(&deck, &mut Vec::new()).unwrap();
         assert!(styles.contains("draw:fill-color=\"#204060\""), "{styles}");
@@ -2434,7 +2442,8 @@ mod tests {
                 background: "#ffffff".into(),
                 default_font: "Sans".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
             slides: vec![Slide {
@@ -2455,6 +2464,8 @@ mod tests {
                 ids: Default::default(),
                 layout_id: None,
             }],
+            page_size: None,
+            themes: Vec::new(),
         }
     }
 
@@ -2915,9 +2926,12 @@ mod default_font_tests {
                 background: "#ffffff".into(),
                 default_font: "Liberation Serif".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
+            page_size: None,
+            themes: Vec::new(),
         };
         let xml = super::styles_xml(&deck, &mut Vec::new()).unwrap();
         assert!(
@@ -2945,9 +2959,12 @@ mod default_font_tests {
                 background: "#ffffff".into(),
                 default_font: "   ".into(),
                 shapes: vec![],
-                page_emu: None,
+                theme_id: None,
+                color_map: Default::default(),
                 layouts: Vec::new(),
             }],
+            page_size: None,
+            themes: Vec::new(),
         };
         let xml = super::styles_xml(&deck, &mut Vec::new()).unwrap();
         assert!(!xml.contains("style:font-name=\"\""), "no empty font name: {xml}");

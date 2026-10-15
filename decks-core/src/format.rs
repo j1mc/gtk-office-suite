@@ -9,6 +9,7 @@
 // `ObjectFormat::of`.
 
 use crate::engine::shape::{Color, ShapeKind, ShapeStyle, Stroke};
+use crate::engine::theme::{ColorRef, FillSrc, StrokeSrc};
 use crate::engine::{Anchor, Bullet, ParaAlign, ParaStyle, Run, RunStyle, SlideObject};
 use crate::undo::{obj_bounds, obj_rotation, set_obj_bounds, set_obj_rotation};
 
@@ -172,7 +173,7 @@ fn promote(obj: &mut SlideObject) {
             w: *w,
             h: *h,
             rotation: *rotation,
-            style: ShapeStyle { fill: Some(PLAIN_RECT), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(PLAIN_RECT), gradient: None, stroke: None, fill_src: Some(FillSrc::Color(ColorRef::Rgb(PLAIN_RECT.to_hex()))), stroke_src: None },
         },
         SlideObject::Circle { x, y, r, rotation } => SlideObject::Shape {
             kind: ShapeKind::Ellipse,
@@ -181,7 +182,7 @@ fn promote(obj: &mut SlideObject) {
             w: *r * 2.0,
             h: *r * 2.0,
             rotation: *rotation,
-            style: ShapeStyle { fill: Some(PLAIN_CIRCLE), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(PLAIN_CIRCLE), gradient: None, stroke: None, fill_src: Some(FillSrc::Color(ColorRef::Rgb(PLAIN_CIRCLE.to_hex()))), stroke_src: None },
         },
         _ => return,
     };
@@ -244,16 +245,31 @@ pub fn apply_edit(obj: &mut SlideObject, edit: &FormatEdit) {
                     FormatEdit::Fill(c) => {
                         style.fill = *c;
                         style.gradient = None;
+                        // A user-picked fill is an explicit local: a colour
+                        // keeps its literal reference, no-fill is explicit.
+                        style.fill_src = Some(match c {
+                            Some(color) => FillSrc::Color(ColorRef::Rgb(color.to_hex())),
+                            None => FillSrc::NoFill,
+                        });
                     }
                     FormatEdit::OutlineColor(c) => {
                         let width = style.stroke.map_or(1.0, |s| s.width);
                         style.stroke = Some(Stroke { color: *c, width });
+                        style.stroke_src = Some(StrokeSrc::Color(ColorRef::Rgb(c.to_hex())));
                     }
                     FormatEdit::OutlineWidth(w) => {
                         let color = style.stroke.map_or(Color(0, 0, 0), |s| s.color);
                         style.stroke = Some(Stroke { color, width: w.max(0.0) });
+                        // A user-touched outline is a local override: keep
+                        // a carried reference, otherwise pin the colour.
+                        if style.stroke_src.is_none() {
+                            style.stroke_src = Some(StrokeSrc::Color(ColorRef::Rgb(color.to_hex())));
+                        }
                     }
-                    FormatEdit::NoOutline => style.stroke = None,
+                    FormatEdit::NoOutline => {
+                        style.stroke = None;
+                        style.stroke_src = Some(StrokeSrc::NoLine);
+                    }
                     FormatEdit::Kind(k) => *kind = k.clone(),
                     _ => {}
                 }

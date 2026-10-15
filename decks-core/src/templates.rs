@@ -8,6 +8,7 @@
 // from one saves and reopens like any other.
 
 use crate::engine::shape::{Color, GradientStop, LinearGradient, ShapeKind, ShapeStyle};
+use crate::engine::theme::{ColorRef, FillSrc};
 use crate::engine::text_body::{Anchor, Bullet, ParaAlign, ParaStyle, TextBody};
 use crate::engine::{MasterSlide, Slide, SlideObject};
 use crate::layouts::Placeholder;
@@ -35,7 +36,9 @@ struct Theme {
 }
 
 fn filled(kind: ShapeKind, (x, y, w, h): (f64, f64, f64, f64), fill: Color) -> SlideObject {
-    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None } }
+    // An authored fill is an explicit local, kept as a literal reference.
+    let fill_src = Some(FillSrc::Color(ColorRef::Rgb(fill.to_hex())));
+    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None, fill_src, stroke_src: None } }
 }
 
 fn none() -> Vec<SlideObject> {
@@ -53,7 +56,7 @@ fn ocean() -> Vec<SlideObject> {
         w: 960.0,
         h: 540.0,
         rotation: 0.0,
-        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None },
+        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None, fill_src: None, stroke_src: None },
     }]
 }
 
@@ -179,8 +182,9 @@ pub fn deck(index: usize) -> Option<(Vec<Slide>, Vec<MasterSlide>)> {
         background: theme.background.into(),
         default_font: theme.font.into(),
         shapes: (theme.decorations)(),
-        // Our default 16:9 slide.
-        page_emu: None,
+        // Authored without a theme part: resolves against the default.
+        theme_id: None,
+        color_map: Default::default(),
         // The standard six: the title slide is on the first, the bulleted
         // one on Title and Content, in exactly their places.
         layouts: crate::layouts::standard(),
@@ -242,7 +246,7 @@ mod tests {
             let (slides, masters) = deck(i).unwrap();
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("t.pptx");
-            let d = crate::engine::Deck { slides, masters };
+            let d = crate::engine::Deck { slides, masters, page_size: None, themes: Vec::new() };
             crate::engine::write_pptx(path.to_str().unwrap(), &d).unwrap();
             let back = crate::engine::read_pptx(path.to_str().unwrap()).unwrap();
             assert_eq!(back.slides.len(), 2, "template {i}");

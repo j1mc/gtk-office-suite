@@ -125,6 +125,30 @@ pub struct LayoutPlaceholder {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// The source placeholder this place was read from (DCK-006): the
+    /// `p:ph` type as written (`title`, `ctrTitle`, `body`, `obj` …)
+    /// and its `idx`, when the part states them. `arrange` matches a
+    /// slide box carrying the same source key to this place before
+    /// falling back to nth-of-role, so duplicate body placeholders
+    /// (two `obj` boxes with different indices) survive a layout
+    /// application on their own places instead of collapsing onto the
+    /// first. Absent for authored layouts and ODP layouts, which match
+    /// by role alone, as before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_ty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_idx: Option<u32>,
+}
+
+/// A slide text box's source placeholder (DCK-006): the `p:ph` type and
+/// `idx` the part stated, kept on [`crate::engine::TextBody`] so
+/// [`arrange`] can match the box back to its layout place by stable
+/// source identity rather than by nth body alone.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlaceholderKey {
+    pub ty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idx: Option<u32>,
 }
 
 /// One layout of a master.
@@ -144,7 +168,7 @@ pub struct Layout {
 }
 
 fn ph(role: Placeholder, x: f64, y: f64, w: f64, h: f64) -> LayoutPlaceholder {
-    LayoutPlaceholder { id: 0, role, x, y, w, h }
+    LayoutPlaceholder { id: 0, role, x, y, w, h, source_ty: String::new(), source_idx: None }
 }
 
 fn layout(name: &str, kind: LayoutKind, placeholders: Vec<LayoutPlaceholder>) -> Layout {
@@ -184,6 +208,30 @@ pub fn effective_master(master: &MasterSlide, layout_id: Option<u64>) -> MasterS
     m
 }
 
+/// The background colour everything falls back to when no level states
+/// one: white. The one documented fallback in the slide → layout →
+/// master → theme precedence (DCK-006). Import never writes this into
+/// the model (an absent background stays empty); renderers and writers
+/// apply it at the border.
+pub const FALLBACK_BACKGROUND: &str = "#ffffff";
+
+/// A slide's background as drawn: its own when it states one, else its
+/// layout's, else its master's, else [`FALLBACK_BACKGROUND`]. Empty
+/// means absent at every level — never white smuggled in at import.
+/// An explicit white slide on a coloured master stays white.
+pub fn resolve_background<'a>(slide_bg: &'a str, layout_bg: Option<&'a str>, master_bg: &'a str) -> &'a str {
+    if !slide_bg.is_empty() {
+        return slide_bg;
+    }
+    if let Some(bg) = layout_bg.filter(|b| !b.is_empty()) {
+        return bg;
+    }
+    if !master_bg.is_empty() {
+        return master_bg;
+    }
+    FALLBACK_BACKGROUND
+}
+
 /// The placeholder a slide object fills, if any.
 pub fn role_of(o: &SlideObject) -> Option<Placeholder> {
     match o {
@@ -207,17 +255,63 @@ pub fn empty_placeholder(p: &LayoutPlaceholder) -> SlideObject {
 }
 
 /// Slide `s`'s objects on `layout`: its placeholder boxes moved to the
-/// layout's places (the n-th box of a role to the n-th place of it), a
-/// box added for each place left over, and a box with no place left where
-/// it is, no longer a placeholder.
+/// layout's places, a box added for each place left over, and a box
+/// with no place left where it is, no longer a placeholder.
+///
+/// A box carrying its source placeholder key (`TextBody::placeholder_key`,
+/// kept by the readers) matches by stable source identity first — same
+/// type and index, then same type — so duplicate body placeholders
+/// (two `obj` boxes with different indices) keep their own places.
+/// A box with no key, or with no keyed place left, falls back to the
+/// n-th box of a role to the n-th place of it, as before.
 pub fn arrange(s: &Slide, layout: &Layout) -> Vec<SlideObject> {
+    let key_of = |o: &SlideObject| -> Option<(Placeholder, Option<PlaceholderKey>)> {
+        match o {
+            SlideObject::TextBox { body, .. } => body.placeholder.map(|role| (role, body.placeholder_key.clone())),
+            _ => None,
+        }
+    };
+    // The score of place `p` for a box with source key `key`: exact
+    // (type, index) beats same type; nothing else matches. `None` never
+    // matches, so keyless boxes and keyless places only meet on the
+    // role fallback below.
+    let score = |p: &LayoutPlaceholder, key: Option<&PlaceholderKey>| -> Option<u8> {
+        let key = key?;
+        if key.ty.is_empty() || key.ty != p.source_ty {
+            return None;
+        }
+        if key.idx.is_some() && key.idx == p.source_idx {
+            return Some(0);
+        }
+        if !p.source_ty.is_empty() {
+            return Some(1);
+        }
+        None
+    };
     let mut used = vec![false; layout.placeholders.len()];
     let mut out: Vec<SlideObject> = s
         .objects
         .iter()
         .map(|o| {
-            let Some(role) = role_of(o) else { return o.clone() };
-            let place = layout.placeholders.iter().enumerate().find(|(i, p)| !used[*i] && p.role == role).map(|(i, p)| (i, p.clone()));
+            let Some((role, key)) = key_of(o) else { return o.clone() };
+            // Best keyed match first; role fallback only when no keyed
+            // place is left for this box.
+            let mut best: Option<(u8, usize)> = None;
+            for (i, p) in layout.placeholders.iter().enumerate() {
+                if used[i] {
+                    continue;
+                }
+                if let Some(q) = score(p, key.as_ref()) {
+                    if best.map_or(true, |(b, _)| q < b) {
+                        best = Some((q, i));
+                    }
+                }
+            }
+            let place = best
+                .map(|(_, i)| (i, layout.placeholders[i].clone()))
+                .or_else(|| {
+                    layout.placeholders.iter().enumerate().find(|(i, p)| !used[*i] && p.role == role).map(|(i, p)| (i, p.clone()))
+                });
             let mut o = o.clone();
             if let SlideObject::TextBox { x, y, w, h, body, .. } = &mut o {
                 match place {
@@ -308,7 +402,8 @@ mod tests {
             background: "#ffffff".into(),
             default_font: "Sans".into(),
             shapes: vec![SlideObject::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, rotation: 0.0 }],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: standard(),
         };
         let mut masters = vec![m];
@@ -337,5 +432,60 @@ mod tests {
         for l in standard() {
             assert_eq!(LayoutKind::from_pptx(Some(l.kind.to_pptx())), l.kind);
         }
+    }
+
+    #[test]
+    fn backgrounds_resolve_slide_over_layout_over_master_over_fallback() {
+        assert_eq!(resolve_background("#112233", Some("#445566"), "#778899"), "#112233");
+        assert_eq!(resolve_background("", Some("#445566"), "#778899"), "#445566");
+        assert_eq!(resolve_background("", None, "#778899"), "#778899");
+        assert_eq!(resolve_background("", None, ""), FALLBACK_BACKGROUND);
+        // An explicit white slide on a coloured master stays white.
+        assert_eq!(resolve_background("#ffffff", None, "#0b3d6b"), "#ffffff");
+    }
+
+    #[test]
+    fn duplicate_body_placeholders_keep_their_own_places_by_source_index() {
+        // Two `obj` places with different indices, and two boxes that
+        // filled them — in swapped z-order, so nth-of-role alone would
+        // cross them.
+        let mut layout = Layout {
+            id: 3,
+            name: "Two".into(),
+            kind: LayoutKind::TwoContent,
+            background: None,
+            shapes: Vec::new(),
+            placeholders: vec![
+                LayoutPlaceholder { id: 1, role: Placeholder::Body, x: 10.0, y: 10.0, w: 100.0, h: 100.0, source_ty: "obj".into(), source_idx: Some(1) },
+                LayoutPlaceholder { id: 2, role: Placeholder::Body, x: 200.0, y: 10.0, w: 100.0, h: 100.0, source_ty: "obj".into(), source_idx: Some(2) },
+            ],
+        };
+        let keyed = |idx: u32, text: &str| SlideObject::TextBox {
+            text: text.into(),
+            x: 1.0, y: 2.0, w: 3.0, h: 4.0, rotation: 0.0, runs: vec![],
+            body: TextBody {
+                placeholder: Some(Placeholder::Body),
+                placeholder_key: Some(PlaceholderKey { ty: "obj".into(), idx: Some(idx) }),
+                ..Default::default()
+            },
+        };
+        let out = arrange(&slide(vec![keyed(2, "second"), keyed(1, "first")]), &layout);
+        let at: Vec<(&str, f64)> = out
+            .iter()
+            .filter_map(|o| match o {
+                SlideObject::TextBox { text, x, .. } => Some((text.as_str(), *x)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(at, vec![("second", 200.0), ("first", 10.0)], "index wins over position: {at:?}");
+        // Keyless boxes still match nth-of-role.
+        layout.placeholders[0].source_ty.clear();
+        layout.placeholders[1].source_ty.clear();
+        let out = arrange(&slide(vec![boxed(Some(Placeholder::Body), "a"), boxed(Some(Placeholder::Body), "b")]), &layout);
+        let texts: Vec<&str> = out.iter().filter_map(|o| match o {
+            SlideObject::TextBox { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(texts, vec!["a", "b"]);
     }
 }

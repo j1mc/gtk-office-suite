@@ -484,6 +484,8 @@ mod tests {
                 layout_id: None,
             }],
             masters: vec![],
+            page_size: None,
+            themes: Vec::new(),
         };
         crate::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
         deck
