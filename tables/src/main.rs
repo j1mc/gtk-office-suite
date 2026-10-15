@@ -8,6 +8,7 @@ mod window;
 mod format_inspector;
 mod number_format_editor;
 mod formula_bar;
+mod name_box;
 mod column_menu;
 mod notes;
 mod validation_list;
