@@ -72,16 +72,8 @@ gtk-office-suite is the org's flagship **end-user product bet** and a cornerston
   | file | lines | ceiling |
   |---|---|---|
   | `tables/src/window.rs` | 2168 | 2300 |
-<<<<<<< HEAD
   | `decks/src/window.rs` | 1598 | 1800 |
-  | `letters/src/window.rs` | 1170 | 1300 |
-||||||| parent of e390cd4f (LET-005: update measured window.rs count (1186, ceiling 1300 unchanged))
-  | `decks/src/window.rs` | 1597 | 1800 |
-  | `letters/src/window.rs` | 1170 | 1300 |
-=======
-  | `decks/src/window.rs` | 1597 | 1800 |
   | `letters/src/window.rs` | 1186 | 1300 |
->>>>>>> e390cd4f (LET-005: update measured window.rs count (1186, ceiling 1300 unchanged))
 
   The ceilings are enforced by `scripts/release_gate.py`, and
   `tests/test_roadmap_figures.py` checks this table against the files, so the
