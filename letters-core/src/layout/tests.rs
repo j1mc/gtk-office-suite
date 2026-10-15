@@ -825,7 +825,8 @@ fn tab_requests_carry_alignment_and_default_grid() {
     let mut d = doc_of(1, "a\tb");
     d.paragraphs[0].style.tab_stops_pt =
         vec![TabStop { pos_pt: 100.0, align: TabAlign::Right, leader: TabLeader::Dot }];
-    let req = paragraph_request(&d.paragraphs[0], 400.0, &opts());
+    let o = opts();
+    let req = paragraph_request(&d.paragraphs[0], 400.0, &o);
     assert_eq!(req.tab_stops[0], TabStop { pos_pt: 100.0, align: TabAlign::Right, leader: TabLeader::Dot });
     // Word's default grid resumes past the paragraph's own stops.
     assert_eq!(req.tab_stops[1], TabStop::left(108.0));

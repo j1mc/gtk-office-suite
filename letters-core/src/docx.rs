@@ -152,16 +152,12 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                             list = None;
                         }
                     }
-                    "w:pPr" => {
-                        if in_para {
-                            ppr_depth += 1;
-                        }
+                    "w:pPr" if in_para => {
+                        ppr_depth += 1;
                     }
                     "w:rPr" => rpr_depth += 1,
-                    "w:pBdr" => {
-                        if in_para && ppr_depth == 1 {
-                            in_pbdr = true;
-                        }
+                    "w:pBdr" if in_para && ppr_depth == 1 => {
+                        in_pbdr = true;
                     }
                     _ => {}
                 },

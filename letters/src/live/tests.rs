@@ -414,15 +414,18 @@ fn revisions_advance_one_per_edit_and_undo() {
 /// every document-level field, has to come back exactly as it went in.
 fn every_field() -> Document {
     use letters_core::model::{BaseFont, PageGeometry, VertAlign};
-    use letters_core::{Alignment, Comment, ListKind, ParaStyle, Paragraph, Run, RunStyle};
+    use letters_core::{Alignment, Comment, ListKind, ParaStyle, Paragraph, Run, RunStyle, TabStop};
     let run = |text: &str, style: RunStyle| Run { text: text.into(), style };
     let para = |style: ParaStyle, runs: Vec<Run>| Paragraph { style, runs };
     let mut d = Document::from_plain_text("");
     d.paragraphs = vec![
         para(ParaStyle { heading: Some(1), ..Default::default() }, vec![run("A heading", RunStyle::default())]),
         para(ParaStyle { alignment: Alignment::Justify, line_spacing: 1.5, space_before_pt: 6.0, space_after_pt: 12.0,
-            left_indent_pt: 18.0, right_indent_pt: 9.0, first_line_indent_pt: 12.0, tab_stops_pt: vec![72.0, 144.0],
-            keep_with_next: true, ..Default::default() }, vec![
+            left_indent_pt: 18.0, right_indent_pt: 9.0, first_line_indent_pt: 12.0, tab_stops_pt: vec![TabStop::left(72.0), TabStop::left(144.0)],
+            keep_with_next: true, keep_lines: true, widow_control: Some(false),
+            line_height: Some(letters_core::LineHeight::Minimum(18.0)), shading: Some("D9D9D9".into()),
+            borders: letters_core::ParaBorders { bottom: Some(letters_core::ParaBorder { style: letters_core::BorderStyle::Single, color: "000000".into(), width_pt: 0.75 }), ..Default::default() },
+            ..Default::default() }, vec![
             run("bold ", RunStyle { bold: true, ..Default::default() }),
             run("italic ", RunStyle { italic: true, underline: true, ..Default::default() }),
             run("struck ", RunStyle { strikethrough: true, highlight: true, ..Default::default() }),

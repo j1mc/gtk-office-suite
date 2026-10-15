@@ -448,7 +448,8 @@ fn bullet_path(cr: &cairo::Context, x: f64, baseline: f64, size: f64) {
 
 /// How far a double border's inner hairline sits from its outer one: one
 /// full edge width toward the box's centre.
-fn edge_offset(x0: f64, y0: f64, x1: f64, y1: f64, left: f64, top: f64, right: f64, bottom: f64, by: f64) -> (f64, f64) {
+fn edge_offset((x0, y0): (f64, f64), (x1, y1): (f64, f64), bounds: (f64, f64, f64, f64), by: f64) -> (f64, f64) {
+    let (left, top, right, bottom) = bounds;
     let (dx, dy) = ((left + right) / 2.0 - (x0 + x1) / 2.0, (top + bottom) / 2.0 - (y0 + y1) / 2.0);
     let len = (dx * dx + dy * dy).sqrt().max(1e-6);
     (dx / len * by, dy / len * by)
@@ -935,15 +936,13 @@ impl Typeset {
     fn draw_para_box(
         &self,
         cr: &cairo::Context,
-        x: f64,
-        y: f64,
-        w: f64,
-        h: f64,
+        rect: (f64, f64, f64, f64),
         fill: Option<&str>,
         borders: &crate::model::ParaBorders,
         top_edge: bool,
         bottom_edge: bool,
     ) {
+        let (x, y, w, h) = rect;
         use crate::model::BorderStyle;
         if let Some((r, g, b)) = fill.and_then(parse_hex) {
             let _ = cr.save();
@@ -991,7 +990,7 @@ impl Typeset {
                     // inside the box.
                     let inner = lw / 3.0;
                     cr.set_line_width(inner.max(0.25));
-                    let (dx, dy) = edge_offset(x0, y0, x1, y1, x, y, x + w, y + h, lw);
+                    let (dx, dy) = edge_offset((x0, y0), (x1, y1), (x, y, x + w, y + h), lw);
                     cr.move_to(x0, y0);
                     cr.line_to(x1, y1);
                     let _ = cr.stroke();
@@ -1142,7 +1141,8 @@ impl Typeset {
                     let _ = cr.restore();
                 }
                 Item::ParaBox { x_pt, y_pt, width_pt, height_pt, fill, borders, top_edge, bottom_edge, .. } => {
-                    self.draw_para_box(cr, *x_pt, *y_pt, *width_pt, *height_pt, fill.as_deref(), borders, *top_edge, *bottom_edge);
+                    let rect = (*x_pt, *y_pt, *width_pt, *height_pt);
+                    self.draw_para_box(cr, rect, fill.as_deref(), borders, *top_edge, *bottom_edge);
                 }
             }
         }

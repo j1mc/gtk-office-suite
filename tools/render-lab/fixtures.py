@@ -288,13 +288,16 @@ def letters(img):
     save(x, "indents", "First paragraph has a 0.5in first-line indent; second is indented 1in on the left")
 
     x = doc()
-    for n in range(44):
+    # 22 fillers leave room for a few lines but not the ten-line kept
+    # paragraph, so keeping together must move it whole; without the
+    # flag orphan/widow control would split it across the break.
+    for n in range(22):
         x.add_paragraph(f"Filler line {n + 1}")
-    p = x.add_paragraph(("Kept together. " + LOREM) * 3)
+    p = x.add_paragraph(("Kept together. " + LOREM) * 5)
     p.paragraph_format.keep_together = True
     p = x.add_paragraph(("No widow control. " + LOREM) * 3)
     p.paragraph_format.widow_control = False
-    save(x, "keep-widow", "A six-line paragraph kept together moves whole past the page break; the next allows widowed lines")
+    save(x, "keep-widow", "A ten-line paragraph kept together moves whole past the page break; the next allows widowed lines")
 
     x = doc()
     p = x.add_paragraph(LOREM * 2)
