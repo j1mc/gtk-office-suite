@@ -87,7 +87,6 @@ EXPORT = {
     "letters/paragraph-spacing",
     "letters/page-margins",
     "letters/landscape",
-    "letters/mixed-sections",
     "letters/page-break",
     "letters/pagination",
     "letters/footnotes",
