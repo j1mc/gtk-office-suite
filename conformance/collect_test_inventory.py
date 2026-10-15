@@ -137,7 +137,11 @@ def parse_pytest_junit(text: str, prefix: str) -> tuple:
             if not cls[:1].isupper():
                 # A module-level test function: the whole classname is the module.
                 module, cls = classname, ""
-            path = f"{prefix.rstrip('/')}/{module.replace('.', '/')}.py"
+            # An empty prefix is a run from the repository root, where
+            # pytest already names the module by its repo-relative path
+            # (`tests.test_x.Class`).
+            module_path = f"{module.replace('.', '/')}.py"
+            path = f"{prefix.rstrip('/')}/{module_path}" if prefix else module_path
             test_id = f"{path}::{cls}::{name}" if cls else f"{path}::{name}"
             covers.add(test_id)
             outcome = "passed"
@@ -167,27 +171,45 @@ def main(argv=None) -> int:
     parser.add_argument("--pytest-junit", action="append", default=[], metavar="PREFIX=FILE",
                         help="pytest JUnit XML from tests run in PREFIX; contributes ids and "
                              "outcomes for the files it holds (repeatable)")
+    parser.add_argument("--pytest-selected", action="append", default=[],
+                        metavar="PREFIX=FILE",
+                        help="output of `pytest --collect-only -q` with the lane's own "
+                             "selection (-k) applied: collected tests it lacks are recorded "
+                             "as deselected, so they are reported rather than missing "
+                             "(repeatable; give every file the lane ran)")
+    parser.add_argument("--revision",
+                        help="the revision this run tested; recorded so a validator can "
+                             "refuse an inventory from another revision (--candidate)")
     parser.add_argument("--results-out", help="write the id->outcome map here")
     parser.add_argument("--out", default="-", help="write the inventory here, or - for stdout")
     args = parser.parse_args(argv)
+
+    def read(spec, flag):
+        prefix, _, path = spec.partition("=")
+        if not path:
+            parser.error(f"{flag} expects PREFIX=FILE, got {spec!r}")
+        try:
+            with open(path) as f:
+                return prefix, f.read()
+        except FileNotFoundError:
+            # A report that is not there is a run that did not finish. Say
+            # so instead of producing an inventory that is merely smaller.
+            parser.error(f"{flag} {path}: no such report — the run that should have "
+                         "written it did not finish")
 
     tests = []
     covers = []
     results = {}
     for spec in args.cargo:
-        crate, _, path = spec.partition("=")
-        if not path:
-            parser.error(f"--cargo expects PREFIX=FILE, got {spec!r}")
+        crate, text = read(spec, "--cargo")
         covers.append(f"{crate}::")
-        with open(path) as f:
-            tests += parse_cargo(f.read(), crate)
+        tests += parse_cargo(text, crate)
+    pytest_collected = []
     for spec in args.pytest:
-        prefix, _, path = spec.partition("=")
-        if not path:
-            parser.error(f"--pytest expects PREFIX=FILE, got {spec!r}")
-        with open(path) as f:
-            collected = parse_pytest(f.read(), prefix)
+        prefix, text = read(spec, "--pytest")
+        collected = parse_pytest(text, prefix)
         tests += collected
+        pytest_collected += collected
         # The namespaces are the files actually collected, not the
         # directory they live under. A lane that runs a named list of
         # files under tests/ does not speak for all of tests/ — declaring
@@ -195,29 +217,38 @@ def main(argv=None) -> int:
         # nothing collects, which is the hole #313's lane map closes.
         covers += sorted({f"{test.split('::')[0]}::" for test in collected})
     for spec in args.junit:
-        prefix, _, path = spec.partition("=")
-        if not path:
-            parser.error(f"--junit expects PREFIX=FILE, got {spec!r}")
-        with open(path) as f:
-            outcomes, seen = parse_junit(f.read())
+        prefix, text = read(spec, "--junit")
+        outcomes, seen = parse_junit(text)
         covers += seen if not prefix else [prefix]
         tests += outcomes.keys()
         results.update(outcomes)
 
     for spec in args.pytest_junit:
-        prefix, _, path = spec.partition("=")
-        if not path:
-            parser.error(f"--pytest-junit expects PREFIX=FILE, got {spec!r}")
-        with open(path) as f:
-            outcomes, seen = parse_pytest_junit(f.read(), prefix)
+        prefix, text = read(spec, "--pytest-junit")
+        outcomes, seen = parse_pytest_junit(text, prefix)
         covers += seen
         tests += outcomes.keys()
         results.update(outcomes)
+
+    selected = []
+    for spec in args.pytest_selected:
+        prefix, text = read(spec, "--pytest-selected")
+        listed = parse_pytest(text, prefix)
+        if not listed:
+            # Everything collected and absent from the selection is
+            # excused, so an empty listing would excuse the whole lane.
+            parser.error(f"--pytest-selected {spec}: the selection lists no tests, which "
+                         "would excuse every collected one")
+        selected += listed
 
     # Which id namespaces this inventory can speak for. Without it a
     # validator run holding only the Rust listing would report every
     # pytest id as missing, which is a false alarm rather than a finding.
     inventory = {"covers": sorted(set(covers)), "tests": sorted(set(tests))}
+    if args.pytest_selected:
+        inventory["deselected"] = sorted(set(pytest_collected) - set(selected))
+    if args.revision:
+        inventory["revision"] = args.revision
     if args.results_out:
         with open(args.results_out, "w") as f:
             json.dump(results, f, indent=2, sort_keys=True)
@@ -228,7 +259,9 @@ def main(argv=None) -> int:
     else:
         with open(args.out, "w") as f:
             f.write(text + "\n")
-        print(f"{len(inventory['tests'])} collected tests written to {args.out}")
+        deselected = len(inventory.get("deselected", []))
+        print(f"{len(inventory['tests'])} collected tests written to {args.out}"
+              + (f" ({deselected} deselected by the lane's selection)" if deselected else ""))
     return 0
 
 
