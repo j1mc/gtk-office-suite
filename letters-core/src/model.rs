@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::sections::{DocSection, ParagraphRange};
+
 /// Character-level formatting. `Default` is unstyled text.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStyle {
@@ -591,6 +593,19 @@ pub struct Document {
     /// (`w:shd`, `fo:background-color`). A cell not listed is unshaded.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_fills: std::collections::BTreeMap<u32, Vec<CellFill>>,
+    /// The document's sections when its parts have different pages,
+    /// headers or footers (`crate::sections`, LET-005S); empty for a
+    /// document of one section, whose page is `page`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<DocSection>,
+    /// The id the next new section takes: ids are never given twice, so
+    /// one deleted and undone is still its own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next_section_id: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A merged table cell: the cell at `row`, `col` spans `rows` rows and
@@ -714,6 +729,8 @@ impl Document {
             table_rows: Default::default(),
             table_spans: Default::default(),
             table_fills: Default::default(),
+            sections: Vec::new(),
+            next_section_id: 0,
         }
     }
 

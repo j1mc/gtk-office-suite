@@ -297,6 +297,37 @@ def test_the_ceilings_are_actually_read():
     assert len(paths) >= 4, paths
 
 
+def release_inputs():
+    """RELEASE_INPUTS of the contract job's scope step: the git pathspecs whose
+    change starts the release builds on a pull request."""
+    import yaml
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["contract"]["steps"]
+    scope = next(step for step in steps if step.get("id") == "scope")
+    found = scope["env"]["RELEASE_INPUTS"].split()
+    assert found, "RELEASE_INPUTS parsed as empty, so this test would check nothing"
+    return found
+
+
+def test_the_release_builds_run_for_every_trigger_but_the_ceilings():
+    """A ceiling-only change runs the contract and nothing else; any other
+    path the workflow triggers on is a release input and runs the builds.
+    Two lists in one file drift, so they are held to each other here."""
+    triggers = {pattern.removesuffix("/**") for pattern in trigger_paths()}
+    assert set(release_inputs()) == triggers - ceiling_paths(), (
+        "release-gate.yml's RELEASE_INPUTS must be its pull_request paths "
+        "without the module-ceiling files"
+    )
+
+
+def test_the_release_builds_wait_for_the_scope():
+    import yaml
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    for name in ("reproducible-build", "source-archive", "aarch64-tests"):
+        assert jobs[name]["needs"] == "contract", name
+        assert "needs.contract.outputs.release == 'true'" in jobs[name]["if"], name
+    assert jobs["contract"]["outputs"]["release"] == "${{ steps.scope.outputs.release }}"
+
+
 def test_the_built_flatpaks_grant_what_flathub_grants():
     # CI, the Tier C VM and the TunaOS repository ship flatpak/*.json; the
     # sandbox they test must be the one Flathub users get. flatpak/ granted

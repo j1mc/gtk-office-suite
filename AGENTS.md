@@ -57,8 +57,9 @@ units) ← `suite-common` (GTK helpers: dialogs, toasts, SuiteApp/SuiteWindow)
   `render-lab-out/report.html` before claiming a visual feature works. See
   `docs/RENDER-PARITY-ROADMAP.md`.
 - **Let CI do the heavy runs.** A local machine is often slower than CI. Push
-  a draft PR early: `render-parity.yml` renders each app in its own parallel
-  job, and `ci.yml` runs clippy (`-D warnings`) and the tests. Then
+  a draft PR early: `render-parity.yml` renders each app your change can
+  reach in its own parallel job, and `ci.yml` runs clippy (`-D warnings`)
+  and the tests. Then
   `gh run download <run> -n render-parity-report` gives you every image,
   `report.html` and `baseline.proposed.json` (the baseline that run would
   lock in). Look at the images, then commit that baseline. Locally, run
@@ -121,3 +122,9 @@ units) ← `suite-common` (GTK helpers: dialogs, toasts, SuiteApp/SuiteWindow)
   `grab_focus` when mapped or typing goes to the search entry.
 - AT-SPI test framework is dogtail 0.9.11 (apt), not pip dogtail 2.x — no
   `tree.Accessible`, no `retry=` kwarg on `findChildren`.
+- dogtail's `do_action(0)` on a GTK 4 button returns before `clicked` runs:
+  it is GTK's keyboard activation, which clicks 250 ms later, so keys a
+  journey sends meanwhile reach the app first. Wait on the click's effect.
+  And `Entry::set_text` replaces the buffer even when the text is unchanged
+  (caret to 0, selection gone), so never refresh an entry the user is typing
+  in (`tables/src/name_box.rs`, TBL-006).
