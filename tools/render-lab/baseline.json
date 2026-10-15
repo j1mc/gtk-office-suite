@@ -28,6 +28,10 @@
     "B": "green",
     "C": "green"
   },
+  "decks/preset-shapes": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/rotation": {
     "A": "green",
     "B": "green",
