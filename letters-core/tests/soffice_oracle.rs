@@ -2092,6 +2092,36 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     eprintln!("DIAG converted pPr: {}", ppr_of(&dp, "may strand"));
     let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
     close(&rt, "odt → Writer → docx");
+    // Probe A (import leg): our odt rewritten as odt. If Writer keeps
+    // fo:widows="1", its import is fine and the docx exporter drops it.
+    // Converted in place: keep.odt now holds Writer's rewrite.
+    let _ = soffice_convert(bin, &op, "odt").ok();
+    eprintln!("DIAG rewritten style: {}", style_of(&op, "1", "1"));
+    // Probe B (export leg): our docx rewritten as docx. If Writer keeps
+    // the off bit, its exporter is fine and the odt import drops it.
+    let _ = soffice_convert(bin, &docx_path, "docx").ok();
+    eprintln!("DIAG rewritten pPr: {}", ppr_of(&docx_path, "may strand"));
+}
+
+/// DIAGNOSTIC (temporary): the paragraph-properties carrying the given
+/// widows/orphans counts in an odt on disk.
+fn style_of(path: &std::path::Path, widows: &str, orphans: &str) -> String {
+    let f = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(f).unwrap();
+    let mut xml = String::new();
+    use std::io::Read;
+    zip.by_name("content.xml").unwrap().read_to_string(&mut xml).unwrap();
+    let pin = format!("fo:widows=\"{widows}\"");
+    let mut out = Vec::new();
+    let mut rest = xml.as_str();
+    while let Some(at) = rest.find(&pin) {
+        let start = rest[..at].rfind("<style:paragraph-properties").unwrap_or(0);
+        let end = rest[at..].find('>').map(|e| at + e + 1).unwrap_or(rest.len());
+        out.push(rest[start..end].to_string());
+        rest = &rest[end..];
+    }
+    let _ = orphans;
+    if out.is_empty() { format!("no {pin} in content.xml") } else { out.join(" || ") }
 }
 
 /// DIAGNOSTIC (temporary): the raw XML of the converted paragraph
