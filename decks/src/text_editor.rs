@@ -739,7 +739,8 @@ fn connect_controls(ed: &Rc<Editor>, weak: &Weak<Editor>, colour: &gtk::Button, 
             }
         }
     };
-    let styles: [(&gtk::ToggleButton, fn(bool) -> FormatEdit); 4] = [
+    type MakeEdit = fn(bool) -> FormatEdit;
+    let styles: [(&gtk::ToggleButton, MakeEdit); 4] = [
         (&c.bold, FormatEdit::Bold),
         (&c.italic, FormatEdit::Italic),
         (&c.underline, FormatEdit::Underline),
