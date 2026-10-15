@@ -427,6 +427,9 @@ by hand:
 | `Render lab (letters)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `Render lab (tables)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `Tiers A+B vs LibreOffice` | `render-parity.yml` → `report` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (decks)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (letters)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Real documents (tables)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `RustSec advisory gate` | `ci.yml` → `advisories` | pending | #1549: Fails on main today: Typst's direct serde_yaml pulls in unsafe-libyaml (RUSTSEC-2024-0449). Required now, it would block every merge until SH-007 removes or waives the path; the failure must stay visible, not be suppressed. |
 | `drop` | `drop-bot-review-requests.yml` → `drop` | optional | Bot-authored pull requests only, and only on open/reopen/ready: housekeeping, not a check of the change. |
 | `gate` | `feature-verification.yml` → `gate` | optional | Decides whether a verify-video label asked for a recording; it is orchestration, not a verdict about the change. |
@@ -458,9 +461,6 @@ by hand:
 | `Prior-release bundle (letters)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Prior-release bundle (tables)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Tier C (Flatpak in a GNOME VM)` | `render-parity.yml` → `vm` | optional | Tier C needs the bundles above and is continue-on-error; it never runs on an ordinary pull request. |
-| `Real documents (decks)` | `render-real.yml` → `lab` | optional | Path-filtered to the real-document corpus and its tooling; it reports nothing on other pull requests, so requiring it would block them forever. |
-| `Real documents (letters)` | `render-real.yml` → `lab` | optional | Path-filtered to the real-document corpus and its tooling; it reports nothing on other pull requests, so requiring it would block them forever. |
-| `Real documents (tables)` | `render-real.yml` → `lab` | optional | Path-filtered to the real-document corpus and its tooling; it reports nothing on other pull requests, so requiring it would block them forever. |
 
 <!-- required-checks:end -->
 
@@ -474,9 +474,15 @@ gh api repos/tuna-os/gtk-office-suite/branches/main/protection > protection.json
 python3 conformance/required_checks.py --compare protection.json   # must print MATCHES
 ```
 
-Against the 2026-10-15 API output, `--compare` reports the fourteen proposed
-contexts other than `test` as *proposed but not required*. Decisions left to
-the administrator, not made here:
+Against the 2026-10-15 API output, `--compare` reports the seventeen proposed
+contexts other than `test` as *proposed but not required*. The three
+`Real documents (<app>)` contexts joined the proposal when `render-real.yml`
+stopped being path-filtered: it now starts on every pull request, and an app
+the change cannot reach (`tools/render-lab/real_scope.py`, derived from the
+Cargo manifests) passes in seconds rather than going unreported. Before that,
+DCK-006 (#1574) changed only `decks-core`, the lab did not run, and a real deck
+went from amber to red on `main`. Decisions left to the administrator, not
+made here:
 
 - `RustSec advisory gate` is `pending` on #1549 (SH-007): it fails on `main`,
   and requiring it now would block every merge. Its failure stays visible.
