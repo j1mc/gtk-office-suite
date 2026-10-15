@@ -972,9 +972,18 @@ pub fn draw_shape(
     (x, y, w, h): (f64, f64, f64, f64),
     scale: f64,
 ) {
-    use decks_core::engine::shape::{is_elliptical, outline, ShapeKind};
+    use decks_core::engine::shape::{is_elliptical, is_line, outline, ShapeKind};
     cr.new_path();
     match kind {
+        // A line (a separator rule, a connector) is its outline alone,
+        // corner to corner; a horizontal one has no height at all.
+        k if is_line(k) => {
+            cr.move_to(x, y);
+            cr.line_to(x + w, y + h);
+            let line_only = decks_core::engine::shape::ShapeStyle { fill: None, gradient: None, ..style.clone() };
+            paint_path(cr, &line_only, (x, y, w, h), scale);
+            return;
+        }
         k if is_elliptical(k) => {
             if w <= 0.0 || h <= 0.0 {
                 return;
@@ -1679,5 +1688,44 @@ mod font_tests {
                 .as_deref(),
             Some("Liberation Serif")
         );
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+    use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle, Stroke};
+
+    /// #1397's tile separators are `line` presets: a line from the box's
+    /// top-left corner to its bottom-right, stroked in its outline colour,
+    /// with nothing filled. The shared outline path has no outline for a
+    /// line and fell back to the box, so a line with any height drew as a
+    /// rectangle, filled with a shape's default accent.
+    #[test]
+    fn a_line_is_stroked_corner_to_corner_and_never_filled() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 40).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.paint().unwrap();
+            let style = ShapeStyle {
+                fill: Some(Color(68, 114, 196)),
+                gradient: None,
+                stroke: Some(Stroke { color: Color(255, 255, 255), width: 2.0 }),
+                fill_src: None,
+                stroke_src: None,
+            };
+            draw_shape(&cr, &ShapeKind::Other("line".into()), &style, (10.0, 5.0, 80.0, 30.0), 1.0);
+        }
+        let mut surface = surface;
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = |x: usize, y: usize| {
+            let i = y * stride + x * 4;
+            (data[i + 2], data[i + 1], data[i])
+        };
+        assert_eq!(px(50, 20), (255, 255, 255), "the middle of the diagonal, in white");
+        assert_eq!(px(80, 5), (0, 0, 0), "no box: its top edge is not drawn");
+        assert_eq!(px(70, 30), (0, 0, 0), "nothing filled below the line");
     }
 }

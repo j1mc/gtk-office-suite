@@ -368,6 +368,14 @@ fn flatten(commands: Vec<ooxml_drawingml::GeometryPathCommand>, w: f64, h: f64) 
         .collect()
 }
 
+/// Whether `kind` is a straight line across its box, from the top-left
+/// corner to the bottom-right: the `line` preset and the straight
+/// connector. It has no area, only an outline, so it is stroked, never
+/// filled.
+pub fn is_line(kind: &ShapeKind) -> bool {
+    matches!(kind, ShapeKind::Other(prst) if prst == "line" || prst == "straightConnector1")
+}
+
 /// Whether `kind` is drawn as an ellipse filling its box: the ellipse, and
 /// the presets that are one under another name (a flowchart connector).
 pub fn is_elliptical(kind: &ShapeKind) -> bool {

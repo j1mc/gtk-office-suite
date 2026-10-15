@@ -765,6 +765,17 @@ pub(crate) fn frame_charts(xml: &str) -> Vec<FrameChart> {
 /// The painting of every `p:sp` in a slide, layout or master part, in
 /// document order. `scale` converts EMU to model units (for line widths).
 pub(crate) fn sp_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
+    styles_of(xml, "p:sp", theme, scale)
+}
+
+/// The painting of every connector (`p:cxnSp`) in a part, in document
+/// order: its outline from `a:ln` over the theme's `a:lnRef`, as a shape's.
+/// Counted apart from the `p:sp`s so their order is untouched.
+pub(crate) fn cxn_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
+    styles_of(xml, "p:cxnSp", theme, scale)
+}
+
+fn styles_of(xml: &str, tag: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
     let root = parse_tree(xml);
     // Every p:sp in document order, as `find_all` finds them, each with the
     // fill of the group it is in: a shape filled `a:grpFill` takes it.
@@ -776,7 +787,7 @@ pub(crate) fn sp_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
             None => {
                 stack.pop();
             }
-            Some(c) if c.name == "p:sp" => out.push(resolve_sp(c, theme, scale, group_fill.as_ref())),
+            Some(c) if c.name == tag => out.push(resolve_sp(c, theme, scale, group_fill.as_ref())),
             Some(c) => {
                 // A group's own fill, or the one around it, for its shapes.
                 let fill = if c.name == "p:grpSp" {
