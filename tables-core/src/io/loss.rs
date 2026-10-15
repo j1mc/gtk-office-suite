@@ -84,11 +84,17 @@ fn record(report: &mut CompatibilityReport, (id, label): (&str, &str), location:
     report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, detail));
 }
 
-/// Whether a `<definedName ...>` element names the print-area built-in.
-/// The `name` attribute may use either quote; matching is case-sensitive
-/// per OOXML (`_xlnm.Print_Area`).
-fn is_print_area_name(element: &str) -> bool {
-    element.contains("name=\"_xlnm.Print_Area\"") || element.contains("name='_xlnm.Print_Area'")
+/// Whether a `<definedName ...>` element names a scoped built-in the
+/// reader preserves. `_xlnm.Print_Area` lands in `SheetModel::print_area`
+/// and `_xlnm._FilterDatabase` duplicates the `<autoFilter>` element the
+/// filter reader parses, so neither warns. Any other scoped name
+/// downgrades to workbook-global on read. Matching is case-sensitive per
+/// OOXML; either quote style is accepted.
+fn is_preserved_builtin_name(element: &str) -> bool {
+    element.contains("name=\"_xlnm.Print_Area\"")
+        || element.contains("name='_xlnm.Print_Area'")
+        || element.contains("name=\"_xlnm._FilterDatabase\"")
+        || element.contains("name='_xlnm._FilterDatabase'")
 }
 
 /// The save cannot go ahead: the source promises inspectable content (an
@@ -278,10 +284,10 @@ fn inspect_package(
     }
     if names.contains("xl/workbook.xml") {
         let xml = read_part(zip, "xl/workbook.xml", budget)?;
-        // `_xlnm.Print_Area` is sheet-scoped by OOXML design, but the
-        // reader preserves it into `SheetModel::print_area` (round-trip
-        // test `print_area_hidden_rows_and_page_setup_round_trip_through_load_xlsx_workbook`),
-        // so it must not warn. Any other scoped name downgrades to
+        // `_xlnm.Print_Area` and `_xlnm._FilterDatabase` are sheet-scoped
+        // by OOXML design, but the reader preserves both (into
+        // `SheetModel::print_area` and the parsed `<autoFilter>`), so
+        // neither warns. Any other scoped name downgrades to
         // workbook-global on read.
         let mut rest = xml.as_str();
         let mut scoped_user_name = false;
@@ -294,7 +300,7 @@ fn inspect_package(
             }
             let end = tag.find('>').unwrap_or(tag.len());
             let element = &tag[..end];
-            if element.contains("localSheetId") && !is_print_area_name(element) {
+            if element.contains("localSheetId") && !is_preserved_builtin_name(element) {
                 scoped_user_name = true;
                 break;
             }
@@ -755,11 +761,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("print-area.xlsx");
         package(&path, &[
-            ("xl/workbook.xml", "<workbook><definedNames><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\">Data!$A$1:$C$6</definedName></definedNames></workbook>"),
+            ("xl/workbook.xml", "<workbook><definedNames><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\">Data!$A$1:$C$6</definedName><definedName name=\"_xlnm._FilterDatabase\" localSheetId=\"0\" hidden=\"1\">Data!$A$1:$A$5</definedName></definedNames></workbook>"),
             ("xl/worksheets/sheet1.xml", "<worksheet><sheetData/></worksheet>"),
         ]);
         let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
-        assert!(!ids(&report).contains(&"scoped-names"), "print area warns: {:?}", report.features);
+        assert!(!ids(&report).contains(&"scoped-names"), "preserved builtins warn: {:?}", report.features);
     }
 
     #[test]
