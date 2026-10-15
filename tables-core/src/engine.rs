@@ -179,15 +179,23 @@ impl TablesEngine {
     }
 
     /// The editable input for a cell: its formula with the leading `=`,
-    /// else text that recreates it when set back. A cell with no input —
-    /// truly empty, or a derived spill cell showing a computed value —
-    /// reports none: input is never invented from a displayed value.
+    /// else text that recreates it when set back. A spill-derived cell
+    /// (`Cell::SpillCell`: materialized by evaluation, holding another
+    /// cell's computed value) reports no input — writing its displayed
+    /// value back would flatten it into a constant blocking the spill.
     /// Plain values otherwise come from [`Self::input_at`] — except
     /// numbers, where a formatted rendering does not parse back and the
     /// canonical numeric text does. This is what undo captures, copy
     /// carries, sort moves and save writes; the displayed value never
     /// stands in for it.
     pub fn editable_input_at(&self, sheet: usize, row: usize, col: usize) -> String {
+        if let Ok(ws) = self.model.workbook.worksheet(sheet as u32) {
+            if let Some(cell) = ws.cell(row as i32 + 1, col as i32 + 1) {
+                if matches!(cell, ironcalc_base::types::Cell::SpillCell { .. }) {
+                    return String::new();
+                }
+            }
+        }
         if self.formula_at(sheet, row, col).is_some() {
             return self.input_at(sheet, row, col);
         }
@@ -767,6 +775,18 @@ mod tests {
         assert_eq!(engine.move_input("=A1+1", (2, 2), (2, 2)).unwrap(), "=A1+1");
         assert_eq!(engine.extend_input("=A1", (0, 0), (1, 0)).unwrap(), "=A2");
         assert!(engine.move_input("=A1", (0, 0), (1, 0)).is_ok());
+    }
+
+    #[test]
+    fn spill_derived_cells_report_no_editable_input() {
+        let mut engine = TablesEngine::new(5, 5).unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(3)").unwrap();
+        // The spill shows downstream, but only the anchor holds input:
+        // carrying the displayed "2" as input would flatten the spill
+        // into a constant that blocks it.
+        assert_eq!(engine.cell(1, 0), "2");
+        assert_eq!(engine.editable_input_at(0, 1, 0), "");
+        assert_eq!(engine.editable_input_at(0, 0, 0), "=SEQUENCE(3)");
     }
 
 }
