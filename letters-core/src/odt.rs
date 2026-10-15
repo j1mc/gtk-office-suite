@@ -1545,10 +1545,10 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                     }),
                                 shading: attr_val(&e, "fo:background-color").and_then(|c| {
                                     let c = c.trim_start_matches('#').to_uppercase();
-                                    if c == "TRANSPARENT" || c.is_empty() {
-                                        None
-                                    } else {
+                                    if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) {
                                         Some(c)
+                                    } else {
+                                        None
                                     }
                                 }),
                                 borders: {
