@@ -105,8 +105,9 @@ pub struct ShapeRequest<'a> {
     pub width_pt: f64,
     /// Extra indent of the first line (negative = hanging), in points.
     pub first_line_indent_pt: f64,
-    /// Tab stops in points from the text box's left edge.
-    pub tab_stops_pt: Vec<f64>,
+    /// Tab stops from the text box's left edge: the paragraph's own,
+    /// then Word's default grid (see `paragraph_request`).
+    pub tab_stops: Vec<crate::model::TabStop>,
     /// A table of contents entry: its tab is one right-aligned stop at the
     /// box's right edge, so the page number sits at the margin (the
     /// painter draws the dot leader).
@@ -154,7 +155,7 @@ pub fn request_key(req: &ShapeRequest<'_>) -> u64 {
     format!("{:?}", req.runs).hash(&mut h);
     (req.heading, req.code, req.look, format!("{:?}", req.alignment)).hash(&mut h);
     (req.width_pt.to_bits(), req.first_line_indent_pt.to_bits()).hash(&mut h);
-    req.tab_stops_pt.iter().map(|t| t.to_bits()).collect::<Vec<_>>().hash(&mut h);
+    req.tab_stops.iter().map(|t| (t.pos_pt.to_bits(), t.align)).collect::<Vec<_>>().hash(&mut h);
     req.right_tab.hash(&mut h);
     (&req.defaults.font_family, req.defaults.font_size_pt.to_bits()).hash(&mut h);
     if let Some(level) = req.heading {
@@ -266,6 +267,12 @@ pub enum Item {
     /// A table cell's box and its background colour (six hex digits), if
     /// the file shades it.
     Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String> },
+    /// A paragraph's shading and borders: the text box of one run of its
+    /// lines on this page (`x_pt`, `y_pt`, `width_pt`, `height_pt`), drawn
+    /// under the text. A paragraph split across pages gets one box per
+    /// page: `top_edge` only on its first box, `bottom_edge` only on its
+    /// last, so a border opens where the paragraph continues.
+    ParaBox { para: usize, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, borders: crate::model::ParaBorders, top_edge: bool, bottom_edge: bool },
 }
 
 /// One page of the render tree.
@@ -582,7 +589,7 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
     for i in 0..doc.footnotes.len() {
         let p = note_paragraph(doc, i, opts);
         let shaped = shape_paragraph(&p, text_w, opts, shaper);
-        flow.note_lines.push(shaped.lines.iter().map(|l| l.natural_height() * spacing(&p)).collect());
+        flow.note_lines.push(shaped.lines.iter().map(|l| line_height(&p, l.natural_height())).collect());
         flow.note_after.push(p.style.space_after_pt.max(0.0));
     }
     let ordinals = lists::ordinals(doc.paragraphs.iter().map(|p| &p.style));
@@ -607,9 +614,10 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
         let keep_next = if para.style.heading.is_some() || para.style.keep_with_next {
             doc.paragraphs.get(i + 1).filter(|n| n.style.table_cell.is_none()).map(|n| {
                 let s = shape_paragraph(n, col_w, opts, shaper);
-                let lines = s.lines.len().min(opts.orphans.max(1));
+                let (orphans, _) = orphan_widow(&n.style, opts);
+                let lines = s.lines.len().min(orphans.max(1));
                 n.style.space_before_pt
-                    + s.lines[..lines].iter().map(|l| l.natural_height() * spacing(n)).sum::<f64>()
+                    + s.lines[..lines].iter().map(|l| line_height(n, l.natural_height())).sum::<f64>()
             })
         } else {
             None
@@ -625,6 +633,34 @@ fn spacing(p: &Paragraph) -> f64 {
     let s = f64::from(p.style.line_spacing);
     if s.is_finite() && s > 0.0 { s } else { 1.0 }
 }
+
+/// How tall one line of `natural` points stands in paragraph `p`: the
+/// proportional multiple, unless the paragraph fixes its height
+/// (`ParaStyle::line_height`: OOXML exact/atLeast).
+fn line_height(p: &Paragraph, natural: f64) -> f64 {
+    let multiple = natural * spacing(p);
+    match p.style.line_height {
+        Some(crate::model::LineHeight::Exact(pt)) if pt.is_finite() && pt > 0.0 => pt,
+        Some(crate::model::LineHeight::Minimum(pt)) if pt.is_finite() && pt > 0.0 => multiple.max(pt),
+        _ => multiple,
+    }
+}
+
+/// The orphan/widow counts that govern paragraph `p`: its own
+/// `widow_control` when it switches control off (single lines may
+/// strand), else the document default.
+fn orphan_widow(st: &crate::model::ParaStyle, opts: &LayoutOptions) -> (usize, usize) {
+    match st.widow_control {
+        Some(false) => (1, 1),
+        _ => (opts.orphans, opts.widows),
+    }
+}
+
+/// Word's default tab-stop grid, in points: a tab with no stop of its
+/// own advances to the next half inch, as Writer lays it out. Pango's
+/// own default is narrower, so stops are spelled out past the
+/// paragraph's own (which keep their places on the grid).
+pub const DEFAULT_TAB_PT: f64 = 36.0;
 
 /// A paragraph broken into lines, with the horizontal box it was shaped in.
 struct Shaped {
@@ -688,6 +724,32 @@ pub fn paragraph_look(st: &crate::model::ParaStyle) -> Look {
     }
 }
 
+/// The tab stops a shaping request carries: the paragraph's own stops,
+/// relative to its text box, then Word's default grid past the last of
+/// them. An explicit stop keeps its alignment and leader; a grid stop is
+/// plain left-aligned.
+fn request_tabs(
+    st: &crate::model::ParaStyle,
+    box_x: f64,
+    box_w: f64,
+) -> Vec<crate::model::TabStop> {
+    use crate::model::TabStop;
+    let mut stops: Vec<TabStop> = st
+        .tab_stops_pt
+        .iter()
+        .map(|t| TabStop { pos_pt: t.pos_pt - box_x, ..*t })
+        .filter(|t| t.pos_pt > 0.0)
+        .collect();
+    stops.sort_by(|a, b| a.pos_pt.partial_cmp(&b.pos_pt).unwrap_or(std::cmp::Ordering::Equal));
+    let last = stops.iter().map(|t| t.pos_pt).fold(0.0f64, f64::max);
+    let mut grid = (last / DEFAULT_TAB_PT).floor() * DEFAULT_TAB_PT + DEFAULT_TAB_PT;
+    while grid < box_w {
+        stops.push(TabStop::left(grid));
+        grid += DEFAULT_TAB_PT;
+    }
+    stops
+}
+
 /// The shaping request for paragraph `p` in a text box `box_w` wide. The
 /// engine and every renderer build it here, so a renderer re-shaping a
 /// paragraph to draw it gets exactly the lines the engine placed.
@@ -704,7 +766,7 @@ pub fn paragraph_request<'a>(p: &'a Paragraph, box_w: f64, opts: &'a LayoutOptio
         // A list item's first line starts at its text indent; the marker
         // hangs in front of it.
         first_line_indent_pt: if st.list == ListKind::None { st.first_line_indent_pt } else { 0.0 },
-        tab_stops_pt: if st.toc.is_some() { Vec::new() } else { st.tab_stops_pt.iter().map(|t| t - box_x).filter(|t| *t > 0.0).collect() },
+        tab_stops: if st.toc.is_some() { Vec::new() } else { request_tabs(st, box_x, box_w) },
         right_tab: st.toc.is_some(),
         defaults: opts,
     }
@@ -735,9 +797,9 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
     if st.page_break_before && !flow.page_is_empty() {
         flow.new_page();
     }
-    let ls = spacing(para);
-    let heights: Vec<f64> = shaped.lines.iter().map(|l| l.natural_height() * ls).collect();
+    let heights: Vec<f64> = shaped.lines.iter().map(|l| line_height(para, l.natural_height())).collect();
     let total: f64 = heights.iter().sum();
+    let (orphans, widows) = orphan_widow(st, flow.opts);
 
     // Between two paragraphs the larger of the space after the first and
     // the space before the second applies, not their sum: LibreOffice
@@ -754,14 +816,23 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
     }
     // Everything that must stay together with the first line: the whole
     // paragraph if short, the orphan lines otherwise, plus a heading's
-    // follower.
+    // follower. A paragraph that keeps its lines together moves whole
+    // when it fits a column; one taller than a column still splits, as
+    // Word splits it.
     let n = heights.len();
-    let head: f64 = if n < flow.opts.orphans + flow.opts.widows {
+    let head: f64 = if n < orphans + widows {
         total
     } else {
-        heights[..flow.opts.orphans.min(n)].iter().sum()
+        heights[..orphans.min(n)].iter().sum()
     };
-    let needed = head + keep_next.map(|k| st.space_after_pt.max(0.0) + k).unwrap_or(0.0);
+    let tail = keep_next.map(|k| st.space_after_pt.max(0.0) + k).unwrap_or(0.0);
+    if st.keep_lines && !flow.column_is_empty() {
+        let room = flow.foot() - flow.top();
+        if total <= room && flow.y + total + tail > flow.bottom() {
+            flow.next_column();
+        }
+    }
+    let needed = head + tail;
     if flow.y + needed > flow.bottom() && !flow.column_is_empty() {
         flow.next_column();
         if !flow.column_is_empty() {
@@ -794,12 +865,12 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         if line + fit < n {
             // Widows: leave at least `widows` lines for the next column.
             let rest = n - line - fit;
-            if rest < flow.opts.widows {
-                fit = fit.saturating_sub(flow.opts.widows - rest);
+            if rest < widows {
+                fit = fit.saturating_sub(widows - rest);
             }
             // Orphans: don't strand fewer than `orphans` lines (only matters
             // for the paragraph's first chunk).
-            if line == 0 && fit < flow.opts.orphans.min(n) {
+            if line == 0 && fit < orphans.min(n) {
                 fit = 0;
             }
             // An empty column takes at least one line, or nothing would fit
@@ -811,6 +882,9 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         if split.as_ref().is_some_and(|(k, _)| *k >= line + fit) {
             split = None;
         }
+        let chunk_top = flow.y;
+        let chunk_x = flow.column_x();
+        let chunk_at = flow.page_len();
         for (k, (lb, &height)) in shaped.lines.iter().zip(&heights).enumerate().skip(line).take(fit) {
             let top = flow.y;
             let baseline = top + lb.ascent_pt;
@@ -827,6 +901,24 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
                 None => flow.add_notes(line_notes(para, lb)),
             }
             flow.y += height;
+        }
+        // A shaded or bordered paragraph draws its box under this chunk's
+        // lines: one box per page, opening where the paragraph continues.
+        if (st.shading.is_some() || !st.borders.is_empty()) && fit > 0 {
+            flow.insert(
+                chunk_at,
+                Item::ParaBox {
+                    para: idx,
+                    x_pt: chunk_x + shaped.box_x,
+                    y_pt: chunk_top,
+                    width_pt: shaped.box_w,
+                    height_pt: flow.y - chunk_top,
+                    fill: st.shading.clone(),
+                    borders: st.borders.clone(),
+                    top_edge: line == 0,
+                    bottom_edge: line + fit == n,
+                },
+            );
         }
         line += fit;
         if line < n {
@@ -968,7 +1060,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             for &(i, _) in cells.iter().filter(|(_, c)| c.row == row && c.col == col) {
                 let p = &doc.paragraphs[i];
                 let s = shape_paragraph(p, inner_w, &opts, shaper);
-                let ph: f64 = s.lines.iter().map(|l| l.natural_height() * spacing(p)).sum::<f64>()
+                let ph: f64 = s.lines.iter().map(|l| line_height(p, l.natural_height())).sum::<f64>()
                     + p.style.space_before_pt.max(0.0)
                     + p.style.space_after_pt.max(0.0);
                 paras.push((i, s, ph));
@@ -1135,14 +1227,65 @@ fn cell_slices(doc: &Document, paras: &[CellParagraph]) -> Vec<Slice> {
     for (k, (i, s, _)) in paras.iter().enumerate() {
         let p = &doc.paragraphs[*i];
         out.push(Slice::Gap(p.style.space_before_pt.max(0.0)));
-        out.extend(s.lines.iter().enumerate().map(|(l, lb)| Slice::Line(k, l, lb.natural_height() * spacing(p))));
+        out.extend(s.lines.iter().enumerate().map(|(l, lb)| Slice::Line(k, l, line_height(p, lb.natural_height()))));
         out.push(Slice::Gap(p.style.space_after_pt.max(0.0)));
     }
     out
 }
 
 /// Draw a run of a cell's slices from `top` down, in the cell at `cx`.
+/// A shaded or bordered cell paragraph gets its box under its lines
+/// here too, opening where the cell continues on another page.
 fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices: &[Slice], cx: f64, top: f64) {
+    // One box per paragraph run of lines, under the text: collect the
+    // runs first, since the box precedes its lines. A run is (paragraph,
+    // top, bottom, first line, last line); gaps always end one.
+    let mut runs: Vec<(usize, f64, f64, usize, usize)> = Vec::new();
+    let mut y = top;
+    let mut run: Option<(usize, f64, usize, usize)> = None;
+    let close = |run: &mut Option<(usize, f64, usize, usize)>, y: f64, runs: &mut Vec<(usize, f64, f64, usize, usize)>| {
+        if let Some((rk, rtop, first, last)) = run.take() {
+            runs.push((rk, rtop, y, first, last));
+        }
+    };
+    for slice in slices {
+        match *slice {
+            Slice::Line(k, l, h) => {
+                if matches!(run, Some((rk, _, _, _)) if rk == k) {
+                    if let Some((_, _, _, last)) = run.as_mut() {
+                        *last = l;
+                    }
+                } else {
+                    close(&mut run, y, &mut runs);
+                    run = Some((k, y, l, l));
+                }
+                y += h;
+            }
+            Slice::Gap(h) => {
+                close(&mut run, y, &mut runs);
+                y += h;
+            }
+        }
+    }
+    close(&mut run, y, &mut runs);
+    for (k, rtop, rbottom, first, last) in runs {
+        let (i, s, _) = &paras[k];
+        let p = &doc.paragraphs[*i];
+        if p.style.shading.is_none() && p.style.borders.is_empty() {
+            continue;
+        }
+        flow.push(Item::ParaBox {
+            para: *i,
+            x_pt: cx + CELL_PADDING_PT + s.box_x,
+            y_pt: rtop,
+            width_pt: s.box_w,
+            height_pt: rbottom - rtop,
+            fill: p.style.shading.clone(),
+            borders: p.style.borders.clone(),
+            top_edge: first == 0,
+            bottom_edge: last == s.lines.len().saturating_sub(1),
+        });
+    }
     let mut y = top;
     for slice in slices {
         if let Slice::Line(k, l, h) = *slice {
@@ -1378,6 +1521,20 @@ impl<'o> Flow<'o> {
         self.pages.last_mut().expect("a page").items.push(item);
     }
 
+    /// Items on the current page: where a chunk's box goes to sit under
+    /// the lines just placed.
+    fn page_len(&self) -> usize {
+        self.pages.last().map_or(0, |p| p.items.len())
+    }
+
+    /// Insert `item` at `at` on the current page, under the lines placed
+    /// since `at` was read.
+    fn insert(&mut self, at: usize, item: Item) {
+        self.column_items += 1;
+        let items = &mut self.pages.last_mut().expect("a page").items;
+        items.insert(at.min(items.len()), item);
+    }
+
     /// Add headers and footers now that the page count is known.
     fn finish(mut self, doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> RenderTree {
         let total = self.pages.len();
@@ -1409,8 +1566,8 @@ impl<'o> Flow<'o> {
                 let p = note_paragraph(doc, i, opts);
                 let shaped = shape_paragraph(&p, width, opts, shaper);
                 let chars: Vec<char> = layout_text(&p.runs).chars().collect();
-                let ls = spacing(&p);
                 for (k, lb) in shaped.lines.iter().enumerate().take(piece.to).skip(piece.from) {
+                    let h = line_height(&p, lb.natural_height());
                     page.items.push(Item::Line {
                         source: Source::Footnote(i),
                         line: k,
@@ -1422,9 +1579,9 @@ impl<'o> Flow<'o> {
                         x_pt: left + lb.x_pt,
                         top_pt: y,
                         baseline_pt: y + lb.ascent_pt,
-                        height_pt: lb.natural_height() * ls,
+                        height_pt: h,
                     });
-                    y += lb.natural_height() * ls;
+                    y += h;
                 }
                 if piece.to >= shaped.lines.len() {
                     y += p.style.space_after_pt.max(0.0);
@@ -1484,7 +1641,7 @@ fn shape_header_footer(text: &str, alignment: crate::model::Alignment, width: f6
         alignment,
         width_pt: width,
         first_line_indent_pt: 0.0,
-        tab_stops_pt: Vec::new(),
+        tab_stops: Vec::new(),
         right_tab: false,
         defaults: opts,
     })

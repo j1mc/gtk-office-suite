@@ -907,15 +907,21 @@ fn columns_survive_a_conversion_between_the_two_formats() {
 fn tab_stops_survive_a_conversion_between_the_two_formats() {
     let Some(bin) = require_or_skip() else { return };
     let mut d = Document::from_plain_text("tabbed across formats");
-    d.paragraphs[0].style.tab_stops_pt = vec![36.0, 108.0];
+    d.paragraphs[0].style.tab_stops_pt = vec![
+        TabStop::left(36.0),
+        TabStop { pos_pt: 108.0, align: TabAlign::Right, leader: TabLeader::Dot },
+    ];
     let dir = tempfile::tempdir().unwrap();
 
-    let near = |got: &[f64], want: &[f64], what: &str| {
+    let near = |got: &[TabStop], want: &[TabStop], what: &str| {
         assert_eq!(got.len(), want.len(), "{what}: {got:?}");
         for (g, w) in got.iter().zip(want) {
-            assert!((g - w).abs() < 1.0, "{what}: {got:?}");
+            assert!((g.pos_pt - w.pos_pt).abs() < 1.0, "{what}: {got:?}");
+            assert_eq!(g.align, w.align, "{what} alignment: {got:?}");
+            assert_eq!(g.leader, w.leader, "{what} leader: {got:?}");
         }
     };
+    let want = &d.paragraphs[0].style.tab_stops_pt;
 
     // odt -> Writer -> docx
     let a = dir.path().join("a");
@@ -926,11 +932,7 @@ fn tab_stops_survive_a_conversion_between_the_two_formats() {
     let dp = a.join("x.docx");
     assert!(dp.exists(), "soffice did not convert the odt");
     let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
-    near(
-        &para_with_text(&rt, "tabbed across formats").style.tab_stops_pt,
-        &[36.0, 108.0],
-        "odt->docx tab stops",
-    );
+    near(&para_with_text(&rt, "tabbed across formats").style.tab_stops_pt, want, "odt->docx tab stops");
 
     // docx -> Writer -> odt
     let b = dir.path().join("b");
@@ -941,11 +943,7 @@ fn tab_stops_survive_a_conversion_between_the_two_formats() {
     let op2 = b.join("y.odt");
     assert!(op2.exists(), "soffice did not convert the docx");
     let rt = letters_core::odt::read(op2.to_str().unwrap()).expect("read converted odt");
-    near(
-        &para_with_text(&rt, "tabbed across formats").style.tab_stops_pt,
-        &[36.0, 108.0],
-        "docx->odt tab stops",
-    );
+    near(&para_with_text(&rt, "tabbed across formats").style.tab_stops_pt, want, "docx->odt tab stops");
 }
 
 /// A page break across the format boundary, both ways.
@@ -2053,5 +2051,115 @@ fn header_and_footer_alignment_survive_writer_both_ways() {
     assert!(odt_path.exists(), "soffice did not convert docx to odt");
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
     let Some(rt) = through_lo_to_docx(&d, "align") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
+/// Keep-lines and widow control across the format boundary, both ways:
+/// our docx converted to odt, and our odt converted to docx.
+///
+/// Writer inverts widow control through an odt-to-docx pass: a paragraph
+/// we mark uncontrolled comes back controlled, and an unmarked one comes
+/// back uncontrolled (diagnosed from both sides' XML: our `fo:widows="1"`
+/// reads back as `<w:widowControl/>`, our unmarked paragraph as
+/// `w:val="0"`). Keep-lines survives both ways, and widow control
+/// survives everywhere else, including the docx-to-odt pass here — so
+/// that leg asserts the values, and the odt-to-docx leg asserts
+/// keep-lines only.
+#[test]
+fn keep_lines_and_widow_control_survive_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("kept together\nmay strand\nordinary");
+    d.paragraphs[0].style.keep_lines = true;
+    d.paragraphs[1].style.widow_control = Some(false);
+    let keep = |got: &Document, how: &str| {
+        assert!(para_with_text(got, "kept together").style.keep_lines, "{how}: keep_lines lost");
+        assert!(!para_with_text(got, "may strand").style.keep_lines, "{how}: keep_lines spread");
+        assert!(!para_with_text(got, "ordinary").style.keep_lines, "{how}: keep_lines spread");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("keep.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("keep.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    let rt = letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt");
+    keep(&rt, "docx → Writer → odt");
+    let free = &para_with_text(&rt, "may strand").style;
+    let plain = &para_with_text(&rt, "ordinary").style;
+    assert_eq!(free.widow_control, Some(false), "docx → Writer → odt: widow control lost");
+    // Writer materializes inherited control as explicit 2-and-2, which
+    // reads as Some(true): behaviorally the default, so the plain
+    // paragraph must only not allow widows.
+    assert!(plain.widow_control != Some(false), "docx → Writer → odt: plain paragraph gained control: {plain:?}");
+    let Some(rt) = through_lo_to_docx(&d, "keep") else { return };
+    keep(&rt, "odt → Writer → docx");
+}
+
+/// Fixed and minimum line heights across the format boundary, both
+/// ways: exact points stay exact, minima stay minima.
+#[test]
+fn exact_and_minimum_line_heights_survive_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("fixed height\nminimum height\nproportional");
+    d.paragraphs[0].style.line_height = Some(LineHeight::Exact(24.0));
+    d.paragraphs[1].style.line_height = Some(LineHeight::Minimum(30.0));
+    let close = |got: &Document, how: &str| {
+        let pt = |p: &Paragraph| match p.style.line_height {
+            Some(LineHeight::Exact(v)) | Some(LineHeight::Minimum(v)) => v,
+            None => panic!("{how}: line height lost on {:?}", p.text()),
+        };
+        let fixed = para_with_text(got, "fixed height");
+        let minimum = para_with_text(got, "minimum height");
+        assert!(matches!(fixed.style.line_height, Some(LineHeight::Exact(_))), "{how}: exact became {:?}", fixed.style.line_height);
+        assert!((pt(fixed) - 24.0).abs() < 1.0, "{how}: exact moved: {:?}", fixed.style.line_height);
+        assert!(matches!(minimum.style.line_height, Some(LineHeight::Minimum(_))), "{how}: minimum became {:?}", minimum.style.line_height);
+        assert!((pt(minimum) - 30.0).abs() < 1.0, "{how}: minimum moved: {:?}", minimum.style.line_height);
+        assert_eq!(para_with_text(got, "proportional").style.line_height, None, "{how}: plain paragraph gained a height");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("height.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("height.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "height") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
+/// Paragraph shading and borders across the format boundary, both
+/// ways: the fill and every edge survive a Writer rewrite.
+#[test]
+fn paragraph_shading_and_borders_survive_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("shaded and boxed\nordinary");
+    d.paragraphs[0].style.shading = Some("D9D9D9".into());
+    d.paragraphs[0].style.borders = ParaBorders {
+        top: Some(ParaBorder { style: BorderStyle::Single, color: "FF0000".into(), width_pt: 0.75 }),
+        bottom: Some(ParaBorder { style: BorderStyle::Dashed, color: "0000FF".into(), width_pt: 1.0 }),
+        ..Default::default()
+    };
+    let close = |got: &Document, how: &str| {
+        let boxed = &para_with_text(got, "shaded and boxed").style;
+        assert_eq!(boxed.shading.as_deref(), Some("D9D9D9"), "{how}: shading lost");
+        assert!(boxed.borders.top.is_some(), "{how}: top border lost: {:?}", boxed.borders);
+        assert!(boxed.borders.bottom.is_some(), "{how}: bottom border lost: {:?}", boxed.borders);
+        let top = boxed.borders.top.as_ref().unwrap();
+        assert_eq!((top.style, top.color.as_str()), (BorderStyle::Single, "FF0000"), "{how}: top border changed");
+        assert!((top.width_pt - 0.75).abs() < 0.25, "{how}: top width moved: {}", top.width_pt);
+        let bottom = boxed.borders.bottom.as_ref().unwrap();
+        assert_eq!((bottom.style, bottom.color.as_str()), (BorderStyle::Dashed, "0000FF"), "{how}: bottom border changed");
+        assert!(boxed.borders.left.is_none() && boxed.borders.right.is_none(), "{how}: phantom side borders: {:?}", boxed.borders);
+        let plain = &para_with_text(got, "ordinary").style;
+        assert!(plain.shading.is_none() && plain.borders.is_empty(), "{how}: plain paragraph gained decoration");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("box.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("box.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "box") else { return };
     close(&rt, "odt → Writer → docx");
 }

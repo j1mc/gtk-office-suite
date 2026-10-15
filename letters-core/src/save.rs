@@ -297,6 +297,7 @@ fn styled(run: &Run) -> bool {
 fn laid_out(paragraph: &Paragraph) -> bool {
     let style = &paragraph.style;
     style.line_spacing != 1.0
+        || style.line_height.is_some()
         || style.space_before_pt != 0.0
         || style.space_after_pt != 0.0
         || style.left_indent_pt != 0.0
@@ -305,6 +306,10 @@ fn laid_out(paragraph: &Paragraph) -> bool {
         || !style.tab_stops_pt.is_empty()
         || style.page_break_before
         || style.named_style.is_some()
+        || style.keep_lines
+        || style.widow_control.is_some()
+        || style.shading.is_some()
+        || !style.borders.is_empty()
 }
 
 fn survey(doc: &Document) -> Present {

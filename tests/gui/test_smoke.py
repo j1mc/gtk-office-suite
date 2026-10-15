@@ -8375,6 +8375,38 @@ class LettersLineSpacingSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "letters crashed changing line spacing")
 
 
+class LettersKeepLinesSmoke(BaseGUITestCase):
+    """Keep Lines Together toggles the caret's paragraph and no other.
+
+    The toggle is a model op on the caret's paragraph; the snapshot is
+    the document model.
+    """
+
+    app_name = "letters"
+
+    def setUp(self):
+        self._snapshot_path = self.isolate_snapshot(prefix="letters-keep-")
+        super().setUp()
+
+    def _paras(self):
+        s = self.trigger_snapshot("org.tunaos.letters")
+        return [("".join(r["text"] for r in p["runs"]), p.get("style", {}).get("keep_lines", False)) for p in s["paragraphs"]]
+
+    def test_keep_lines_together_toggles_only_the_caret_paragraph(self):
+        from dogtail import rawinput
+
+        aid = "org.tunaos.letters"
+        self.new_letters_document()
+        rawinput.typeText("one")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("two")
+        self.wait_until(self._paras, lambda p: [t for t, _ in p] == ["one", "two"], description="two paragraphs")
+        self.gapplication_action(aid, "keep-lines-together")
+        self.wait_until(self._paras, lambda p: [k for _, k in p] == [False, True],
+                        description="'two' kept together, 'one' untouched")
+        self.assertIsNone(self.process.poll(), "letters crashed toggling keep-lines")
+
+
 class LettersMarkdownShortcutSmoke(BaseGUITestCase):
     """"**hi**" and a space makes "hi" bold, keeping the formatting it was
     typed with (#1202 stage 3).
