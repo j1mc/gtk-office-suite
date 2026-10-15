@@ -464,6 +464,40 @@
           "tests/gui/test_smoke.py::LettersSaveFailureSmoke::test_failed_save_retains_edits_and_close_guard"
         ]
       }
+    },
+    {
+      "id": "decks.text.rich-range",
+      "app": "decks",
+      "issue": 1190,
+      "title": "In-place rich text: caret and range formatting as one text session",
+      "scope": "DCK-007. Double-click opens a text session on the controller; keys select a word and Ctrl+B/U and the editor bar format only that range; Enter adds a paragraph; Escape cancels without trace, Ctrl+Return commits one undo step; document undo is refused while editing; the styled range is saved and reopened in PPTX and ODP and across formats. The complex-script/IME journey (tests/gui/test_decks_ime.py) is advisory: a real IME and Orca remain manual DCK-019 evidence.",
+      "status": "verified",
+      "revision": "35ebe627",
+      "requires": [
+        "model",
+        "format",
+        "gui"
+      ],
+      "evidence": {
+        "model": [
+          "decks-core::rich_text::tests::range_replace_keeps_unaffected_runs_and_paras",
+          "decks-core::rich_text::tests::range_format_splits_only_the_selection_and_never_the_whole_box",
+          "decks-core::rich_text::tests::grapheme_selection_maps_gtk_offsets",
+          "decks-core::rich_text::tests::a_session_types_formats_and_undoes_locally",
+          "decks-core::controller::tests::a_text_session_commits_one_step_and_cancels_without_trace",
+          "decks-core::controller::tests::a_text_session_whose_box_vanished_or_changed_stays_open_with_an_error",
+          "decks-core::rich_text::random_sessions_keep_the_invariants_commit_one_step_and_cancel_cleanly"
+        ],
+        "format": [
+          "decks-core::rich_text::a_range_formatted_box_saves_and_reopens_in_both_formats_and_across_them",
+          "decks-core::rich_text::an_imported_boxs_unaffected_runs_survive_an_edit_elsewhere_and_a_save",
+          "decks-core::rich_text::text_typed_into_a_blank_box_stays_editable_after_a_save"
+        ],
+        "gui": [
+          "tests/gui/test_smoke.py::DecksRichTextRangeSmoke::test_select_by_keys_format_cancel_commit_undo_and_save_both_formats",
+          "tests/gui/test_edit_render.py::DecksRichTextEditRenderJourney::test_range_formatting_saves_and_reopens"
+        ]
+      }
     }
   ],
   "waivers": []

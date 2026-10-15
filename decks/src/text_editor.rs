@@ -410,7 +410,7 @@ impl Editor {
     /// keys arrive on the window's surface and the window's focus is not
     /// the popover's, so this asks the widgets: the focus is within the
     /// editor and none of its menus is open.
-    fn from_editor(&self) -> bool {
+    fn keyboard_in_editor(&self) -> bool {
         let focus_native = self
             .window
             .upgrade()
@@ -437,7 +437,7 @@ impl Editor {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
         let alt = mods.contains(gdk::ModifierType::ALT_MASK);
-        if self.from_editor() {
+        if self.keyboard_in_editor() {
             match keyval {
                 gdk::Key::Escape if mods.is_empty() => {
                     self.finish(false);
