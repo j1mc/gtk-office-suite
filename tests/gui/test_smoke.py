@@ -3690,10 +3690,13 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.wait_until(lambda: self._button("Clear Filter in This Column"), bool,
                         description="the per-column clear button")
         self._button("Clear Filter in This Column").do_action(0)
-        # Make sure the menu is dismissed before driving the grid again:
-        # Escape closes any lingering popover and otherwise hands focus
-        # back to the grid, where Ctrl+G is heard.
-        rawinput.keyCombo("Escape")
+        # Make sure the menu is dismissed before driving the grid again.
+        # The button closes it and hands focus to the grid; an Escape sent
+        # while it is still closing lands on the closing popover, and the
+        # focus it leaves behind either misses Ctrl+G or takes the typed
+        # reference into A1. So wait for the menu to go, and send nothing.
+        self.wait_until(lambda: self._button("Clear Filter in This Column") is None, bool,
+                        description="the column menu to close")
         self._to_grid("A1")
         rawinput.keyCombo("<Shift>Down")
         rawinput.keyCombo("<Shift>Down")
