@@ -49,6 +49,15 @@ lower the claim's status or relax the rule. A lane the rule watches that no
 claim cites is also refused, so the check cannot pass by having nothing to
 check.
 
+The same workflow's `release-critical-tests` job re-runs the lanes marked
+`runs_on_candidate` in `conformance/lanes.json` (the Rust workspace and the
+release-critical journeys) at the release revision and validates with
+`--release-critical --every-release-critical-result --candidate <sha>`: a
+release-critical test that failed, was skipped, or is simply absent from
+those reports refuses the release, and so does an inventory recorded at any
+other revision. A release-critical claim citing a test outside those lanes is
+refused on every pull request already (SH-001).
+
 ## Upgrade and recovery policy
 
 Flatpak updates preserve each app's GSettings, recent-file URI policy, and
