@@ -26,11 +26,12 @@ mod odp_text;
 pub mod presenter;
 pub mod provenance;
 pub mod recovery;
+pub mod rich_text;
 pub mod snapshot;
 pub mod templates;
 pub mod undo;
 
-pub use controller::{DecksController, SelectionMode, SelectionState, TextRange, TxnOutcome};
+pub use controller::{DecksController, SelectionMode, SelectionState, TextRange, TextSessionError, TxnOutcome};
 pub use engine::{Deck, MasterSlide, Slide, SlideObject};
 pub use provenance::{DeckSourceContext, MutationSet, ProvenanceFacts, SourceState};
 /// Read a presentation, dispatching on extension (.pptx or .odp).

@@ -32,6 +32,9 @@ pub struct ObjectSnapshot {
     /// temporary file it was unpacked to: what a save and reopen must
     /// keep (decks-readiness row 11).
     pub detail: String,
+    /// A text box's runs and paragraph styles as JSON arrays (DCK-007):
+    /// what range formatting must split and keep.
+    pub rich: Option<(String, String)>,
 }
 
 pub struct SlideSnapshot {
@@ -61,6 +64,19 @@ pub struct DeckSnapshot {
     /// filled in by [`snapshot`]. View indices for it are derived in
     /// [`DeckSnapshot::to_json`] alongside the legacy positional keys.
     pub selection: crate::controller::SelectionState,
+    /// The open in-place text edit as JSON, if any: its box, working
+    /// text, runs, selection and whether it changed anything. The session
+    /// is not the document; journeys use this to see that typing and IME
+    /// preedit stay out of the slide until commit.
+    pub text_session: Option<String>,
+}
+
+/// `runs` and paragraph `paras` as JSON arrays.
+fn rich_json(runs: &[crate::engine::Run], paras: &[crate::engine::ParaStyle]) -> (String, String) {
+    (
+        serde_json::to_string(runs).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(paras).unwrap_or_else(|_| "[]".into()),
+    )
 }
 
 /// `obj` in full, its picture (if any) named by a hash of the bytes.
@@ -101,7 +117,11 @@ fn object_snapshot(index: usize, id: u64, obj: &SlideObject) -> ObjectSnapshot {
         o => (o.x(), o.y()),
     };
     let (w, h) = obj.size();
-    ObjectSnapshot { index, id, kind, text, x, y, w, h, detail: detail(obj) }
+    let rich = match obj {
+        SlideObject::TextBox { runs, body, .. } => Some(rich_json(runs, &body.paras)),
+        _ => None,
+    };
+    ObjectSnapshot { index, id, kind, text, x, y, w, h, detail: detail(obj), rich }
 }
 
 pub fn snapshot(controller: &DecksController) -> DeckSnapshot {
@@ -136,7 +156,22 @@ pub fn snapshot(controller: &DecksController) -> DeckSnapshot {
         .collect();
     let masters = masters_ref.iter().map(|m| (m.id, m.name.clone(), m.shapes.len())).collect();
     let master_details = masters_ref.iter().map(|m| m.shapes.iter().map(detail).collect()).collect();
-    DeckSnapshot { slide_count, masters, master_details, editing_master: controller.editing_master(), slides: snapshots, selection: controller.selection() }
+    drop(slides);
+    drop(masters_ref);
+    let text_session = controller.text_session(|t| {
+        let w = t.working();
+        let (runs, paras) = rich_json(&w.runs, &w.body.paras);
+        let (start, end) = t.range();
+        format!(
+            "{{\"slide_id\":{},\"object_id\":{},\"text\":{},\"runs\":{runs},\"paras\":{paras},\"start\":{start},\"end\":{end},\"changed\":{},\"can_undo\":{}}}",
+            t.slide_id,
+            t.object_id,
+            json_str(&w.text),
+            t.changed(),
+            t.can_undo(),
+        )
+    });
+    DeckSnapshot { slide_count, masters, master_details, editing_master: controller.editing_master(), slides: snapshots, selection: controller.selection(), text_session }
 }
 
 /// What the session's source context holds, for GUI journeys to assert
@@ -208,7 +243,7 @@ impl DeckSnapshot {
                     .iter()
                     .map(|o| {
                         format!(
-                            "{{\"index\":{},\"id\":{},\"kind\":{},\"text\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"detail\":{}}}",
+                            "{{\"index\":{},\"id\":{},\"kind\":{},\"text\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"detail\":{},\"runs\":{},\"paras\":{}}}",
                             o.index,
                             o.id,
                             json_str(o.kind),
@@ -218,6 +253,8 @@ impl DeckSnapshot {
                             o.w,
                             o.h,
                             json_str(&o.detail),
+                            o.rich.as_ref().map_or("null", |r| r.0.as_str()),
+                            o.rich.as_ref().map_or("null", |r| r.1.as_str()),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -267,8 +304,10 @@ impl DeckSnapshot {
             crate::controller::SelectionMode::TableCell => "table-cell",
             crate::controller::SelectionMode::GroupScope => "group-scope",
         };
+        let text_range = self.selection.text_range.map_or("null".to_string(), |r| format!("{{\"object_id\":{},\"start\":{},\"end\":{}}}", r.object_id, r.start, r.end));
+        let text_session = self.text_session.as_deref().unwrap_or("null");
         format!(
-            "{{\"slide_count\":{},\"masters\":[{masters}],\"editing_master\":{editing},\"current_slide\":{},\"selected\":{},\"selected_object\":{},\"slide_id\":{},\"selected_ids\":[{selected_ids}],\"primary_object_id\":{},\"selection_mode\":\"{mode}\",\"slides\":[{}]}}",
+            "{{\"slide_count\":{},\"masters\":[{masters}],\"editing_master\":{editing},\"current_slide\":{},\"selected\":{},\"selected_object\":{},\"slide_id\":{},\"selected_ids\":[{selected_ids}],\"primary_object_id\":{},\"selection_mode\":\"{mode}\",\"text_range\":{text_range},\"text_session\":{text_session},\"slides\":[{}]}}",
             self.slide_count,
             current_index.map_or("null".to_string(), |i| i.to_string()),
             primary_index.map_or("null".to_string(), |i| i.to_string()),
