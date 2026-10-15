@@ -80,14 +80,14 @@ pub fn group(ctl: &Ctl, grid: &gtk::DrawingArea, refresh: &Rc<dyn Fn()>) -> (adw
         let (ctl, grid, refresh) = (ctl.clone(), grid.clone(), refresh.clone());
         code.connect_apply(move |row| {
             let nf = format_of(&row.text());
-            crate::sheet_actions::apply(&ctl, &grid, |c| c.mutate_sheet("Number Format", move |s| {
+            crate::sheet_actions::apply(&ctl, &grid, |c| { c.mutate_sheet("Number Format", move |s| {
                 let (r0, c0, r1, c1) = s.selection_block();
                 for r in r0..=r1.min(s.rows.saturating_sub(1)) {
                     for c in c0..=c1.min(s.cols.saturating_sub(1)) {
                         s.formats[r][c] = nf.clone();
                     }
                 }
-            }));
+            }); });
             // The cells' accessible names are their shown values.
             refresh();
             grid.queue_draw();

@@ -180,7 +180,7 @@ pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::Dra
                 (sheet.frozen_rows, sheet.selection_rect().0)
             };
             let rows = if frozen > 0 { 0 } else { top.max(1) };
-            if !apply(&ctl, &grid, |c| c.mutate_sheet("Freeze Rows", move |sheet| sheet.frozen_rows = rows)) {
+            if !apply(&ctl, &grid, |c| { c.mutate_sheet("Freeze Rows", move |sheet| sheet.frozen_rows = rows); }) {
                 return;
             }
             toast(&toasts, if rows > 0 { "Rows frozen" } else { "Rows unfrozen" });
