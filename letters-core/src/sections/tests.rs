@@ -82,7 +82,8 @@ fn section_delete_restores_ranges_and_ids() {
     assert_eq!(ranges(&three), vec![(0, 0, 1), (1, 1, 3), (2, 3, 4)]);
 
     // Remove Section Break on the middle section.
-    edit(&mut doc, &mut history, &remove_break(&doc, 1).unwrap());
+    let ops = remove_break(&doc, 1).unwrap();
+    edit(&mut doc, &mut history, &ops);
     assert_eq!(ranges(&doc), vec![(0, 0, 3), (2, 3, 4)]);
     assert_eq!(doc.sections[0].geometry, PageGeometry::default(), "the earlier section's page wins");
     history.undo(&mut doc).unwrap();
@@ -100,7 +101,8 @@ fn section_delete_restores_ranges_and_ids() {
     history.undo(&mut doc).unwrap();
 
     // Ids are never given twice: with section 2 gone, a new break is 3.
-    edit(&mut doc, &mut history, &remove_break(&doc, 2).unwrap());
+    let ops = remove_break(&doc, 2).unwrap();
+    edit(&mut doc, &mut history, &ops);
     let ops = insert_break(&doc, edit::paragraph_start(&doc, 2), PageGeometry::default()).unwrap();
     edit(&mut doc, &mut history, &ops);
     assert_eq!(ranges(&doc), vec![(0, 0, 1), (1, 1, 2), (3, 2, 4)]);

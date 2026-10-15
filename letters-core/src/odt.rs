@@ -569,19 +569,25 @@ fn content_xml(doc: &Document) -> String {
         });
         para_style_idx.push(Some(pos));
     }
-    for (i, (props, kids, parent)) in para_autos.iter().enumerate() {
+    // A paragraph automatic style: its properties and tab stops, its
+    // heading level's style as parent, and `extra` attributes.
+    let para_auto = |(props, kids, parent): &(String, String, Option<u8>), name: &str, extra: &str| -> String {
         let body = if kids.is_empty() {
             format!("<style:paragraph-properties{props}/>")
         } else {
             format!("<style:paragraph-properties{props}>{kids}</style:paragraph-properties>")
         };
         let parent = parent.map(|n| format!(" style:parent-style-name=\"Heading_20_{n}\"")).unwrap_or_default();
-        auto.push_str(&format!(
-            "<style:style style:name=\"P{}\" style:family=\"paragraph\"{parent}>{}</style:style>",
-            i + 1,
-            body
-        ));
+        format!("<style:style style:name=\"{name}\" style:family=\"paragraph\"{parent}{extra}>{body}</style:style>")
+    };
+    for (i, elem) in para_autos.iter().enumerate() {
+        auto.push_str(&para_auto(elem, &format!("P{}", i + 1), ""));
     }
+    // The paragraph or table each section after the first starts with,
+    // and the section's index: its style names the section's master page,
+    // so it starts a new page on the section's (LET-005S, `styles_xml`).
+    let section_start: std::collections::HashMap<usize, usize> = doc.sections.iter().enumerate().skip(1).map(|(k, s)| (s.range.start, k)).collect();
+    let master_attr = |k: usize| format!(" style:master-page-name=\"{}\"", section_master(k));
     // Every level of both lists: a nested item takes its level's style,
     // and a level a style doesn't define draws unindented and unmarked.
     let bullets = ["•", "◦", "▪"];
@@ -677,11 +683,13 @@ fn content_xml(doc: &Document) -> String {
                     // one, Writer stretches the table to the text width and
                     // scales every column with it.
                     let mut table_style = String::new();
+                    // A table starting a section names its master page.
+                    let master = section_start.get(&pi).map(|k| master_attr(*k)).unwrap_or_default();
                     let columns = match doc.table_columns.get(&c.table).filter(|w| w.len() == cols as usize) {
                         Some(widths) => {
                             let total: f64 = widths.iter().sum();
                             auto.push_str(&format!(
-                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"><style:table-properties style:width=\"{total:.2}pt\" table:align=\"left\"/></style:style>"
+                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties style:width=\"{total:.2}pt\" table:align=\"left\"/></style:style>"
                             ));
                             table_style = format!(" table:style-name=\"Table{tables_written}\"");
                             widths
@@ -696,7 +704,13 @@ fn content_xml(doc: &Document) -> String {
                             })
                             .collect::<String>()
                         }
-                        None => format!("<table:table-column table:number-columns-repeated=\"{cols}\"/>"),
+                        None => {
+                            if !master.is_empty() {
+                                auto.push_str(&format!("<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}/>"));
+                                table_style = format!(" table:style-name=\"Table{tables_written}\"");
+                            }
+                            format!("<table:table-column table:number-columns-repeated=\"{cols}\"/>")
+                        }
                     };
                     // The file's row heights, as row styles: a minimum
                     // height, or a fixed one.
@@ -784,21 +798,39 @@ fn content_xml(doc: &Document) -> String {
 
         // LO built-in named styles win over our automatic styles; the
         // names (Title, Subtitle, Quotations) are ODF/LO conventions.
-        let style_attr = if let Some(level) = p.style.toc {
-            format!(" text:style-name=\"Contents_20_{}\"", level.clamp(1, 10))
+        let (style_name, own_auto) = if let Some(level) = p.style.toc {
+            (Some(format!("Contents_20_{}", level.clamp(1, 10))), None)
         } else if let Some(name) = &p.style.named_style {
-            format!(" text:style-name=\"{}\"", esc(name))
+            (Some(esc(name)), None)
         } else if p.style.block_quote {
-            " text:style-name=\"Quotations\"".to_string()
+            (Some("Quotations".to_string()), None)
         } else if p.style.code_block.is_some() && p.style.heading.is_none() {
-            " text:style-name=\"Preformatted_20_Text\"".to_string()
+            (Some("Preformatted_20_Text".to_string()), None)
         } else {
             match (para_style_idx[pi], p.style.heading) {
-                (Some(i), _) => format!(" text:style-name=\"P{}\"", i + 1),
-                (None, Some(n)) => format!(" text:style-name=\"Heading_20_{n}\""),
-                (None, None) => String::new(),
+                (Some(i), _) => (Some(format!("P{}", i + 1)), Some(i)),
+                (None, Some(n)) => (Some(format!("Heading_20_{n}")), None),
+                (None, None) => (None, None),
             }
         };
+        // A paragraph starting a section has a style of its own naming the
+        // section's master page, otherwise the one it would have: a copy of
+        // its automatic style, or a child of its named one.
+        let style_name = match section_start.get(&pi).filter(|_| cell.is_none()) {
+            Some(&k) => {
+                let name = format!("PS{k}");
+                auto.push_str(&match own_auto {
+                    Some(i) => para_auto(&para_autos[i], &name, &master_attr(k)),
+                    None => {
+                        let parent = style_name.map(|n| format!(" style:parent-style-name=\"{n}\"")).unwrap_or_default();
+                        format!("<style:style style:name=\"{name}\" style:family=\"paragraph\"{parent}{}/>", master_attr(k))
+                    }
+                });
+                Some(name)
+            }
+            None => style_name,
+        };
+        let style_attr = style_name.map(|n| format!(" text:style-name=\"{n}\"")).unwrap_or_default();
 
         let mut inner = String::new();
         for id in std::mem::take(&mut orphans) {
@@ -1059,8 +1091,21 @@ fn chip_from_name(name: &str) -> Option<crate::chips::Chip> {
     Some(Chip { kind, value: value.to_string() })
 }
 
-fn styles_xml(doc: &Document) -> String {
-    let layout = match &doc.page {
+/// The master page section `k` names (LET-005S): the first section's is
+/// "Standard", the one every reader gives a first page naming none.
+fn section_master(k: usize) -> String {
+    if k == 0 { "Standard".to_string() } else { format!("LettersSection{k}") }
+}
+
+/// The page layout section `k`'s master page names.
+fn section_layout(k: usize) -> String {
+    if k == 0 { "pm1".to_string() } else { format!("pmS{k}") }
+}
+
+/// A page layout's properties: the page's size, margins and columns, or
+/// none (the application's page).
+fn page_layout_properties(page: Option<&PageGeometry>) -> String {
+    match page {
         Some(pg) => format!(
             "<style:page-layout-properties \
              fo:page-width=\"{:.2}pt\" fo:page-height=\"{:.2}pt\" \
@@ -1072,7 +1117,40 @@ fn styles_xml(doc: &Document) -> String {
             pg.margin_left_pt, pg.margin_right_pt, pg.columns.max(1), pg.column_gap_pt
         ),
         None => "<style:page-layout-properties/>".to_string(),
+    }
+}
+
+fn styles_xml(doc: &Document) -> String {
+    // One page layout and master page per section (LET-005S), each master
+    // with the header and footer its section's pages show; a document of
+    // one section has "pm1" and "Standard", with its page, header and
+    // footer.
+    struct Master<'a> {
+        name: String,
+        layout: String,
+        page: Option<PageGeometry>,
+        header: (Option<&'a str>, bool),
+        footer: (Option<&'a str>, bool),
+    }
+    let masters: Vec<Master> = if doc.sections.is_empty() {
+        vec![Master { name: section_master(0), layout: section_layout(0), page: doc.page, header: (doc.header.as_deref(), true), footer: (doc.footer.as_deref(), true) }]
+    } else {
+        doc.sections
+            .iter()
+            .enumerate()
+            .map(|(k, s)| Master {
+                name: section_master(k),
+                layout: section_layout(k),
+                page: Some(s.geometry),
+                header: crate::sections::header(doc, k),
+                footer: crate::sections::footer(doc, k),
+            })
+            .collect()
     };
+    let layouts: String = masters
+        .iter()
+        .map(|m| format!("<style:page-layout style:name=\"{}\">{}</style:page-layout>", m.layout, page_layout_properties(m.page.as_ref())))
+        .collect();
     let mut hf = String::new();
     // A header's or footer's pictures are frames at the start of its
     // paragraph, a floating one placed by a graphic style of styles.xml's.
@@ -1081,40 +1159,60 @@ fn styles_xml(doc: &Document) -> String {
     let mut frames = |pictures: &[Run], prefix: &str| -> String {
         pictures.iter().enumerate().filter_map(|(k, r)| picture_frame(r, k + 1, prefix, &mut graphic)).collect()
     };
-    let has = |text: &Option<String>, pictures: &[Run]| text.is_some() || !pictures.is_empty();
-    if has(&doc.header, &doc.header_pictures) || has(&doc.footer, &doc.footer_pictures) {
-        hf.push_str("<office:master-styles><style:master-page style:name=\"Standard\" style:page-layout-name=\"pm1\">");
-        // An aligned header's or footer's paragraph names a style of its own.
-        let aligned = |name: &str, a: Alignment, styles: &mut String| -> String {
-            let align = match a {
-                Alignment::Left => return String::new(),
-                Alignment::Center => "center",
-                Alignment::Right => "end",
-                Alignment::Justify => "justify",
-            };
-            styles.push_str(&format!("<style:style style:name=\"{name}\" style:family=\"paragraph\"><style:paragraph-properties fo:text-align=\"{align}\"/></style:style>"));
-            format!(" text:style-name=\"{name}\"")
+    // Whether a master has a header (or footer): the document's own when
+    // it has text, even empty, or pictures; a section's own text unless
+    // it is "" (no header).
+    let shows = |story: (Option<&str>, bool), pictures: &[Run]| {
+        if story.1 { story.0.is_some() || !pictures.is_empty() } else { story.0.is_some_and(|t| !t.is_empty()) }
+    };
+    let own_shown = masters.iter().any(|m| (m.header.1 && shows(m.header, &doc.header_pictures)) || (m.footer.1 && shows(m.footer, &doc.footer_pictures)));
+    // An aligned header's or footer's paragraph names a style of its own.
+    let aligned = |name: &str, a: Alignment, styles: &mut String| -> String {
+        let align = match a {
+            Alignment::Left => return String::new(),
+            Alignment::Center => "center",
+            Alignment::Right => "end",
+            Alignment::Justify => "justify",
         };
-        let header_style = aligned("LettersHeader", doc.header_alignment, &mut para_styles);
-        let footer_style = aligned("LettersFooter", doc.footer_alignment, &mut para_styles);
-        if has(&doc.header, &doc.header_pictures) {
-            let pics = frames(&doc.header_pictures, "hfr");
-            hf.push_str(&format!(
-                "<style:header><text:p{header_style}>{pics}{}</text:p></style:header>",
-                page_fields(&esc(doc.header.as_deref().unwrap_or("")))
-            ));
-        }
-        if has(&doc.footer, &doc.footer_pictures) {
-            let pics = frames(&doc.footer_pictures, "ffr");
-            hf.push_str(&format!(
-                "<style:footer><text:p{footer_style}>{pics}{}</text:p></style:footer>",
-                page_fields(&esc(doc.footer.as_deref().unwrap_or("")))
-            ));
-        }
-        hf.push_str("</style:master-page></office:master-styles>");
+        styles.push_str(&format!("<style:style style:name=\"{name}\" style:family=\"paragraph\"><style:paragraph-properties fo:text-align=\"{align}\"/></style:style>"));
+        format!(" text:style-name=\"{name}\"")
+    };
+    let (header_style, footer_style) = if own_shown {
+        let header = aligned("LettersHeader", doc.header_alignment, &mut para_styles);
+        (header, aligned("LettersFooter", doc.footer_alignment, &mut para_styles))
     } else {
-        hf.push_str("<office:master-styles><style:master-page style:name=\"Standard\" style:page-layout-name=\"pm1\"/></office:master-styles>");
+        (String::new(), String::new())
+    };
+    hf.push_str("<office:master-styles>");
+    for (k, m) in masters.iter().enumerate() {
+        let header = shows(m.header, &doc.header_pictures);
+        let footer = shows(m.footer, &doc.footer_pictures);
+        if !header && !footer {
+            hf.push_str(&format!("<style:master-page style:name=\"{}\" style:page-layout-name=\"{}\"/>", m.name, m.layout));
+            continue;
+        }
+        hf.push_str(&format!("<style:master-page style:name=\"{}\" style:page-layout-name=\"{}\">", m.name, m.layout));
+        // The pictures and alignment are the document's own header's and
+        // footer's; a later master repeating them names its frames' styles
+        // apart from the first's.
+        let suffix = if k == 0 { String::new() } else { format!("{k}_") };
+        if header {
+            let (pics, style) = if m.header.1 { (frames(&doc.header_pictures, &format!("hfr{suffix}")), header_style.as_str()) } else { (String::new(), "") };
+            hf.push_str(&format!(
+                "<style:header><text:p{style}>{pics}{}</text:p></style:header>",
+                page_fields(&esc(m.header.0.unwrap_or("")))
+            ));
+        }
+        if footer {
+            let (pics, style) = if m.footer.1 { (frames(&doc.footer_pictures, &format!("ffr{suffix}")), footer_style.as_str()) } else { (String::new(), "") };
+            hf.push_str(&format!(
+                "<style:footer><text:p{style}>{pics}{}</text:p></style:footer>",
+                page_fields(&esc(m.footer.0.unwrap_or("")))
+            ));
+        }
+        hf.push_str("</style:master-page>");
     }
+    hf.push_str("</office:master-styles>");
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
          <office:document-styles \
@@ -1128,8 +1226,7 @@ fn styles_xml(doc: &Document) -> String {
          office:version=\"1.2\">\
          <office:styles>{contents}</office:styles>\
          <office:automatic-styles>\
-         <style:page-layout style:name=\"pm1\">{layout}\
-         </style:page-layout>{graphic}{para_styles}</office:automatic-styles>{hf}\
+         {layouts}{graphic}{para_styles}</office:automatic-styles>{hf}\
          </office:document-styles>",
         contents = CODE_STYLES.to_string()
             + &heading_styles(doc)
@@ -1271,6 +1368,9 @@ struct AutoStyles {
     cell_fill: std::collections::HashMap<String, String>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
+    /// A paragraph or table style's `style:master-page-name`: the master
+    /// page a block with the style starts a new page on ("" names none).
+    master: std::collections::HashMap<String, String>,
 }
 
 /// Paragraph-level values read off one automatic style. Lengths are points.
@@ -1393,7 +1493,7 @@ fn list_style_kinds(xml: &str) -> std::collections::HashMap<String, Vec<ListKind
 }
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), graphic: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), graphic: Default::default(), master: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1410,6 +1510,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 "text" => { out.text_parent.insert(n, parent); }
                                 _ => {}
                             }
+                        }
+                        if let (Some(n), Some(m)) = (cur_name.clone(), attr_val(&e, "style:master-page-name")) {
+                            out.master.insert(n, m);
                         }
                     }
                     "style:table-column-properties" => {
@@ -1744,6 +1847,98 @@ fn first_master_page(content: &str, styles: &str) -> Option<String> {
         .or_else(|| masters.first().cloned())
 }
 
+/// The master page a body block whose style is `name` starts a new page
+/// on (LET-005S): the style's `style:master-page-name`, else the one a
+/// parent style names. None where no style in the chain names one, or the
+/// nearest names "" (no new master).
+fn block_master(name: &str, auto: &AutoStyles, named: &AutoStyles) -> Option<String> {
+    let mut cur = Some(name.to_string());
+    for _ in 0..16 {
+        let n = cur?;
+        if let Some(m) = auto.master.get(&n).or_else(|| named.master.get(&n)) {
+            return Some(m.clone()).filter(|m| !m.is_empty());
+        }
+        cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
+    }
+    None
+}
+
+/// A master page of styles.xml as sections need it: its page layout's
+/// name, its header's and footer's text (`{page}`/`{total}` for the
+/// fields) and whether each holds a picture.
+#[derive(Default)]
+struct MasterReading {
+    layout: Option<String>,
+    header: Option<String>,
+    footer: Option<String>,
+    header_pictures: bool,
+    footer_pictures: bool,
+}
+
+/// The sections a body's master page switches make (LET-005S): `switches`
+/// are (first model paragraph, master named) of each top-level block whose
+/// style names a master page, in order. The first page's master (`first`)
+/// starts section 0, whose page is `doc.page` and whose header and footer
+/// are the document's; each switch to another declared master starts a
+/// section on that master's page layout. A switch to the master already
+/// in use is a page break (`page_break_before`), not a section. A
+/// section's header or footer is its master's text ("" for none) where it
+/// differs from the section before's, else None (continued). Empty when
+/// the body never changes master.
+fn master_sections(
+    doc: &mut Document,
+    switches: &[(usize, String)],
+    first: Option<&str>,
+    masters: &std::collections::HashMap<String, MasterReading>,
+    layouts: &std::collections::HashMap<String, PageGeometry>,
+) -> Vec<DocSection> {
+    let Some(first) = first else { return Vec::new() };
+    let mut starts: Vec<(usize, &str)> = vec![(0, first)];
+    for (at, name) in switches {
+        if *at == 0 || !masters.contains_key(name) {
+            continue;
+        }
+        if starts.last().is_some_and(|(_, m)| *m == name.as_str()) {
+            if let Some(p) = doc.paragraphs.get_mut(*at) {
+                p.style.page_break_before = true;
+            }
+        } else {
+            starts.push((*at, name.as_str()));
+        }
+    }
+    if starts.len() < 2 {
+        return Vec::new();
+    }
+    // What a master's pages show in its header (or footer): its text, and
+    // whether it has pictures (which only the first page's master's keep).
+    let story_of = |name: &str, header: bool| -> (String, bool) {
+        let m = masters.get(name);
+        let text = m.and_then(|m| if header { m.header.clone() } else { m.footer.clone() }).unwrap_or_default();
+        (text, m.is_some_and(|m| if header { m.header_pictures } else { m.footer_pictures }))
+    };
+    let story = |k: usize, header: bool| -> Option<String> {
+        let own = story_of(starts[k].1, header);
+        (k > 0 && own != story_of(starts[k - 1].1, header)).then_some(own.0)
+    };
+    let first_page = doc.page.unwrap_or_default();
+    let total = doc.paragraphs.len();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(k, &(start, name))| DocSection {
+            id: k as u32,
+            range: ParagraphRange::new(start, starts.get(k + 1).map_or(total, |s| s.0)),
+            geometry: if k == 0 {
+                first_page
+            } else {
+                masters.get(name).and_then(|m| m.layout.as_ref()).and_then(|l| layouts.get(l)).copied().unwrap_or_default()
+            },
+            header: story(k, true),
+            footer: story(k, false),
+        })
+        .collect()
+}
+
 /// Column layout declared on a `text:section` rather than on the page.
 ///
 /// ODF allows either, and the two live in different parts: a page-wide
@@ -1777,6 +1972,32 @@ fn parse_section_columns(xml: &str) -> Option<(u8, Option<f64>)> {
                 return Some((count, gap));
             }
             Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
+}
+
+/// Each section style's columns, as `parse_section_columns` reads the
+/// first: `text:section` style name → count (more than one) and gap, the
+/// gap only when stated.
+fn section_style_columns(xml: &str) -> std::collections::HashMap<String, (u8, Option<f64>)> {
+    let mut out = std::collections::HashMap::new();
+    let mut reader = Reader::from_str(xml);
+    let mut style: Option<String> = None;
+    let mut in_section_props = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.name().as_ref() == "style:style" => style = attr_val(&e, "style:name"),
+            Ok(Event::End(e)) if e.name().as_ref() == "style:style" => style = None,
+            Ok(Event::Start(e)) if e.name().as_ref() == "style:section-properties" => in_section_props = true,
+            Ok(Event::End(e)) if e.name().as_ref() == "style:section-properties" => in_section_props = false,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if in_section_props && e.name().as_ref() == "style:columns" => {
+                let count = attr_val(&e, "fo:column-count").and_then(|v| v.parse::<u8>().ok()).filter(|c| *c > 1);
+                if let (Some(name), Some(count)) = (style.clone(), count) {
+                    out.insert(name, (count, attr_val(&e, "fo:column-gap").and_then(|v| parse_length_pt(&v))));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return out,
             _ => {}
         }
     }
@@ -2178,6 +2399,15 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         t.map(|(id, r, c, _, _)| crate::model::TableCell { table: id, row: r.max(0) as u32, col: c.max(0) as u32 })
     };
     let mut consumed: Vec<String> = Vec::new();
+    // Each top-level body block (paragraph, heading or table, not text in
+    // a table, frame or note) whose style names a master page: the model
+    // paragraph it starts at and the master (LET-005S, `master_sections`).
+    let mut switches: Vec<(usize, String)> = Vec::new();
+    // Each top-level `text:section`: its style and the model paragraphs it
+    // holds (`open_text_sections` while open, None for one inside a table,
+    // frame or note). LibreOffice writes a Word section's columns so.
+    let mut open_text_sections: Vec<Option<(String, usize)>> = Vec::new();
+    let mut text_sections: Vec<(String, usize, usize)> = Vec::new();
 
     loop {
         let event = reader.read_event();
@@ -2350,6 +2580,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
             Ok(Event::Start(e)) => match e.name().as_ref() {
                 "office:text" => in_body = true,
                 "table:table" if in_body && note.is_none() => {
+                    if table.is_none() && para.is_none() && frame_depth == 0 {
+                        if let Some(m) = attr_val(&e, "table:style-name").and_then(|n| block_master(&n, &auto, &named)) {
+                            switches.push((doc.paragraphs.len(), m));
+                        }
+                    }
                     table_depth += 1;
                     if table.is_none() {
                         table = Some((tables_read, -1, -1, table_depth, false));
@@ -2430,6 +2665,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     note_paras += 1;
                 }
                 "text:p" | "text:h" if in_body => {
+                    if table.is_none() && para.is_none() && frame_depth == 0 {
+                        if let Some(m) = attr_val(&e, "text:style-name").and_then(|n| block_master(&n, &auto, &named)) {
+                            switches.push((doc.paragraphs.len(), m));
+                        }
+                    }
                     let mut style = ParaStyle::default();
                     if e.name().as_ref() == "text:h" {
                         let lvl = attr_val(&e, "text:outline-level")
@@ -2578,6 +2818,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         chip = Some((crate::chips::Chip { kind: crate::chips::ChipKind::Date, value: v }, String::new(), "text:date"));
                     }
                 }
+                "text:section" => {
+                    let top = in_body && table.is_none() && para.is_none() && frame_depth == 0 && note.is_none();
+                    open_text_sections.push(attr_val(&e, "text:style-name").filter(|_| top).map(|n| (n, doc.paragraphs.len())));
+                }
                 "text:table-of-content" => in_toc = true,
                 "text:index-title" if in_toc => in_index_title = true,
                 "text:list" if in_body => {
@@ -2658,6 +2902,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 }
                 "text:p" if note.is_some() => {}
                 "text:p" | "text:h" if in_body => {
+                    if table.is_none() && para.is_none() && frame_depth == 0 {
+                        if let Some(m) = attr_val(&e, "text:style-name").and_then(|n| block_master(&n, &auto, &named)) {
+                            switches.push((doc.paragraphs.len(), m));
+                        }
+                    }
                     let (kind, list_label) = item_list(&list_style_names, &item_styles, list_kind, list_level);
                     let style = ParaStyle { list: kind, list_level: list_level.saturating_sub(1), list_start: pending_start.take(), list_label, table_cell: cell_of(&table), ..Default::default() };
                     if let Some(t) = table.as_mut() {
@@ -2779,6 +3028,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                     table_depth -= 1;
                 }
+                "text:section" => {
+                    if let Some(Some((name, start))) = open_text_sections.pop() {
+                        text_sections.push((name, start, doc.paragraphs.len()));
+                    }
+                }
                 "text:table-of-content" => in_toc = false,
                 "text:index-title" => in_index_title = false,
                 "text:span" => {
@@ -2830,8 +3084,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     }
 
     // Header/footer and page geometry from styles.xml: the first page's
-    // master page only (a file may hold several, each with its own
-    // header, and joining them repeated the header's text).
+    // master page gives the document's (a file may hold several, each with
+    // its own header, and joining them repeated the header's text). Every
+    // master's layout and header and footer text is kept too, for the
+    // sections a body that changes master makes (`master_sections`).
     if !styles.is_empty() {
         let master = first_master_page(&content, &styles);
         let mut reader = Reader::from_str(&styles);
@@ -2839,6 +3095,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut in_footer = false;
         // The master page being read, and whether it is the first page's.
         let mut in_master = false;
+        let mut cur_master: Option<String> = None;
+        let mut master_pages: std::collections::HashMap<String, MasterReading> = Default::default();
+        // In a header or footer of any master page (`in_header` and
+        // `in_footer` are the first page's master's only).
+        let mut in_any_header = false;
+        let mut in_any_footer = false;
         let mut layouts: std::collections::HashMap<String, PageGeometry> = Default::default();
         let mut layout_name = String::new();
         let mut master_layout: Option<String> = None;
@@ -2896,7 +3158,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         layouts.insert(layout_name.clone(), page);
                     }
                 }
-                Ok(Event::Empty(e)) if e.name().as_ref() == "style:columns" => {
+                // LibreOffice writes its columns with `style:column`
+                // children (a start tag); the count and gap are the same.
+                Ok(Event::Empty(e)) | Ok(Event::Start(e)) if e.name().as_ref() == "style:columns" => {
                     if let Some(page) = layouts.get_mut(&layout_name) {
                         page.columns = attr_val(&e, "fo:column-count")
                             .and_then(|v| v.parse::<u8>().ok()).unwrap_or(1).max(1);
@@ -2905,17 +3169,28 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                 }
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:master-page" => {
-                    in_master = attr_val(&e, "style:name") == master;
+                    cur_master = attr_val(&e, "style:name");
+                    in_master = cur_master == master;
                     if in_master {
                         master_layout = attr_val(&e, "style:page-layout-name");
                     }
-                }
-                Ok(Event::Empty(e)) if e.name().as_ref() == "style:master-page" => {
-                    if attr_val(&e, "style:name") == master {
-                        master_layout = attr_val(&e, "style:page-layout-name");
+                    if let Some(n) = cur_master.clone() {
+                        master_pages.insert(n, MasterReading { layout: attr_val(&e, "style:page-layout-name"), ..Default::default() });
                     }
                 }
-                Ok(Event::End(e)) if e.name().as_ref() == "style:master-page" => in_master = false,
+                Ok(Event::Empty(e)) if e.name().as_ref() == "style:master-page" => {
+                    let name = attr_val(&e, "style:name");
+                    if name == master {
+                        master_layout = attr_val(&e, "style:page-layout-name");
+                    }
+                    if let Some(n) = name {
+                        master_pages.insert(n, MasterReading { layout: attr_val(&e, "style:page-layout-name"), ..Default::default() });
+                    }
+                }
+                Ok(Event::End(e)) if e.name().as_ref() == "style:master-page" => {
+                    in_master = false;
+                    cur_master = None;
+                }
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:frame" && (in_header || in_footer) => {
                     let size = |a: &str| attr_val(&e, a).as_deref().and_then(length_emu);
                     let floating = attr_val(&e, "text:anchor-type").is_some_and(|t| matches!(t.as_str(), "paragraph" | "char" | "page"));
@@ -2932,6 +3207,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:image" => {
                     if let Some((_, f)) = hf_frame.as_mut().filter(|(_, f)| f.href.is_none()) {
                         f.href = attr_val(&e, "xlink:href");
+                    }
+                    if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)) {
+                        m.header_pictures |= in_any_header;
+                        m.footer_pictures |= in_any_footer;
                     }
                 }
                 Ok(Event::End(e)) if e.name().as_ref() == "draw:frame" => {
@@ -2955,19 +3234,31 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 }
                 Ok(Event::Start(e)) => match e.name().as_ref() {
                     "style:page-layout" => layout_name = attr_val(&e, "style:name").unwrap_or_default(),
-                    "style:header" => in_header = in_master,
-                    "style:footer" => in_footer = in_master,
+                    "style:header" => {
+                        in_header = in_master;
+                        in_any_header = true;
+                    }
+                    "style:footer" => {
+                        in_footer = in_master;
+                        in_any_footer = true;
+                    }
                     "text:p" | "text:h" if (in_header || in_footer) && hf_box_depth == 0 => hf_para_style = attr_val(&e, "text:style-name"),
                     "draw:text-box" if in_header || in_footer => hf_box_depth += 1,
                     "svg:title" | "svg:desc" => in_alt = true,
-                    "text:page-number" | "text:page-count" if in_header || in_footer => {
+                    "text:page-number" | "text:page-count" if in_any_header || in_any_footer => {
                         let placeholder = if e.name().as_ref() == "text:page-number" { "{page}" } else { "{total}" };
-                        let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
-                        let (target, alignment) = if in_header { (&mut doc.header, &mut doc.header_alignment) } else { (&mut doc.footer, &mut doc.footer_alignment) };
-                        if target.is_none() {
-                            *alignment = align;
+                        if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)) {
+                            let target = if in_any_header { &mut m.header } else { &mut m.footer };
+                            target.get_or_insert_with(String::new).push_str(placeholder);
                         }
-                        target.get_or_insert_with(String::new).push_str(placeholder);
+                        if in_header || in_footer {
+                            let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
+                            let (target, alignment) = if in_header { (&mut doc.header, &mut doc.header_alignment) } else { (&mut doc.footer, &mut doc.footer_alignment) };
+                            if target.is_none() {
+                                *alignment = align;
+                            }
+                            target.get_or_insert_with(String::new).push_str(placeholder);
+                        }
                         in_field = true;
                     }
                     "style:page-layout-properties" => {
@@ -2980,8 +3271,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 },
                 Ok(Event::End(e)) => match e.name().as_ref() {
                     "draw:text-box" => hf_box_depth = hf_box_depth.saturating_sub(1),
-                    "style:header" => in_header = false,
-                    "style:footer" => in_footer = false,
+                    "style:header" => {
+                        in_header = false;
+                        in_any_header = false;
+                    }
+                    "style:footer" => {
+                        in_footer = false;
+                        in_any_footer = false;
+                    }
                     "svg:title" | "svg:desc" => in_alt = false,
                     "text:page-number" | "text:page-count" => in_field = false,
                     _ => {}
@@ -2994,6 +3291,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Text(_)) if in_field => {}
                 Ok(Event::Text(t)) => {
                     let txt = unescape_text(&t);
+                    if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| !txt.trim().is_empty()) {
+                        if in_any_header {
+                            m.header.get_or_insert_with(String::new).push_str(&txt);
+                        }
+                        if in_any_footer {
+                            m.footer.get_or_insert_with(String::new).push_str(&txt);
+                        }
+                    }
                     let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
                     if in_header && !txt.trim().is_empty() {
                         if doc.header.is_none() {
@@ -3011,6 +3316,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::GeneralRef(_)) if in_field || in_alt => {}
                 Ok(Event::GeneralRef(r)) => {
                     let txt = resolve_general_ref(&r);
+                    if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)) {
+                        if in_any_header {
+                            m.header.get_or_insert_with(String::new).push_str(&txt);
+                        }
+                        if in_any_footer {
+                            m.footer.get_or_insert_with(String::new).push_str(&txt);
+                        }
+                    }
                     if in_header {
                         doc.header.get_or_insert_with(String::new).push_str(&txt);
                     }
@@ -3025,7 +3338,35 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         }
         // The first page's layout; without a master page naming one that
         // exists, the last one read, as before.
-        doc.page = master_layout.filter(|n| layouts.contains_key(n)).or(last_layout).and_then(|n| layouts.remove(&n));
+        doc.page = master_layout.filter(|n| layouts.contains_key(n)).or(last_layout).and_then(|n| layouts.get(&n).copied());
+        // A body that changes master page is several sections, the first
+        // on the page just read; a list that breaks the contract (a switch
+        // where no paragraph starts) leaves the document one section.
+        let mut sections = master_sections(&mut doc, &switches, master.as_deref(), &master_pages, &layouts);
+        // A section whose page has one column takes the columns of a
+        // `text:section` wrapping its paragraphs: LibreOffice writes a Word
+        // section's columns as one, from the section's start to at most
+        // its end (empty paragraphs after it are still the section's).
+        if !sections.is_empty() {
+            let columns = section_style_columns(&content);
+            for s in sections.iter_mut().filter(|s| s.geometry.columns <= 1) {
+                let wrapping = text_sections
+                    .iter()
+                    .filter(|(_, start, end)| *start == s.range.start && *end > *start && *end <= s.range.end)
+                    .find_map(|(name, _, _)| columns.get(name));
+                if let Some(&(count, gap)) = wrapping {
+                    s.geometry.columns = count;
+                    if let Some(gap) = gap {
+                        s.geometry.column_gap_pt = gap;
+                    }
+                }
+            }
+        }
+        if !sections.is_empty() && crate::sections::is_valid(&doc, &sections) {
+            doc.page = Some(sections[0].geometry);
+            doc.next_section_id = sections.len() as u32;
+            doc.sections = sections;
+        }
     }
 
     continue_numbering(&mut doc.paragraphs, &top_lists);
@@ -3036,8 +3377,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_fills = cell_fills;
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
-    // an explicit page-wide count still wins.
-    if let Some((count, gap)) = parse_section_columns(&content) {
+    // an explicit page-wide count still wins; a document of several
+    // sections keeps each section's own page layout's.
+    if let Some((count, gap)) = parse_section_columns(&content).filter(|_| doc.sections.is_empty()) {
         let page = doc.page.get_or_insert_with(PageGeometry::default);
         if page.columns <= 1 {
             page.columns = count;
@@ -4017,5 +4359,173 @@ mod tests {
     fn empty_paragraphs_preserved() {
         let d = Document::from_plain_text("a\n\n\nb");
         assert_eq!(round_trip(&d).to_plain_text(), "a\n\n\nb");
+    }
+
+    /// A document of three sections (LET-005S) saves each one's page as a
+    /// page layout and master page, and reopens with the same sections:
+    /// a landscape two-column middle with its own header, then a part that
+    /// starts with a table and has no footer.
+    #[test]
+    fn multi_section_odt_round_trips_geometry_and_headers() {
+        let cell = |col, text: &str| Paragraph {
+            style: ParaStyle { table_cell: Some(crate::model::TableCell { table: 0, row: 0, col }), ..Default::default() },
+            runs: vec![Run::plain(text)],
+        };
+        let mut d = Document::from_plain_text("Intro\nBody\nWide one\nWide two");
+        d.paragraphs.extend([cell(0, "a1"), cell(1, "b1"), Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] }]);
+        d.header = Some("Report".into());
+        d.footer = Some("Page {page}".into());
+        let portrait = PageGeometry::default();
+        let landscape = PageGeometry {
+            width_pt: 842.0,
+            height_pt: 595.0,
+            margin_top_pt: 36.0,
+            margin_bottom_pt: 36.0,
+            margin_left_pt: 36.0,
+            margin_right_pt: 36.0,
+            columns: 2,
+            column_gap_pt: 24.0,
+        };
+        let last = PageGeometry { margin_left_pt: 50.0, margin_right_pt: 50.0, ..PageGeometry::default() };
+        let section = |id: u32, start, end, geometry, header: Option<&str>, footer: Option<&str>| DocSection {
+            id,
+            range: ParagraphRange::new(start, end),
+            geometry,
+            header: header.map(str::to_string),
+            footer: footer.map(str::to_string),
+        };
+        d.sections = vec![
+            section(0, 0, 2, portrait, None, None),
+            section(1, 2, 4, landscape, Some("Appendix {page}"), None),
+            section(2, 4, 7, last, None, Some("")),
+        ];
+        d.next_section_id = 3;
+        d.page = Some(portrait);
+        assert!(crate::sections::is_valid(&d, &d.sections));
+
+        let rt = round_trip(&d);
+        let ranges: Vec<(usize, usize)> = rt.sections.iter().map(|s| (s.range.start, s.range.end)).collect();
+        assert_eq!(ranges, vec![(0, 2), (2, 4), (4, 7)], "{:?}", rt.sections);
+        for (got, want) in rt.sections.iter().zip(&d.sections) {
+            assert!(got.geometry.approx_eq(&want.geometry), "section {}: {:?}", want.id, got.geometry);
+        }
+        assert_eq!(rt.sections.iter().map(|s| s.id).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(rt.next_section_id, 3);
+        // The first section's header and footer are the document's; the
+        // middle's header is its own and its footer continues; the last's
+        // header continues the middle's and it has no footer.
+        assert_eq!(rt.header.as_deref(), Some("Report"));
+        assert_eq!(rt.footer.as_deref(), Some("Page {page}"));
+        let stories: Vec<(Option<&str>, Option<&str>)> = rt.sections.iter().map(|s| (s.header.as_deref(), s.footer.as_deref())).collect();
+        assert_eq!(stories, vec![(None, None), (Some("Appendix {page}"), None), (None, Some(""))]);
+        assert!(rt.page.expect("the first section's page").approx_eq(&portrait));
+        assert_eq!(rt.paragraphs[4].style.table_cell.map(|c| c.col), Some(0));
+        assert_eq!(rt.paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>(), d.paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>());
+    }
+
+    /// A body paragraph whose style names another master page starts a
+    /// section on that master's page layout (LET-005S), with the master's
+    /// header ("" for none); one naming the master already in use, here
+    /// through its parent style, is a page break.
+    #[test]
+    fn a_master_page_switch_starts_a_section() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Wide\" style:family=\"paragraph\" style:master-page-name=\"Landscape\"/>\
+             </office:styles><office:automatic-styles>\
+             <style:page-layout style:name=\"PL0\"><style:page-layout-properties fo:page-width=\"8.27in\" fo:page-height=\"11.69in\" fo:margin-left=\"1in\"/></style:page-layout>\
+             <style:page-layout style:name=\"PL1\"><style:page-layout-properties fo:page-width=\"11.69in\" fo:page-height=\"8.27in\" fo:margin-left=\"0.5in\">\
+             <style:columns fo:column-count=\"2\" fo:column-gap=\"0.5in\"/></style:page-layout-properties></style:page-layout>\
+             </office:automatic-styles><office:master-styles>\
+             <style:master-page style:name=\"Standard\" style:page-layout-name=\"PL0\"><style:header><text:p>Main</text:p></style:header></style:master-page>\
+             <style:master-page style:name=\"Landscape\" style:page-layout-name=\"PL1\"/>\
+             </office:master-styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P2\" style:family=\"paragraph\" style:master-page-name=\"Landscape\"/>\
+             <style:style style:name=\"P3\" style:family=\"paragraph\" style:parent-style-name=\"Wide\"/>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:p>one</text:p><text:p text:style-name=\"P2\">two</text:p><text:p>three</text:p><text:p text:style-name=\"P3\">four</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert_eq!(d.sections.len(), 2, "{:?}", d.sections);
+        assert_eq!((d.sections[0].range.start, d.sections[0].range.end), (0, 1));
+        assert_eq!((d.sections[1].range.start, d.sections[1].range.end), (1, 4));
+        let wide = d.sections[1].geometry;
+        assert!((wide.width_pt - 11.69 * 72.0).abs() < 1e-6 && (wide.height_pt - 8.27 * 72.0).abs() < 1e-6, "{wide:?}");
+        assert!((wide.margin_left_pt - 36.0).abs() < 1e-6);
+        assert_eq!((wide.columns, (wide.column_gap_pt - 36.0).abs() < 1e-6), (2, true));
+        assert!((d.sections[0].geometry.margin_left_pt - 72.0).abs() < 1e-6);
+        assert_eq!(d.page, Some(d.sections[0].geometry));
+        assert_eq!(d.header.as_deref(), Some("Main"));
+        assert_eq!((d.sections[0].header.as_deref(), d.sections[1].header.as_deref()), (None, Some("")));
+        assert_eq!((d.sections[0].footer.as_deref(), d.sections[1].footer.as_deref()), (None, None));
+        assert_eq!(d.next_section_id, 2);
+        let breaks: Vec<bool> = d.paragraphs.iter().map(|p| p.style.page_break_before).collect();
+        assert_eq!(breaks, vec![false, false, false, true]);
+    }
+
+    /// LibreOffice converting a Word section with columns writes them as a
+    /// `text:section` around the section's paragraphs, its page style one
+    /// column: the section (LET-005S) takes the text:section's columns;
+    /// the first section, which no text:section wraps, keeps one.
+    #[test]
+    fn writer_section_columns_become_the_sections_columns() {
+        let styles = "<office:document-styles><office:automatic-styles>\
+             <style:page-layout style:name=\"PL0\"><style:page-layout-properties fo:page-width=\"8.27in\" fo:page-height=\"11.69in\"/></style:page-layout>\
+             <style:page-layout style:name=\"PL1\"><style:page-layout-properties fo:page-width=\"11.69in\" fo:page-height=\"8.27in\">\
+             <style:columns fo:column-count=\"1\" fo:column-gap=\"0in\"/></style:page-layout-properties></style:page-layout>\
+             </office:automatic-styles><office:master-styles>\
+             <style:master-page style:name=\"Standard\" style:page-layout-name=\"PL0\"/>\
+             <style:master-page style:name=\"Converted1\" style:page-layout-name=\"PL1\"/>\
+             </office:master-styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P2\" style:family=\"paragraph\" style:master-page-name=\"Converted1\"/>\
+             <style:style style:name=\"Sect1\" style:family=\"section\"><style:section-properties>\
+             <style:columns fo:column-count=\"2\" fo:column-gap=\"24pt\"><style:column style:rel-width=\"1*\"/><style:column style:rel-width=\"1*\"/></style:columns>\
+             </style:section-properties></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:p>one</text:p>\
+             <text:section text:style-name=\"Sect1\" text:name=\"Section1\"><text:p text:style-name=\"P2\">two</text:p><text:p>three</text:p></text:section>\
+             <text:p/>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert_eq!(d.sections.len(), 2, "{:?}", d.sections);
+        assert_eq!((d.sections[1].range.start, d.sections[1].range.end), (1, 4));
+        let wide = d.sections[1].geometry;
+        assert_eq!(wide.columns, 2, "{wide:?}");
+        assert!((wide.column_gap_pt - 24.0).abs() < 1e-6, "{wide:?}");
+        assert!((wide.width_pt - 11.69 * 72.0).abs() < 1e-6);
+        assert_eq!(d.sections[0].geometry.columns, 1);
+        assert_eq!(d.page, Some(d.sections[0].geometry));
+    }
+
+    /// A file of one master page reads as one section, even where a
+    /// paragraph names that master again (a page break), and a document of
+    /// one section saves one page layout and one master page.
+    #[test]
+    fn single_master_files_keep_one_page() {
+        let styles = "<office:document-styles><office:automatic-styles>\
+             <style:page-layout style:name=\"PL0\"><style:page-layout-properties fo:page-width=\"8.5in\" fo:page-height=\"11in\"/></style:page-layout>\
+             </office:automatic-styles><office:master-styles>\
+             <style:master-page style:name=\"Standard\" style:page-layout-name=\"PL0\"/>\
+             </office:master-styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P1\" style:family=\"paragraph\" style:master-page-name=\"Standard\"/>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:p text:style-name=\"P1\">one</text:p><text:p>two</text:p><text:p text:style-name=\"P1\">three</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert!(d.sections.is_empty(), "{:?}", d.sections);
+        assert_eq!(d.next_section_id, 0);
+        assert!((d.page.expect("the master's page").width_pt - 612.0).abs() < 1e-6);
+        assert!(d.paragraphs[2].style.page_break_before);
+
+        let mut one = Document::from_plain_text("a\nb");
+        one.header = Some("H".into());
+        let xml = styles_xml(&one);
+        assert_eq!(xml.matches("<style:page-layout ").count(), 1);
+        assert_eq!(xml.matches("<style:master-page ").count(), 1);
+        assert!(xml.contains("<style:master-page style:name=\"Standard\" style:page-layout-name=\"pm1\"><style:header><text:p>H</text:p></style:header></style:master-page>"));
+        assert!(!content_xml(&one).contains("master-page-name"));
+        assert!(round_trip(&one).sections.is_empty());
     }
 }
