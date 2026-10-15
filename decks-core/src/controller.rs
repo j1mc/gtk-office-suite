@@ -196,6 +196,7 @@ fn master_as_slide(m: &MasterSlide) -> Slide {
     Slide {
         title: m.name.clone(),
         background: m.background.clone(),
+        background_picture: None,
         objects: m.shapes.clone(),
         notes: String::new(),
         // No master: its decorations are the objects being edited, and
@@ -1658,7 +1659,7 @@ mod tests {
     use crate::engine::Slide;
 
     fn slide(title: &str) -> Slide {
-        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None }
+        Slide { title: title.into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: String::new(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None }
     }
 
     fn rect(x: f64, y: f64) -> SlideObject {

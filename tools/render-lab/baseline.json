@@ -14,6 +14,10 @@
     "B": "green",
     "C": "green"
   },
+  "decks/delegated-authorities-reduced-dark-mode-window": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/edited-journey": {
     "A": "green",
     "B": "green"
@@ -27,6 +31,14 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "decks/pay-centre-reduced-line-breaks": {
+    "A": "amber",
+    "B": "amber"
+  },
+  "decks/pay-centre-reduced-picture-background": {
+    "A": "green",
+    "B": "green"
   },
   "decks/rich-text-edited": {
     "A": "green",

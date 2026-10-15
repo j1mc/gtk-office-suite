@@ -58,6 +58,7 @@ fn slide(title: &str, xs: &[f64]) -> Slide {
     Slide {
         title: title.into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: xs.iter().map(|x| rect(*x)).collect(),
         notes: String::new(),
         master_id: None,

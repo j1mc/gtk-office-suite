@@ -354,6 +354,7 @@ mod tests {
         Slide {
             title: "s".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects,
             notes: String::new(),
             master_id: Some(7),

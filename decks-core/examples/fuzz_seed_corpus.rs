@@ -33,6 +33,7 @@ fn decks() -> Vec<(&'static str, Deck)> {
             .map(|index| Slide {
                 title: format!("Slide {index}"),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![text_box(40.0, 40.0, &format!("Slide {index}"), Vec::new())],
                 notes: format!("Speaker notes for slide {index}"),
                 master_id: None,

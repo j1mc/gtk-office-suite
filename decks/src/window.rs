@@ -54,6 +54,7 @@ impl DecksWindow {
             vec![Slide {
                 title: "Slide 1".into(),
                 background: "#ffffff".into(),
+                background_picture: None,
                 objects: vec![],
                 notes: String::new(),
                 master_id: None,
@@ -776,6 +777,7 @@ impl DecksWindow {
                 let new_slide = Slide {
                     title: format!("Slide {}", idx + 1),
                     background: "#ffffff".into(),
+                    background_picture: None,
                     objects: vec![],
                     notes: String::new(),
                     master_id: None,
@@ -1115,6 +1117,7 @@ impl DecksWindow {
                     *slides = vec![Slide {
                         title: "Slide 1".into(),
                         background: "#ffffff".into(),
+                        background_picture: None,
                         objects: vec![],
                         notes: String::new(),
                         master_id: None,
