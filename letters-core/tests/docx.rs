@@ -931,7 +931,7 @@ fn a_cleared_or_non_stop_tab_entry_is_not_read_as_a_stop() {
     let rt = docx::read(doctored.to_str().unwrap()).expect("read doctored docx");
     let stops = &rt.paragraphs[0].style.tab_stops_pt;
     assert_eq!(stops.len(), 1, "non-stop entries were read as stops: {stops:?}");
-    assert!((stops[0] - 36.0).abs() < 0.1, "the real stop was lost: {stops:?}");
+    assert!((stops[0].pos_pt - 36.0).abs() < 0.1, "the real stop was lost: {stops:?}");
 }
 
 /// Collapse whitespace between XML elements (`>   <` becomes `><`).
