@@ -2093,8 +2093,56 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let odt_path = dir.path().join("keep.odt");
     assert!(odt_path.exists(), "soffice did not convert docx to odt");
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt", true);
+    // Temporary diagnostic: our styles and Writer's converted
+    // properties for every paragraph, to see the whole mapping.
+    let sub = dir.path().join("diag");
+    std::fs::create_dir_all(&sub).unwrap();
+    let op = sub.join("keep.odt");
+    letters_core::odt::write(&d, op.to_str().unwrap()).expect("write odt");
+    eprintln!("DIAG our styles: {}", auto_styles_of(&op));
+    let _ = soffice_convert(bin, &op, "docx").ok();
+    let dp = sub.join("keep.docx");
+    for text in ["kept together", "may strand", "ordinary"] {
+        eprintln!("DIAG converted [{text}]: {}", ppr_window(&dp, text));
+    }
     let Some(rt) = through_lo_to_docx(&d, "keep") else { return };
     close(&rt, "odt → Writer → docx", false);
+}
+
+/// DIAGNOSTIC (temporary): every automatic paragraph style in an odt.
+fn auto_styles_of(path: &std::path::Path) -> String {
+    let f = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(f).unwrap();
+    let mut xml = String::new();
+    use std::io::Read;
+    zip.by_name("content.xml").unwrap().read_to_string(&mut xml).unwrap();
+    let mut out = Vec::new();
+    let mut rest = xml.as_str();
+    while let Some(at) = rest.find("<style:style ") {
+        let end = rest[at..].find('>').map(|e| at + e + 1).unwrap_or(rest.len());
+        let head = &rest[at..end];
+        if head.contains("paragraph") {
+            let close = rest[end..].find("</style:style>").map(|e| end + e + 14).unwrap_or(end);
+            out.push(rest[at..close].to_string());
+            rest = &rest[close..];
+        } else {
+            rest = &rest[end..];
+        }
+    }
+    out.join(" || ")
+}
+
+/// DIAGNOSTIC (temporary): 300 chars around `text` in a converted docx.
+fn ppr_window(path: &std::path::Path, text: &str) -> String {
+    let f = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(f).unwrap();
+    let mut xml = String::new();
+    use std::io::Read;
+    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+    let Some(at) = xml.find(text) else { return "text not found".into() };
+    let from = xml.floor_char_boundary(at.saturating_sub(300));
+    let end = (at + 60).min(xml.len());
+    xml[from..end].to_string()
 }
 
 /// Fixed and minimum line heights across the format boundary, both
