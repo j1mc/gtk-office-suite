@@ -20,7 +20,8 @@ use decks_core::engine::Deck;
 use gtk4::cairo;
 
 /// A slide page for a deck with no size of its own: 10in x 5.625in, in
-/// points.
+/// points. Test-only: the handout test below draws both this and 4:3.
+#[cfg(test)]
 pub const SLIDE_PT: (f64, f64) = (720.0, 405.0);
 
 /// The page `deck` is exported on, in points: the deck's own size

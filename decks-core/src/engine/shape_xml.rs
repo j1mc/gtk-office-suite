@@ -883,14 +883,14 @@ mod tests {
         );
         let s = &sp_styles(&xml, &Theme::default(), 1.0)[0].style;
         assert_eq!(
-            s.fill_src,
-            Some(FillSrc::Color(ColorRef::Theme(ThemeColor {
+            &s.fill_src,
+            &Some(FillSrc::Color(ColorRef::Theme(ThemeColor {
                 slot: "accent1".into(),
                 mods: vec![super::super::theme::ColorMod::Shade(50_000)],
             })))
         );
         assert_eq!(s.fill, Some(Color(0x44, 0x72, 0xC4).shade(50_000)), "the resolved cache agrees with the reference");
-        assert_eq!(s.stroke_src, Some(StrokeSrc::Color(ColorRef::Rgb("112233".into()))));
+        assert_eq!(&s.stroke_src, &Some(StrokeSrc::Color(ColorRef::Rgb("112233".into()))));
     }
 
     #[test]
@@ -898,10 +898,10 @@ mod tests {
         use super::super::theme::{FillSrc, StrokeSrc};
         let xml = sp(r#"<a:noFill/><a:ln><a:noFill/></a:ln>"#, "");
         let s = &sp_styles(&xml, &Theme::default(), 1.0)[0].style;
-        assert_eq!((s.fill_src, s.stroke_src), (Some(FillSrc::NoFill), Some(StrokeSrc::NoLine)));
+        assert_eq!((&s.fill_src, &s.stroke_src), (&Some(FillSrc::NoFill), &Some(StrokeSrc::NoLine)));
         let bare = sp("", "");
         let s = &sp_styles(&bare, &Theme::default(), 1.0)[0].style;
-        assert_eq!((s.fill_src, s.stroke_src), (None, None));
+        assert_eq!((&s.fill_src, &s.stroke_src), (&None, &None));
     }
 
     #[test]
