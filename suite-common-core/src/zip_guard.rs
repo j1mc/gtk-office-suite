@@ -259,8 +259,8 @@ pub fn xml_depth(xml: &[u8]) -> usize {
     deepest
 }
 
-/// Refuse the package at `path` if any of its XML members nests deeper than
-/// `limit`, reading them under the default limits.
+/// Refuse the package at `path` if any member exceeds the default package
+/// limits, or if any XML member nests deeper than `limit`.
 ///
 /// For readers that hand the package to a parser which recurses once per
 /// level: such a parser overflows the thread's stack on a deep enough part,
@@ -274,10 +274,10 @@ pub fn check_xml_depth(path: &std::path::Path, limit: usize) -> Result<(), Strin
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
+        let bytes = budget.read_entry(&mut entry, &name)?;
         if !(name.ends_with(".xml") || name.ends_with(".rels")) {
             continue;
         }
-        let bytes = budget.read_entry(&mut entry, &name)?;
         let depth = xml_depth(&bytes);
         if depth > limit {
             return Err(format!(

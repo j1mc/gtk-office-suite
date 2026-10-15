@@ -27,7 +27,9 @@ WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "nightly.yml")
 
 # `- 'some/path/**'` inside a block, comments and blank lines ignored.
 PATTERN_LINE = re.compile(r"^\s*-\s*'([^']+)'\s*$")
-TESTED_CRATES = re.compile(r"cargo test((?:\s+-p\s+[\w-]+)+)")
+# The oracle runs under nextest so its lane records per-test outcomes
+# (SH-001); `cargo test` is still accepted for any step that uses it.
+TESTED_CRATES = re.compile(r"cargo (?:test|nextest run)((?:\s+-p\s+[\w-]+)+)")
 
 
 def oracle_path_filter():
@@ -67,7 +69,7 @@ def oracle_path_filter():
 
 
 def crates_the_oracle_tests():
-    """Every `-p` crate named by a `cargo test` step in the workflow."""
+    """Every `-p` crate named by a `cargo test`/`cargo nextest run` step."""
     with open(WORKFLOW, encoding="utf-8") as handle:
         text = handle.read()
     crates = set()

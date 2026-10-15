@@ -286,7 +286,7 @@ mod tests {
     use crate::engine::Slide;
 
     fn slide(title: &str) -> Slide {
-        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_id: Some(0), transition: Default::default(), builds: vec![], ids: Default::default(), layout_id: None }
+        Slide { title: title.into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: String::new(), master_id: Some(0), transition: Default::default(), builds: vec![], ids: Default::default(), layout_id: None }
     }
 
     #[test]

@@ -631,6 +631,7 @@ mod tests {
             Box::new(crate::engine::Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![],
                 notes: String::new(),
                 master_id: None,

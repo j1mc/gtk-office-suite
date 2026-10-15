@@ -59,9 +59,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-pytest xvfb x11-utils libglib2.0-bin python3-numpy python3-pil
 
+      # --junitxml: the outcomes this lane's ledger step judges below. A
+      # collection says a test exists; only the report says it ran (SH-001).
       - name: Unit tests for the release-gate and parity validators
         run: |
-          python3 -m pytest -q \
+          python3 -m pytest -q --junitxml=python-junit.xml \
             tests/test_release_gate.py \
             tests/test_release_soak.py \
             tests/test_workflow_credentials.py \
@@ -96,6 +98,7 @@ jobs:
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
             tests/test_render_lab_locate.py \
+            tests/test_render_real_scope.py \
             tests/test_installed_check.py \
             tests/test_core_shell_split.py \
             tests/test_release_evidence.py \
@@ -106,6 +109,7 @@ jobs:
             tests/test_export_parity.py \
             tests/test_feature_docs.py \
             tests/test_keep_changed_screenshots.py \
+            tests/test_required_checks.py \
             tests/adaptive_editor_contract.py
 
       # E1-E3: green rows cite evidence, referenced paths exist, journey-gated
@@ -172,6 +176,7 @@ jobs:
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
             tests/test_render_lab_locate.py \
+            tests/test_render_real_scope.py \
             tests/test_installed_check.py \
             tests/test_core_shell_split.py \
             tests/test_release_evidence.py \
@@ -182,12 +187,28 @@ jobs:
             tests/test_export_parity.py \
             tests/test_feature_docs.py \
             tests/test_keep_changed_screenshots.py \
+            tests/test_required_checks.py \
             tests/adaptive_editor_contract.py > python-collected.txt
+          # The collection and the run's own report together: a test that
+          # was collected and has no outcome did not run, and a lane whose
+          # inventory is empty, or stamped with another revision, is a
+          # missing result rather than a pass (SH-001).
           python3 conformance/collect_test_inventory.py \
-            --pytest "tests=python-collected.txt" --out python-inventory.json
+            --pytest "tests=python-collected.txt" --pytest-junit "=python-junit.xml" \
+            --revision "$GITHUB_SHA" \
+            --out python-inventory.json --results-out python-results.json
           python3 conformance/validate_capabilities.py \
             --lanes conformance/lanes.json --lane python-checks \
-            --collected python-inventory.json
+            --collected python-inventory.json --results python-results.json \
+            --candidate "$GITHUB_SHA"
+
+      # SH-001: the required-check proposal is generated from these
+      # workflows' real job names, and every lane that runs on every
+      # revision has to be in it. A renamed, path-filtered or conditional
+      # job named as required fails here rather than leaving a branch rule
+      # waiting forever for a context that never reports.
+      - name: Required-check proposal matches the workflows
+        run: python3 conformance/required_checks.py
 
       # E4: no silent green -> non-green regression, and no jump to green
       # without new evidence. Only meaningful against a base branch.
@@ -248,7 +269,7 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b1351b86cd80d01fa50a500e2c3e435ce4e1dd60 # nextest
+        uses: taiki-e/install-action@2eb6de229bc778f7df20e106e4b34e9a364c73e6 # nextest
         with:
           tool: nextest
 
@@ -299,12 +320,12 @@ jobs:
       - name: Capability ledger vs. the tests that ran
         run: |
           python3 conformance/collect_test_inventory.py \
-            --junit "=target/nextest/ci/junit.xml" \
+            --junit "=target/nextest/ci/junit.xml" --revision "$GITHUB_SHA" \
             --out rust-inventory.json --results-out rust-results.json
           python3 conformance/validate_capabilities.py \
             --lanes conformance/lanes.json --lane test \
             --collected rust-inventory.json --results rust-results.json \
-            --release-critical
+            --candidate "$GITHUB_SHA" --release-critical
 
       # The JUnit report above cannot answer "what sat out this run?".
       # nextest omits `#[ignore]` tests from it entirely — not as

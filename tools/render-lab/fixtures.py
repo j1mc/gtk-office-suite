@@ -1003,6 +1003,88 @@ def decks(img):
     tb.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
     save(p, "background", "Dark navy slide background with white text")
 
+    # DCK-004, reduced from the pay centre impact assessment (#1397): its
+    # title slide's background is a picture (p:bg -> a:blipFill, stretched
+    # 1% past each side by a:fillRect l="-1000" r="-1000") under a white
+    # title. The picture here is drawn for this fixture: navy, a light
+    # blue outlined box and a white footer band, at the source's 1.8:1
+    # aspect so the stretch onto 16:9 is measurable.
+    from lxml import etree
+    from pptx.oxml.ns import qn
+
+    bg_path = os.path.join(d, "pay-centre-background.png")
+    W, H = 1800, 1000
+    pic = Image.new("RGB", (W, H), (23, 42, 69))
+    draw = ImageDraw.Draw(pic)
+    draw.rectangle([0, 870, W - 1, H - 1], fill=(255, 255, 255))
+    draw.rectangle([60, 880 - 220, 120 + 640, 880 - 120], outline=(0, 170, 230), width=4)
+    draw.rectangle([1500, 905, 1740, 965], fill=(30, 30, 30))
+    pic.save(bg_path)
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    _, rid = s.part.get_or_add_image_part(bg_path)
+    bg = etree.fromstring(
+        '<p:bg xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<p:bgPr><a:blipFill dpi="0" rotWithShape="1">'
+        f'<a:blip r:embed="{rid}"><a:lum/></a:blip><a:srcRect/>'
+        '<a:stretch><a:fillRect l="-1000" r="-1000"/></a:stretch></a:blipFill>'
+        '<a:effectLst/></p:bgPr></p:bg>'
+    )
+    c_sld = s._element.find(qn("p:cSld"))
+    c_sld.insert(0, bg)
+    tb = s.shapes.add_textbox(Inches(0.6), Inches(2.8), Inches(10), Inches(1.5)).text_frame
+    fixed_box(tb)
+    tb.text = "Picture background under a white title"
+    run = tb.paragraphs[0].runs[0]
+    run.font.size, run.font.name = Pt(40), "Arial"
+    run.font.color.rgb = RGBColor(255, 255, 255)
+    save(p, "pay-centre-reduced-picture-background",
+         "A navy picture fills the slide (light blue box, white footer band) under a white 40pt title")
+
+    # DCK-004, reduced from the same title (#1397): one paragraph broken
+    # over three lines with a:br. Dropping the breaks welds "and" to the
+    # next line's first word and rewraps the paragraph. Measured amber
+    # (run 38699284598): words 1.0, lost_lines 0, SSIM 0.86, but disp
+    # 7.1pt > 6pt because our 100% line pitch for 36pt Arial is ~7% tighter
+    # than Impress's — a line-height defect of its own, not the breaks.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(11), Inches(3)).text_frame
+    fixed_box(tb)
+    para = tb.paragraphs[0]
+    for i, line in enumerate(("Line breaks inside one paragraph –", "the second line ends here and", "Departmental Surcharge starts the third")):
+        if i:
+            para.add_line_break()
+        run = para.add_run()
+        run.text = line
+        run.font.size, run.font.name = Pt(36), "Arial"
+    save(p, "pay-centre-reduced-line-breaks",
+         "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
+
+    # DCK-004, reduced from the 2024-2025 delegated authorities report: its
+    # theme was saved on a machine in a dark mode, so lt1 is the system
+    # "window" colour with lastClr="202020". The master's background is
+    # bg1 (lt1), and the window is white: the slide must stay white.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1.5)).text_frame
+    fixed_box(tb)
+    tb.text = "Dark text on the theme's white window background"
+    tb.paragraphs[0].runs[0].font.size = Pt(32)
+    tb.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x54, 0x57, 0x5A)
+    themes = [part for part in p.part.package.iter_parts() if str(part.partname).startswith("/ppt/theme/")]
+    assert themes, "python-pptx's template has a theme part"
+    import re
+    for part in themes:
+        xml = part.blob.decode("utf-8")
+        dark = re.sub(r"<a:lt1>.*?</a:lt1>", '<a:lt1><a:sysClr val="window" lastClr="202020"/></a:lt1>', xml, count=1, flags=re.S)
+        assert dark != xml, "the template's theme names lt1"
+        part._blob = dark.encode("utf-8")
+    save(p, "delegated-authorities-reduced-dark-mode-window",
+         "A white slide (theme lt1 = system window, saved with lastClr 202020) with grey 32pt text")
+
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])
     rows, cols = 3, 3
