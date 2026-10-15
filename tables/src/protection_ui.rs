@@ -79,7 +79,13 @@ pub(crate) fn sync(fx: &gtk::Entry, state: &Rc<RefCell<WorkbookState>>) {
     if fx.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
         return;
     }
-    show_input(fx, state, cell.0, cell.1);
+    // Only a withheld input, or a bar still saying one is withheld, needs
+    // the bar changed here; an ordinary cell's bar is the editing paths'.
+    let withheld = state.try_borrow().is_ok_and(|st| st.presented_input(cell.0, cell.1).is_none());
+    let showing_withheld = fx.placeholder_text().is_some_and(|p| p.as_str() == suite_common::i18n(WITHHELD));
+    if withheld || showing_withheld {
+        show_input(fx, state, cell.0, cell.1);
+    }
 }
 
 /// A permission's switch in the settings dialog.
