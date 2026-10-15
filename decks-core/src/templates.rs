@@ -8,7 +8,7 @@
 // from one saves and reopens like any other.
 
 use crate::engine::shape::{Color, GradientStop, LinearGradient, ShapeKind, ShapeStyle};
-use crate::engine::theme::{ColorRef, FillSrc};
+use crate::engine::theme::{ColorRef, FillSrc, StrokeSrc};
 use crate::engine::text_body::{Anchor, Bullet, ParaAlign, ParaStyle, TextBody};
 use crate::engine::{MasterSlide, Slide, SlideObject};
 use crate::layouts::Placeholder;
@@ -36,9 +36,11 @@ struct Theme {
 }
 
 fn filled(kind: ShapeKind, (x, y, w, h): (f64, f64, f64, f64), fill: Color) -> SlideObject {
-    // An authored fill is an explicit local, kept as a literal reference.
+    // An authored fill is an explicit local, kept as a literal reference;
+    // an authored shape has no outline, and the writer materialises that
+    // as an explicit no-line, so the source states it too (DCK-006).
     let fill_src = Some(FillSrc::Color(ColorRef::Rgb(fill.to_hex())));
-    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None, fill_src, stroke_src: None } }
+    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None, fill_src, stroke_src: Some(StrokeSrc::NoLine) } }
 }
 
 fn none() -> Vec<SlideObject> {
