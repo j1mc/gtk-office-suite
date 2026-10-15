@@ -115,15 +115,15 @@ fn raw_paragraph_props(path: &str) -> RawParas {
         let mut rpr_depth = 0u32;
         let mut in_pbdr = false;
         // The paragraph list the current paragraph feeds, if any: what
-        // `last_mut` below appends the scanned properties to.
+        // the scanned properties below append to.
         let mut list: Option<usize> = None;
-        let last = |out: &mut RawParas, list: Option<usize>| -> Option<&mut RawPara> {
+        fn last_mut(out: &mut RawParas, list: Option<usize>) -> Option<&mut RawPara> {
             match list {
                 Some(0) => out.body.last_mut(),
                 Some(1) => out.cells.last_mut(),
                 _ => None,
             }
-        };
+        }
         loop {
             match reader.read_event()? {
                 quick_xml::events::Event::Eof => break,
@@ -204,7 +204,7 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         }
                     }
                     "w:tab" if in_tabs => {
-                        let Some(last) = last(&mut out, list) else { continue };
+                        let Some(last) = last_mut(&mut out, list) else { continue };
                         let mut pos = None;
                         let mut val = None;
                         let mut leader = None;
@@ -246,12 +246,12 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         }
                     }
                     "w:contextualSpacing" => {
-                        if let Some(last) = last(&mut out, list) {
+                        if let Some(last) = last_mut(&mut out, list) {
                             last.contextual = on_off(&e);
                         }
                     }
                     "w:ind" => {
-                        let Some(last) = last(&mut out, list) else { continue };
+                        let Some(last) = last_mut(&mut out, list) else { continue };
                         for a in e.attributes().with_checks(false).flatten() {
                             let v = || {
                                 a.value.trim().parse::<f64>().ok()
@@ -265,7 +265,7 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                     }
                     "w:spacing" => {
                         if in_para && ppr_depth == 1 && rpr_depth == 0 {
-                            let Some(last) = last(&mut out, list) else { continue };
+                            let Some(last) = last_mut(&mut out, list) else { continue };
                             for a in e.attributes().with_checks(false).flatten() {
                                 if a.key.as_ref() == "w:lineRule" {
                                     last.line_rule = Some(a.value.trim().to_ascii_lowercase());
@@ -274,7 +274,7 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         }
                     }
                     "w:top" | "w:left" | "w:bottom" | "w:right" if in_pbdr => {
-                        let Some(last) = last(&mut out, list) else { continue };
+                        let Some(last) = last_mut(&mut out, list) else { continue };
                         let idx = match e.name().as_ref() {
                             "w:top" => 0,
                             "w:left" => 1,
@@ -670,7 +670,7 @@ fn tabs_as_elements(xml: &str) -> String {
 /// One tab stop as builders spell it: its alignment, and its leader.
 /// rdocx names no middle dot: a middle dot writes as a dot, which the
 /// reader reads back as a dot (ODT keeps the middle dot exactly).
-fn emit_tab_stop(p: rdocx::Paragraph<'_>, stop: &TabStop) -> rdocx::Paragraph<'_> {
+fn emit_tab_stop<'a>(p: rdocx::Paragraph<'a>, stop: &TabStop) -> rdocx::Paragraph<'a> {
     let align = match stop.align {
         TabAlign::Center => rdocx::TabAlignment::Center,
         TabAlign::Right => rdocx::TabAlignment::Right,
@@ -1058,7 +1058,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                             cell_index += 1;
                             // An empty paragraph is a line of the cell:
                             // a form's answer box is a cell of them.
-                            let mut para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
+                            let para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
                             keep(para);
                         }
                         // A table nested in a cell belongs to its outer

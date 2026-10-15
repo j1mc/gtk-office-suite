@@ -1910,16 +1910,16 @@ fn inherited_para(name: &str, auto: &AutoStyles, named: &AutoStyles) -> Inherite
                 out.shading.clone_from(&st.shading);
             }
             if out.borders.top.is_none() {
-                out.borders.top = st.borders.top;
+                out.borders.top.clone_from(&st.borders.top);
             }
             if out.borders.left.is_none() {
-                out.borders.left = st.borders.left;
+                out.borders.left.clone_from(&st.borders.left);
             }
             if out.borders.bottom.is_none() {
-                out.borders.bottom = st.borders.bottom;
+                out.borders.bottom.clone_from(&st.borders.bottom);
             }
             if out.borders.right.is_none() {
-                out.borders.right = st.borders.right;
+                out.borders.right.clone_from(&st.borders.right);
             }
         }
         cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();

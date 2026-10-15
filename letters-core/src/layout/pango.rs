@@ -953,10 +953,10 @@ impl Typeset {
             let _ = cr.restore();
         }
         for (edge, (x0, y0), (x1, y1)) in [
-            (borders.top.filter(|_| top_edge), (x, y), (x + w, y)),
-            (borders.bottom.filter(|_| bottom_edge), (x, y + h), (x + w, y + h)),
-            (borders.left, (x, y), (x, y + h)),
-            (borders.right, (x + w, y), (x + w, y + h)),
+            (borders.top.clone().filter(|_| top_edge), (x, y), (x + w, y)),
+            (borders.bottom.clone().filter(|_| bottom_edge), (x, y + h), (x + w, y + h)),
+            (borders.left.clone(), (x, y), (x, y + h)),
+            (borders.right.clone(), (x + w, y), (x + w, y + h)),
         ] {
             let Some(edge) = edge else { continue };
             let Some((r, g, b)) = parse_hex(&edge.color) else { continue };

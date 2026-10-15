@@ -261,7 +261,7 @@ pub enum LineHeight {
 
 /// One side of a paragraph's border (OOXML `w:pBdr`, ODF `fo:border-*`):
 /// its look, its colour as RRGGBB hex, and its width in points.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParaBorder {
     pub style: BorderStyle,
     pub color: String,
