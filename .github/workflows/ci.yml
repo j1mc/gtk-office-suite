@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # main and tags only: a PR branch already gets the pull_request run, and a
+  # bare `push:` ran the whole suite a second time on every PR push.
   push:
+    branches: [main]
+    tags: ['**']
   pull_request:
   # A pull request opened by a workflow (the Screenshots refresh) gets no
   # CI from its own push: GitHub does not start workflows for pushes made
