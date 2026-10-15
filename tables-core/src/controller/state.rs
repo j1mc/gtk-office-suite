@@ -200,11 +200,6 @@ impl WorkbookState {
         }
     }
 
-    pub(super) fn sync_active_sheet(&mut self) {
-        let active = self.active_sheet;
-        self.sync_sheet(active);
-    }
-
     /// Re-read one sheet's projection from the engine without disturbing
     /// the active sheet: the read is sheet-indexed, so no switching is
     /// needed and none happens.
