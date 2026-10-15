@@ -1809,3 +1809,128 @@ fn tables_keep_their_place() {
         assert_eq!(shape(&round_trip(&once)), shape(&doc));
     }
 }
+
+/// The text of `name` in the package at `path`.
+fn package_part(path: &std::path::Path, name: &str) -> String {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut xml).unwrap();
+    xml
+}
+
+/// A report with a landscape, two-column appendix carrying its own header
+/// and a closing table section with no footer (LET-005S): each section's
+/// page, header and footer survive a save and reopen, the breaks land
+/// where they were (one before a table), and the file has one `w:sectPr`
+/// per section.
+#[test]
+fn multi_section_docx_round_trips_geometry_and_headers() {
+    let mut d = Document::from_plain_text("Introduction\nAppendix\na1\nb1");
+    for (k, col) in [(2usize, 0u32), (3, 1)] {
+        d.paragraphs[k].style.table_cell = Some(TableCell { table: 0, row: 0, col });
+    }
+    d.header = Some("Report".into());
+    let portrait = PageGeometry { margin_top_pt: 72.0, margin_bottom_pt: 72.0, margin_left_pt: 72.0, margin_right_pt: 72.0, ..Default::default() };
+    let landscape = PageGeometry {
+        width_pt: 842.0,
+        height_pt: 595.0,
+        margin_top_pt: 36.0,
+        margin_bottom_pt: 36.0,
+        margin_left_pt: 36.0,
+        margin_right_pt: 36.0,
+        columns: 2,
+        column_gap_pt: 24.0,
+    };
+    d.sections = vec![
+        DocSection { id: 0, range: ParagraphRange::new(0, 1), geometry: portrait, header: None, footer: None },
+        DocSection { id: 1, range: ParagraphRange::new(1, 2), geometry: landscape, header: Some("Appendix {page}".into()), footer: None },
+        DocSection { id: 2, range: ParagraphRange::new(2, 4), geometry: portrait, header: None, footer: Some(String::new()) },
+    ];
+    d.next_section_id = 3;
+    d.page = Some(portrait);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sections.docx");
+    docx::write(&d, &path).expect("write docx");
+    let xml = package_part(&path, "word/document.xml");
+    assert_eq!(xml.matches("<w:sectPr").count(), 3, "{xml}");
+    assert_eq!(xml.matches("w:orient=\"landscape\"").count(), 1, "{xml}");
+
+    let rt = docx::read(path.to_str().unwrap()).expect("read docx");
+    assert_eq!(rt.paragraphs.len(), 4);
+    assert_eq!(rt.sections.len(), 3);
+    for (read, written) in rt.sections.iter().zip(&d.sections) {
+        assert_eq!(read.range, written.range);
+        assert!(read.geometry.approx_eq(&written.geometry), "{:?} vs {:?}", read.geometry, written.geometry);
+        assert_eq!(read.header, written.header);
+        assert_eq!(read.footer, written.footer);
+    }
+    assert_eq!(rt.header.as_deref(), Some("Report"));
+    assert_eq!(rt.footer, None);
+    assert_eq!(rt.page, Some(rt.sections[0].geometry));
+    assert_eq!(rt.next_section_id, 3);
+    assert!(rt.paragraphs[2].style.table_cell.is_some() && rt.paragraphs[1].style.table_cell.is_none());
+}
+
+/// A document of one section writes one `w:sectPr` and no section parts,
+/// and reads back as one section.
+#[test]
+fn single_section_docx_writes_one_section_properties() {
+    let mut d = Document::from_plain_text("one section\nstill one");
+    d.page = Some(PageGeometry { width_pt: 612.0, height_pt: 792.0, ..Default::default() });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("single.docx");
+    docx::write(&d, &path).expect("write docx");
+    assert_eq!(package_part(&path, "word/document.xml").matches("<w:sectPr").count(), 1);
+    let zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert!(!zip.file_names().any(|n| n.contains("lettersSection")));
+    let rt = docx::read(path.to_str().unwrap()).expect("read docx");
+    assert!(rt.sections.is_empty());
+    assert!(rt.page.unwrap().approx_eq(&d.page.unwrap()));
+}
+
+/// Word's own section breaks: a `w:sectPr` in a paragraph's properties
+/// ends its section there, the body's last ends the document. A section
+/// that leaves out its margins keeps the one before's; one without a
+/// header reference continues the one before's, and the first without
+/// one has none.
+#[test]
+fn word_section_breaks_read_as_sections() {
+    let mut d = Document::from_plain_text("one\ntwo\nthree");
+    d.header = Some("Second part".into());
+    let rt = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        let start = body.find("<w:sectPr").expect("the body's section properties");
+        let end = body[start..].find("</w:sectPr>").map(|e| start + e + "</w:sectPr>".len()).expect("closed");
+        let sect = body[start..end].to_string();
+        let r_start = sect.find("<w:headerReference").expect("rdocx's header reference");
+        let r_end = r_start + sect[r_start..].find("/>").unwrap() + 2;
+        let reference = sect[r_start..r_end].to_string();
+        let letter = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#;
+        body.replace_range(start..end, letter);
+        let a4 = r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:pPr>"#;
+        let landscape = format!(r#"<w:pPr><w:sectPr>{reference}<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr></w:pPr>"#);
+        for (text, props) in [("one", a4.to_string()), ("two", landscape)] {
+            let marker = format!("<w:p><w:r><w:t>{text}</w:t>");
+            assert!(body.contains(&marker), "{body}");
+            *body = body.replacen(&marker, &format!("<w:p>{props}<w:r><w:t>{text}</w:t>"), 1);
+        }
+    });
+    assert_eq!(rt.to_plain_text(), "one\ntwo\nthree");
+    assert_eq!(rt.sections.len(), 3);
+    let ranges: Vec<(usize, usize)> = rt.sections.iter().map(|s| (s.range.start, s.range.end)).collect();
+    assert_eq!(ranges, [(0, 1), (1, 2), (2, 3)]);
+    let a4 = PageGeometry { width_pt: 595.3, height_pt: 841.9, margin_top_pt: 36.0, margin_bottom_pt: 36.0, margin_left_pt: 36.0, margin_right_pt: 36.0, ..Default::default() };
+    let a4_landscape = PageGeometry { width_pt: 841.9, height_pt: 595.3, ..a4 };
+    let letter = PageGeometry { width_pt: 612.0, height_pt: 792.0, ..Default::default() };
+    for (read, want) in rt.sections.iter().zip([a4, a4_landscape, letter]) {
+        assert!(read.geometry.approx_eq(&want), "{:?} vs {want:?}", read.geometry);
+    }
+    assert_eq!(rt.page, Some(rt.sections[0].geometry));
+    assert_eq!(rt.header, None, "the first section has no header reference");
+    assert_eq!(rt.sections[0].header, None);
+    assert_eq!(rt.sections[1].header.as_deref(), Some("Second part"));
+    assert_eq!(rt.sections[2].header, None, "continues the second section's");
+    assert_eq!(rt.next_section_id, 3);
+    assert_eq!(letters_core::sections::header(&rt, 2), (Some("Second part"), false));
+}

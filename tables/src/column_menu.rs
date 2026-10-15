@@ -172,6 +172,26 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
         });
         content.append(&clear);
     }
+    // Hand the keyboard back to the grid when the menu closes, however it
+    // closes — a button, Escape, a click outside. Left to GTK, the focus
+    // moves out of the closed menu to its nearest ancestor that takes it, or
+    // else to the window's first focusable widget; the grid is the menu's
+    // sibling, not its ancestor, so arrows and typing no longer reached it.
+    // Only while the menu still holds the focus, though: a button activated
+    // over AT-SPI reports its click 250 ms later (GtkButton's keyboard
+    // activation), by when the menu may have been closed and the user moved
+    // on — Ctrl+G into the name box — and a grab from the click handler took
+    // the focus back from under them (TBL-006).
+    {
+        let (grid, menu) = (grid.clone(), popover.downgrade());
+        suite_common::popover::on_next_close(&popover, move || {
+            let focus = grid.root().and_then(|root| root.focus());
+            let in_menu = |f: &gtk::Widget| menu.upgrade().is_some_and(|m| f.is_ancestor(&m));
+            if focus.as_ref().is_none_or(in_menu) {
+                grid.grab_focus();
+            }
+        });
+    }
     popover.popup();
 }
 

@@ -162,8 +162,8 @@ impl LiveModel {
         if comments_changed {
             crate::bridge::set_comments(buf, &self.doc.comments);
         }
-        // So do the header, footer, footnotes and page setup.
-        let notes_changed = (&old.header, &old.footer, &old.footnotes, &old.page) != (&self.doc.header, &self.doc.footer, &self.doc.footnotes, &self.doc.page);
+        // So do the header, footer, footnotes, page setup and sections.
+        let notes_changed = (&old.header, &old.footer, &old.footnotes, &old.page, &old.sections) != (&self.doc.header, &self.doc.footer, &self.doc.footnotes, &self.doc.page, &self.doc.sections);
         if notes_changed {
             crate::bridge::set_page_furniture(buf, &self.doc);
         }

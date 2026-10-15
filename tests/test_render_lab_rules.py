@@ -170,5 +170,21 @@ class MagnifierFallbackTest(unittest.TestCase):
         self.assertEqual(lost, 0)
 
 
+
+@unittest.skipIf(np is None, "numpy and Pillow are the render lab's")
+class VerdictWordsTest(unittest.TestCase):
+    def setUp(self):
+        import compare
+
+        self.verdict = compare.verdict
+        self.m = {"ink": 0.95, "ssim": 0.94, "words": 0.0, "lost_lines": 0, "disp_pt": None, "colors": 1.0}
+
+    def test_a_slide_without_text_is_not_held_back_by_ocr_noise(self):
+        self.assertEqual(self.verdict(dict(self.m, ref_words=1)), "green")
+
+    def test_text_that_is_not_recalled_still_holds_a_page_back(self):
+        self.assertEqual(self.verdict(dict(self.m, ref_words=3, words=0.6)), "amber")
+        self.assertEqual(self.verdict(dict(self.m, ref_words=12, words=0.2)), "red")
+
 if __name__ == "__main__":
     unittest.main()

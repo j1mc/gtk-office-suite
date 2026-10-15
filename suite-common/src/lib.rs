@@ -1173,11 +1173,19 @@ pub mod clipboard {
     /// A provider offering the suite JSON, HTML, and plain text at once.
     /// Paste order of preference elsewhere: suite JSON → HTML → plain.
     pub fn provider(mime: &str, json: &str, html: &str, plain: &str) -> gdk::ContentProvider {
-        gdk::ContentProvider::new_union(&[
+        provider_with(mime, json, html, plain, &[])
+    }
+
+    /// `provider`, plus `extra` (MIME type, data) pairs only the copying
+    /// app reads back: Letters' section breaks beside its fragment.
+    pub fn provider_with(mime: &str, json: &str, html: &str, plain: &str, extra: &[(&str, &str)]) -> gdk::ContentProvider {
+        let mut parts = vec![
             gdk::ContentProvider::for_bytes(mime, &glib::Bytes::from(json.as_bytes())),
             gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from(html.as_bytes())),
             gdk::ContentProvider::for_value(&glib::Value::from(plain)),
-        ])
+        ];
+        parts.extend(extra.iter().map(|(mime, data)| gdk::ContentProvider::for_bytes(mime, &glib::Bytes::from(data.as_bytes()))));
+        gdk::ContentProvider::new_union(&parts)
     }
 
     /// True when the clipboard currently offers the given MIME type.

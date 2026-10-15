@@ -153,6 +153,32 @@ class ARequiredCheckMustReportOnEveryPullRequest(unittest.TestCase):
                           "policy": "optional", "reason": "r"}
         self.assertIn("it needs 'test', which is optional", errors_for(workflows(), pol, {"lanes": []}))
 
+    def aggregator(self, if_, steps):
+        """`bundle` behind an optional `test`, as an aggregator would be."""
+        flows = workflows()
+        bundle = flows[".github/workflows/ci.yml"]["jobs"]["bundle"]
+        bundle["if"] = if_
+        bundle["steps"] = steps
+        pol = policy()
+        pol["jobs"][0] = {"workflow": ".github/workflows/ci.yml", "job": "test",
+                          "policy": "optional", "reason": "r"}
+        return errors_for(flows, pol, {"lanes": []})
+
+    def test_an_aggregator_that_judges_an_optional_need_can_be_required(self):
+        """It runs after `test` fails and fails on that result: not skipped."""
+        judge = [{"env": {"TEST": "${{ needs.test.result }}"},
+                  "run": '[ "$TEST" = success ]'}]
+        self.assertEqual(self.aggregator("${{ !cancelled() }}", judge), "")
+        self.assertEqual(self.aggregator("always()", judge), "")
+
+    def test_an_aggregator_that_ignores_the_result_is_rejected(self):
+        self.assertIn("it needs 'test', which is optional",
+                      self.aggregator("${{ !cancelled() }}", [{"run": "true"}]))
+
+    def test_reading_the_result_is_not_enough_when_a_failure_skips_the_job(self):
+        judge = [{"run": "echo ${{ needs.test.result }}"}]
+        self.assertIn("it needs 'test', which is optional", self.aggregator(None, judge))
+
     def test_a_name_two_jobs_report_cannot_identify_either(self):
         flows = workflows()
         flows[".github/workflows/other.yml"] = {
@@ -217,18 +243,21 @@ class CheckNamesFollowGitHub(unittest.TestCase):
 
     def test_the_real_names_match_what_github_reported(self):
         """Check-run names observed on PR #1573's head (08c47279), 2026-10-15,
-        via `gh api repos/tuna-os/gtk-office-suite/commits/<sha>/check-runs`."""
+        via `gh api repos/tuna-os/gtk-office-suite/commits/<sha>/check-runs`.
+        Since then render-parity.yml's `Render lab (<app>)` and `Export lab
+        (<app>)` cells are started only for the apps in scope, so their names
+        come from the run, not the file, and feature-verification.yml's
+        `gate` job is gone."""
         observed = {
             "test", "interop-corpus", "Python validators and their tests",
             "RustSec advisory gate", "flatpak (letters)", "flatpak (tables)",
-            "flatpak (decks)", "smoke", "Render lab (letters)", "Render lab (tables)",
-            "Render lab (decks)", "Tiers A+B vs LibreOffice", "Export lab (letters)",
-            "Export lab (decks)", "Export lab (tables)", "Export PDF vs LibreOffice PDF",
+            "flatpak (decks)", "smoke", "Tiers A+B vs LibreOffice",
+            "Export PDF vs LibreOffice PDF",
             "contract", "source-archive", "aarch64-tests", "Reproducible build (first)",
             "Reproducible build (second)", "Reproducible build (compare)",
             "offline-flatpak (x86_64, ubuntu-24.04)",
             "offline-flatpak (aarch64, ubuntu-24.04-arm)", "corpus (letters)",
-            "corpus (tables)", "corpus (decks)", "oracle", "gate",
+            "corpus (tables)", "corpus (decks)", "oracle",
         }
         derived = {name for job in rc.inventory(rc.load_workflows()) for name in job["names"]}
         self.assertEqual(observed - derived, set())

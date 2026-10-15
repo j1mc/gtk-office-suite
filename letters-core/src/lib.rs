@@ -23,13 +23,14 @@ pub mod odt;
 pub mod review;
 pub mod save;
 pub mod session;
+pub mod sections;
 pub mod structured;
 pub mod table_text;
 pub mod toc;
 pub mod track;
 pub mod word_count;
 
-pub use model::{Alignment, BorderStyle, CellFill, CellSpan, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParagraphLayout, ParaBorder, ParaBorders, ParaStyle, Comment, Revision, RevisionKind, RowHeight, Run, RunStyle, StylePatch, TabAlign, TabLeader, TabStop, TableCell, style_readout, CellPadding};
+pub use model::{Alignment, BorderStyle, CellFill, CellSpan, DocSection, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParagraphLayout, ParagraphRange, ParaBorder, ParaBorders, ParaStyle, Comment, Revision, RevisionKind, RowHeight, Run, RunStyle, StylePatch, TabAlign, TabLeader, TabStop, TableCell, style_readout, CellPadding};
 pub use review::{base_direction, table_of_contents, BidiDirection, TocEntry};
 pub use session::DocumentSession;
 pub use structured::StructuredEditor;
