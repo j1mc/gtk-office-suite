@@ -652,6 +652,164 @@ fn tabs_as_elements(xml: &str) -> String {
     out
 }
 
+/// One tab stop as builders spell it: its alignment, and its leader.
+/// rdocx names no middle dot: a middle dot writes as a dot, which the
+/// reader reads back as a dot (ODT keeps the middle dot exactly).
+fn emit_tab_stop(p: rdocx::Paragraph<'_>, stop: &TabStop) -> rdocx::Paragraph<'_> {
+    let align = match stop.align {
+        TabAlign::Center => rdocx::TabAlignment::Center,
+        TabAlign::Right => rdocx::TabAlignment::Right,
+        TabAlign::Decimal => rdocx::TabAlignment::Decimal,
+        TabAlign::Left => rdocx::TabAlignment::Left,
+    };
+    let pos = rdocx::Length::pt(stop.pos_pt);
+    match stop.leader {
+        TabLeader::None => p.add_tab_stop(align, pos),
+        TabLeader::Dot => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Dot),
+        TabLeader::Hyphen => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Hyphen),
+        TabLeader::Underscore => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Underscore),
+        TabLeader::MiddleDot => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Dot),
+    }
+}
+
+/// A document paragraph's properties rdocx cannot emit, in document
+/// order: whether its line rule is atLeast (`set_line_spacing_at_least`
+/// is crate-internal, so minima are written exact and fixed below) and
+/// its per-side borders (only all-sides and bottom have builders).
+struct ParaPost {
+    at_least: bool,
+    borders: Option<ParaBorders>,
+}
+
+impl ParaPost {
+    fn of(style: &ParaStyle) -> Self {
+        Self {
+            at_least: matches!(style.line_height, Some(LineHeight::Minimum(_))),
+            borders: if style.borders.is_empty() { None } else { Some(style.borders.clone()) },
+        }
+    }
+
+    fn trivial() -> Self {
+        Self { at_least: false, borders: None }
+    }
+
+    fn nontrivial(&self) -> bool {
+        self.at_least || self.borders.is_some()
+    }
+}
+
+/// Fix the properties of `specs` into the document's paragraphs, the
+/// n-th `<w:p>` taking the n-th spec. Specs run with the paragraphs in
+/// document order — body and table cells, separators included, covered
+/// cells already removed — which is how rdocx serializes them.
+fn para_post_pass(xml: &str, specs: &[ParaPost]) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    let mut n = 0usize;
+    while let Some(at) = find_para(rest) {
+        let Some(open_end) = rest[at..].find('>').map(|e| at + e + 1) else { break };
+        out.push_str(&rest[..open_end]);
+        rest = &rest[open_end..];
+        let self_closed = out.ends_with("/>");
+        let Some(spec) = specs.get(n) else { n += 1; continue };
+        n += 1;
+        if !spec.nontrivial() || self_closed {
+            continue;
+        }
+        // The paragraph's extent: to its closing tag. A `w:p` never
+        // nests, so the first close is its own.
+        let Some(close) = rest.find("</w:p>") else { break };
+        let (body, tail) = rest.split_at(close);
+        let mut fixed = body.to_string();
+        if spec.at_least {
+            fixed = fixed.replacen("w:lineRule=\"exact\"", "w:lineRule=\"atLeast\"", 1);
+        }
+        if let Some(borders) = spec.borders.as_ref() {
+            let pbdr = pbdr_xml(borders);
+            if let Some(ppr) = find_ppr(&fixed) {
+                let Some(end) = fixed[ppr..].find('>').map(|e| ppr + e + 1) else { break };
+                if fixed[..end].ends_with("/>") {
+                    fixed.replace_range(end - 2..end, &format!(">{pbdr}</w:pPr>"));
+                } else {
+                    // `w:pBdr` sorts with the paragraph properties, ahead
+                    // of shading, tabs, spacing, indents and justification.
+                    let slot = ["<w:shd", "<w:tabs", "<w:spacing", "<w:ind", "<w:jc"]
+                        .into_iter()
+                        .filter_map(|t| fixed[end..].find(t).map(|e| end + e))
+                        .min()
+                        .unwrap_or_else(|| fixed.find("</w:pPr>").unwrap_or(fixed.len()));
+                    fixed.insert_str(slot, &pbdr);
+                }
+            } else {
+                fixed.insert_str(0, &format!("<w:pPr>{pbdr}</w:pPr>"));
+            }
+        }
+        out.push_str(&fixed);
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `<w:p` open tags only: `<w:pPr`, `<w:pStyle` and the rest are not
+/// paragraphs. Returns the tag's start.
+fn find_para(xml: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = xml[from..].find("<w:p").map(|e| from + e) {
+        match xml.as_bytes().get(at + 4) {
+            Some(b'>') | Some(b' ') | Some(b'/') => return Some(at),
+            _ => from = at + 4,
+        }
+    }
+    None
+}
+
+/// `<w:pPr` open tags only: `<w:pPrChange` is the old value, not the
+/// paragraph's. Returns the tag's start.
+fn find_ppr(xml: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = xml[from..].find("<w:pPr").map(|e| from + e) {
+        match xml.as_bytes().get(at + 6) {
+            Some(b'>') | Some(b' ') | Some(b'/') => return Some(at),
+            _ => from = at + 6,
+        }
+    }
+    None
+}
+
+/// A paragraph's per-side borders as a `w:pBdr` element. Widths are
+/// eighths of a point; the content gap is a point, as Word writes it.
+fn pbdr_xml(borders: &ParaBorders) -> String {
+    let edge = |name: &str, e: &ParaBorder| {
+        let val = match e.style {
+            BorderStyle::Single => "single",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+        };
+        format!(
+            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"1\" w:color=\"{}\"/>",
+            (e.width_pt * 8.0).round().clamp(1.0, 96.0) as u32,
+            e.color
+        )
+    };
+    let mut out = String::from("<w:pBdr>");
+    if let Some(e) = &borders.top {
+        out.push_str(&edge("top", e));
+    }
+    if let Some(e) = &borders.left {
+        out.push_str(&edge("left", e));
+    }
+    if let Some(e) = &borders.bottom {
+        out.push_str(&edge("bottom", e));
+    }
+    if let Some(e) = &borders.right {
+        out.push_str(&edge("right", e));
+    }
+    out.push_str("</w:pBdr>");
+    out
+}
+
 /// A run's text as written: bracketed as a tracked change if it is one.
 fn bracketed(revisions: &mut Vec<crate::model::Revision>, run: &Run) -> String {
     match &run.style.revision {
@@ -1133,6 +1291,10 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     // (rdocx's default page: Letter with 1in margins).
     let text_width_pt = doc.page.map_or(468.0, |g| g.width_pt - g.margin_left_pt - g.margin_right_pt);
     let mut has_toc = false;
+
+    // Per emitted document paragraph, in document order: the properties
+    // rdocx cannot emit, fixed as XML below (`para_post_pass`).
+    let mut post: Vec<ParaPost> = Vec::new();
     // Whether a merged cell covers a grid position (`COVERED_CELL`).
     let mut has_covered = false;
     // The numIds of the bullet and numbered list definitions, once made.
@@ -1188,13 +1350,44 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         cell.remove_first_empty_paragraph();
                     }
                     let mut cp = cell.add_paragraph("");
-                    // A cell paragraph's indents and alignment, which the
-                    // reader maps the same way it maps a body paragraph's.
+                    // A cell paragraph's typography, which the reader maps
+                    // the same way it maps a body paragraph's: without
+                    // this a save dropped what a read kept.
                     if p.style.left_indent_pt != 0.0 {
                         cp = cp.indent_left(rdocx::Length::pt(p.style.left_indent_pt));
                     }
                     if p.style.right_indent_pt != 0.0 {
                         cp = cp.indent_right(rdocx::Length::pt(p.style.right_indent_pt));
+                    }
+                    if p.style.first_line_indent_pt != 0.0 {
+                        cp = cp.first_line_indent(rdocx::Length::pt(p.style.first_line_indent_pt));
+                    }
+                    if p.style.space_before_pt != 0.0 {
+                        cp = cp.space_before(rdocx::Length::pt(p.style.space_before_pt));
+                    }
+                    if p.style.space_after_pt != 0.0 {
+                        cp = cp.space_after(rdocx::Length::pt(p.style.space_after_pt));
+                    }
+                    if p.style.keep_lines {
+                        cp = cp.keep_together(true);
+                    }
+                    if let Some(control) = p.style.widow_control {
+                        cp = cp.widow_control(control);
+                    }
+                    match p.style.line_height {
+                        Some(LineHeight::Exact(pt)) => cp = cp.line_spacing(pt),
+                        Some(LineHeight::Minimum(pt)) => cp = cp.line_spacing(pt),
+                        None => {
+                            if (p.style.line_spacing - 1.0).abs() > 0.01 {
+                                cp = cp.line_spacing_multiple(p.style.line_spacing as f64);
+                            }
+                        }
+                    }
+                    if let Some(fill) = p.style.shading.as_deref().filter(|f| !f.is_empty()) {
+                        cp = cp.shading(fill);
+                    }
+                    for stop in &p.style.tab_stops_pt {
+                        cp = emit_tab_stop(cp, stop);
                     }
                     cp = match p.style.alignment {
                         Alignment::Center => cp.alignment(rdocx::Alignment::Center),
@@ -1202,6 +1395,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         Alignment::Justify => cp.alignment(rdocx::Alignment::Justify),
                         _ => cp,
                     };
+                    post.push(ParaPost::of(&p.style));
                     // A cell's comments open and close inside it.
                     let mut in_cell: Vec<u32> = Vec::new();
                     for run in p.runs.iter().map(Some).chain([None]) {
@@ -1252,6 +1446,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                     .space_before(rdocx::Length::pt(0.0))
                     .space_after(rdocx::Length::pt(0.0))
                     .line_spacing(1.0);
+                post.push(ParaPost::trivial());
             }
             continue;
         }
@@ -1310,8 +1505,29 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         if para.style.keep_with_next {
             p = p.keep_with_next(true);
         }
-        if (para.style.line_spacing - 1.0).abs() > 0.01 {
-            p = p.line_spacing_multiple(para.style.line_spacing as f64);
+        if para.style.keep_lines {
+            p = p.keep_together(true);
+        }
+        if let Some(control) = para.style.widow_control {
+            p = p.widow_control(control);
+        }
+        match para.style.line_height {
+            // Exact has a builder; atLeast does not
+            // (`set_line_spacing_at_least` is crate-internal), so a
+            // minimum is written exact here and fixed by the post pass
+            // below (`para_post_pass`).
+            Some(LineHeight::Exact(pt)) => p = p.line_spacing(pt),
+            Some(LineHeight::Minimum(pt)) => {
+                p = p.line_spacing(pt);
+            }
+            None => {
+                if (para.style.line_spacing - 1.0).abs() > 0.01 {
+                    p = p.line_spacing_multiple(para.style.line_spacing as f64);
+                }
+            }
+        }
+        if let Some(fill) = para.style.shading.as_deref().filter(|f| !f.is_empty()) {
+            p = p.shading(fill);
         }
         // Paragraph indents and spacing. The odt writer has carried these
         // since it was written; this one never emitted them at all, so a
@@ -1348,18 +1564,15 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         if para.style.space_after_pt != 0.0 {
             p = p.space_after(rdocx::Length::pt(para.style.space_after_pt));
         }
-        // Tab stops, which neither writer persisted: a paragraph's stops
-        // were lost on every save in both formats, self round trip
-        // included. The model has positions only, so every stop is a
-        // left-aligned one.
+        // Tab stops with their alignments and leaders.
         // A table of contents entry: Word's TOC style for its level, and
         // its page number at a right tab with a dot leader at the margin.
         if let Some(level) = para.style.toc {
             p = p.style(&format!("TOC{}", level.clamp(1, 9)));
             p = p.add_tab_stop_with_leader(rdocx::TabAlignment::Right, rdocx::Length::pt(text_width_pt), rdocx::TabLeader::Dot);
         } else {
-            for pos in &para.style.tab_stops_pt {
-                p = p.add_tab_stop(rdocx::TabAlignment::Left, rdocx::Length::pt(*pos));
+            for stop in &para.style.tab_stops_pt {
+                p = emit_tab_stop(p, stop);
             }
         }
         p = match para.style.alignment {
@@ -1368,6 +1581,9 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             Alignment::Right => p.alignment(rdocx::Alignment::Right),
             Alignment::Justify => p.alignment(rdocx::Alignment::Justify),
         };
+        // Properties rdocx cannot emit (atLeast line rules, per-side
+        // borders) are fixed as XML below, in document order.
+        post.push(ParaPost::of(&para.style));
         let _ = p; // release the builder borrow before append_hyperlink
         // A numbered item Word would number otherwise: a restart (#1205),
         // or the first item of a list after a paragraph that ended the one
@@ -1561,12 +1777,16 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     let bytes = with_letters_styles(&bytes, &doc.base_font, &doc.heading_styles)
         .map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?;
     let tabbed = paras.iter().flat_map(|p| &p.runs).any(|r| r.text.contains('\t'));
-    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() {
+    let has_post = post.iter().any(ParaPost::nontrivial);
+    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post {
         bytes
     } else {
         with_part(&bytes, "word/document.xml", |xml| {
             let xml = if tabbed { tabs_as_elements(xml) } else { xml.to_string() };
             let xml = if has_covered { without_covered_cells(&xml) } else { xml };
+            // After covered cells are gone: the remaining paragraphs run
+            // with `post` in document order.
+            let xml = if has_post { para_post_pass(&xml, &post) } else { xml };
             let xml = if floating.is_empty() { xml } else { crate::docx_anchors::float(&xml, &floating, 9001) };
             let xml = crate::docx_revisions::wrap(&crate::docx_chips::wrap(&xml, &chips), &revisions);
             let xml = crate::docx_comments::wrap(&xml, &doc.comments);

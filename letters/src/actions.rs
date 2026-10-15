@@ -204,7 +204,7 @@ pub(crate) fn cycle_line_spacing_in(buf: &gtk::TextBuffer) -> Option<f32> {
 /// paragraph's left edge) as a model op. The ruler used to put them on a
 /// buffer tag the model never read, so they were not saved.
 pub(crate) fn set_tab_stops_in(buf: &gtk::TextBuffer, tabs: &[f64]) -> bool {
-    restyle_here(buf, |style| letters_core::ParaStyle { tab_stops_pt: tabs.to_vec(), ..style.clone() })
+    restyle_here(buf, |style| letters_core::ParaStyle { tab_stops_pt: tabs.iter().map(|&p| letters_core::TabStop::left(p)).collect(), ..style.clone() })
 }
 
 /// The model mark a toggle name sets, if it is one of the toggles.

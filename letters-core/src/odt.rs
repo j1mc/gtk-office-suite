@@ -128,20 +128,49 @@ fn para_style_props(st: &ParaStyle) -> String {
     if st.keep_with_next {
         props.push_str(" fo:keep-with-next=\"always\"");
     }
-    if (st.line_spacing - 1.0).abs() > 0.01 {
-        props.push_str(&format!(" fo:line-height=\"{:.0}%\"", st.line_spacing * 100.0));
+    if st.keep_lines {
+        props.push_str(" fo:keep-together=\"always\"");
     }
-    // ODF spells paragraph spacing `fo:margin-top`/`fo:margin-bottom`,
-    // the same XSL-FO properties the page geometry below already uses.
-    // This wrote `fo:space-before`/`fo:space-after`, which our own reader
-    // understood and LibreOffice does not: the self round trip passed
-    // because both halves shared an attribute nothing else reads, and the
-    // spacing was silently gone the moment the file reached Writer.
-    if st.space_before_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-top=\"{:.2}pt\"", st.space_before_pt)); }
-    if st.space_after_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-bottom=\"{:.2}pt\"", st.space_after_pt)); }
-    if st.left_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-left=\"{:.2}pt\"", st.left_indent_pt)); }
-    if st.right_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-right=\"{:.2}pt\"", st.right_indent_pt)); }
-    if st.first_line_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:text-indent=\"{:.2}pt\"", st.first_line_indent_pt)); }
+    match st.widow_control {
+        Some(false) => props.push_str(" fo:widows=\"1\" fo:orphans=\"1\""),
+        Some(true) => props.push_str(" fo:widows=\"2\" fo:orphans=\"2\""),
+        None => {}
+    }
+    match st.line_height {
+        // A fixed height is a length; a minimum is
+        // `style:line-height-at-least`, which Writer keeps.
+        Some(LineHeight::Exact(pt)) => props.push_str(&format!(" fo:line-height=\"{pt:.2}pt\"")),
+        Some(LineHeight::Minimum(pt)) => props.push_str(&format!(" style:line-height-at-least=\"{pt:.2}pt\"")),
+        None => {
+            if (st.line_spacing - 1.0).abs() > 0.01 {
+                props.push_str(&format!(" fo:line-height=\"{:.0}%\"", st.line_spacing * 100.0));
+            }
+        }
+    }
+    if let Some(fill) = st.shading.as_deref().filter(|f| !f.is_empty()) {
+        props.push_str(&format!(" fo:background-color=\"#{fill}\""));
+    }
+    let border = |e: &ParaBorder| {
+        let style = match e.style {
+            BorderStyle::Single => "solid",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+        };
+        format!("{:.2}pt {style} #{}", e.width_pt, e.color)
+    };
+    if let Some(e) = &st.borders.top {
+        props.push_str(&format!(" fo:border-top=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.left {
+        props.push_str(&format!(" fo:border-left=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.bottom {
+        props.push_str(&format!(" fo:border-bottom=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.right {
+        props.push_str(&format!(" fo:border-right=\"{}\"", border(e)));
+    }
     props
 }
 
@@ -157,10 +186,24 @@ fn para_style_children(st: &ParaStyle) -> String {
         return String::new();
     }
     let mut out = String::from("<style:tab-stops>");
-    for pos in &st.tab_stops_pt {
-        // `style:type` defaults to left, which is the only kind the model
-        // has; a position is all a stop needs.
-        out.push_str(&format!("<style:tab-stop style:position=\"{pos:.2}pt\"/>"));
+    for stop in &st.tab_stops_pt {
+        // `style:type` defaults to left, so only other alignments are
+        // spelled out; leaders ride `style:leader-style` with their
+        // character, as Writer writes them.
+        let kind = match stop.align {
+            TabAlign::Center => " style:type=\"center\"",
+            TabAlign::Right => " style:type=\"right\"",
+            TabAlign::Decimal => " style:type=\"char\"",
+            TabAlign::Left => "",
+        };
+        let leader = match stop.leader {
+            TabLeader::Dot => " style:leader-style=\"dotted\" style:leader-text=\".\"",
+            TabLeader::Hyphen => " style:leader-style=\"dashed\" style:leader-text=\"-\"",
+            TabLeader::Underscore => " style:leader-style=\"solid\" style:leader-text=\"_\"",
+            TabLeader::MiddleDot => " style:leader-style=\"dotted\" style:leader-text=\"·\"",
+            TabLeader::None => "",
+        };
+        out.push_str(&format!("<style:tab-stop style:position=\"{:.2}pt\"{kind}{leader}/>", stop.pos_pt));
     }
     out.push_str("</style:tab-stops>");
     out
@@ -1225,14 +1268,19 @@ struct AutoParaStyle {
     alignment: Alignment,
     page_break_before: bool,
     keep_with_next: bool,
+    keep_lines: bool,
+    widow_control: Option<bool>,
     line_spacing: f32,
+    line_height: Option<LineHeight>,
+    shading: Option<String>,
+    borders: ParaBorders,
     space_before_pt: f64,
     space_after_pt: f64,
     left_indent_pt: f64,
     right_indent_pt: f64,
     first_line_indent_pt: f64,
-    /// Positions of `style:tab-stops` children, in document order.
-    tab_stops_pt: Vec<f64>,
+    /// `style:tab-stops` children, in document order.
+    tab_stops_pt: Vec<TabStop>,
     /// Whether the style itself sets its space before, space after and
     /// line height; what it leaves unset comes from its parent style.
     sets: [bool; 3],
@@ -1476,7 +1524,45 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 alignment: align,
                                 page_break_before: brk,
                                 keep_with_next: attr_val(&e, "fo:keep-with-next").as_deref() == Some("always"),
+                                keep_lines: attr_val(&e, "fo:keep-together").as_deref() == Some("always"),
+                                widow_control: {
+                                    let widows = attr_val(&e, "fo:widows").and_then(|v| v.parse::<u32>().ok());
+                                    let orphans = attr_val(&e, "fo:orphans").and_then(|v| v.parse::<u32>().ok());
+                                    match (widows, orphans) {
+                                        (None, None) => None,
+                                        (w, o) => Some(w.unwrap_or(2) > 1 || o.unwrap_or(2) > 1),
+                                    }
+                                },
                                 line_spacing: spacing,
+                                line_height: attr_val(&e, "style:line-height-at-least")
+                                    .and_then(|v| parse_length_pt(&v))
+                                    .map(LineHeight::Minimum)
+                                    .or_else(|| {
+                                        attr_val(&e, "fo:line-height")
+                                            .filter(|v| !v.trim_end().ends_with('%'))
+                                            .and_then(|v| parse_length_pt(&v))
+                                            .map(LineHeight::Exact)
+                                    }),
+                                shading: attr_val(&e, "fo:background-color").and_then(|c| {
+                                    let c = c.trim_start_matches('#').to_uppercase();
+                                    if c == "TRANSPARENT" || c.is_empty() {
+                                        None
+                                    } else {
+                                        Some(c)
+                                    }
+                                }),
+                                borders: {
+                                    let all = attr_val(&e, "fo:border").as_deref().and_then(parse_para_border);
+                                    let side = |name: &str| {
+                                        attr_val(&e, name).as_deref().and_then(parse_para_border).or(all)
+                                    };
+                                    ParaBorders {
+                                        top: side("fo:border-top"),
+                                        left: side("fo:border-left"),
+                                        bottom: side("fo:border-bottom"),
+                                        right: side("fo:border-right"),
+                                    }
+                                },
                                 // `fo:space-before` is what this writer
                                 // used to emit; still accepted so a
                                 // document saved by an older build keeps
@@ -1510,8 +1596,29 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             if let Some(pos) =
                                 attr_val(&e, "style:position").and_then(|v| parse_length_pt(&v))
                             {
+                                let align = match attr_val(&e, "style:type").as_deref() {
+                                    Some("center") => TabAlign::Center,
+                                    Some("right") => TabAlign::Right,
+                                    Some("char") => TabAlign::Decimal,
+                                    _ => TabAlign::Left,
+                                };
+                                let text = attr_val(&e, "style:leader-text")
+                                    .or_else(|| attr_val(&e, "style:leader-char"));
+                                let leader = match (
+                                    attr_val(&e, "style:leader-style").as_deref(),
+                                    text.as_deref(),
+                                ) {
+                                    (_, Some(".")) => TabLeader::Dot,
+                                    (_, Some("·")) => TabLeader::MiddleDot,
+                                    (_, Some("-")) => TabLeader::Hyphen,
+                                    (_, Some("_")) => TabLeader::Underscore,
+                                    (Some("dotted"), _) => TabLeader::Dot,
+                                    (Some("dashed"), _) => TabLeader::Hyphen,
+                                    (Some("solid"), _) => TabLeader::Underscore,
+                                    _ => TabLeader::None,
+                                };
                                 if let Some(st) = out.para.get_mut(&name) {
-                                    st.tab_stops_pt.push(pos);
+                                    st.tab_stops_pt.push(TabStop { pos_pt: pos, align, leader });
                                 }
                             }
                         }
@@ -1539,6 +1646,29 @@ fn parse_length_pt(v: &str) -> Option<f64> {
         "in" => n * 72.0,
         _ => return None,
     })
+}
+
+/// One `fo:border-*` value ("0.75pt solid #000000") as a modelled
+/// border, if its look is one the model keeps. `none` (and anything
+/// else unmodelled: groove, ridge, inset, wave) reads as no border
+/// here, and the save dialog names it (`loss`), never a silent
+/// restyle.
+fn parse_para_border(v: &str) -> Option<ParaBorder> {
+    let mut parts = v.split_whitespace();
+    let (width, style, color) = (parts.next()?, parts.next()?, parts.next()?);
+    let style = match style {
+        "solid" => BorderStyle::Single,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "double" => BorderStyle::Double,
+        _ => return None,
+    };
+    let width_pt = parse_length_pt(width)?;
+    let color = color.trim_start_matches('#').to_uppercase();
+    if color.len() != 6 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(ParaBorder { style, color, width_pt })
 }
 
 /// A list that continues the numbering of the one before it with its
@@ -1744,6 +1874,57 @@ fn inherited_spacing(name: &str, auto: &AutoStyles, named: &AutoStyles) -> (Opti
         cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
     }
     (before, after, line)
+}
+
+/// What paragraph style `name` inherits from its parent chain for the
+/// keep and decoration properties: the nearest style up the chain
+/// (automatic styles in `auto`, named ones in `named`) that sets each
+/// one. Writer keeps these on the named style — a Heading's
+/// keep-with-next, a quote's border — while the automatic style on the
+/// paragraph carries only what that paragraph overrides.
+#[derive(Default)]
+struct InheritedPara {
+    keep_with_next: bool,
+    keep_lines: bool,
+    widow_control: Option<bool>,
+    line_height: Option<LineHeight>,
+    shading: Option<String>,
+    borders: ParaBorders,
+}
+
+fn inherited_para(name: &str, auto: &AutoStyles, named: &AutoStyles) -> InheritedPara {
+    let mut out = InheritedPara::default();
+    let mut cur = Some(name.to_string());
+    for _ in 0..16 {
+        let Some(n) = cur else { break };
+        if let Some(st) = auto.para.get(&n).or_else(|| named.para.get(&n)) {
+            out.keep_with_next |= st.keep_with_next;
+            out.keep_lines |= st.keep_lines;
+            if out.widow_control.is_none() {
+                out.widow_control = st.widow_control;
+            }
+            if out.line_height.is_none() {
+                out.line_height = st.line_height;
+            }
+            if out.shading.is_none() {
+                out.shading.clone_from(&st.shading);
+            }
+            if out.borders.top.is_none() {
+                out.borders.top = st.borders.top;
+            }
+            if out.borders.left.is_none() {
+                out.borders.left = st.borders.left;
+            }
+            if out.borders.bottom.is_none() {
+                out.borders.bottom = st.borders.bottom;
+            }
+            if out.borders.right.is_none() {
+                out.borders.right = st.borders.right;
+            }
+        }
+        cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
+    }
+    out
 }
 
 /// How a paragraph style's text looks: its own text properties, then what
@@ -2250,7 +2431,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             style.alignment = auto_para.alignment;
                             style.page_break_before = auto_para.page_break_before;
                             style.keep_with_next = auto_para.keep_with_next;
+                            style.keep_lines = auto_para.keep_lines;
+                            style.widow_control = auto_para.widow_control;
                             style.line_spacing = auto_para.line_spacing;
+                            style.line_height = auto_para.line_height;
+                            style.shading = auto_para.shading.clone();
+                            style.borders = auto_para.borders.clone();
                             style.space_before_pt = auto_para.space_before_pt;
                             style.space_after_pt = auto_para.space_after_pt;
                             style.left_indent_pt = auto_para.left_indent_pt;
@@ -2271,6 +2457,31 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                         if let Some(v) = line {
                             style.line_spacing = v;
+                        }
+                        let inh = inherited_para(&name, &auto, &named);
+                        style.keep_with_next |= inh.keep_with_next;
+                        style.keep_lines |= inh.keep_lines;
+                        if style.widow_control.is_none() {
+                            style.widow_control = inh.widow_control;
+                        }
+                        if style.line_height.is_none() {
+                            style.line_height = inh.line_height;
+                        }
+                        if style.shading.is_none() {
+                            style.shading = inh.shading;
+                        }
+                        let borders = &mut style.borders;
+                        if borders.top.is_none() {
+                            borders.top = inh.borders.top;
+                        }
+                        if borders.left.is_none() {
+                            borders.left = inh.borders.left;
+                        }
+                        if borders.bottom.is_none() {
+                            borders.bottom = inh.borders.bottom;
+                        }
+                        if borders.right.is_none() {
+                            borders.right = inh.borders.right;
                         }
                         // Direct built-in name, or an automatic style
                         // inheriting from one (LO's rewrite pattern).
@@ -3419,12 +3630,14 @@ mod tests {
     #[test]
     fn tab_stops_survive() {
         let mut d = Document::from_plain_text("tabbed");
-        d.paragraphs[0].style.tab_stops_pt = vec![36.0, 108.0];
+        d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0), TabStop { pos_pt: 108.0, align: TabAlign::Right, leader: TabLeader::Dot }];
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].style.tab_stops_pt.len(), 2, "stops lost");
         for (got, want) in rt.paragraphs[0].style.tab_stops_pt.iter().zip([36.0, 108.0]) {
-            assert!((got - want).abs() < 0.01, "stop {got} != {want}");
+            assert!((got.pos_pt - want).abs() < 0.01, "stop {} != {want}", got.pos_pt);
         }
+        assert_eq!(rt.paragraphs[0].style.tab_stops_pt[1].align, TabAlign::Right);
+        assert_eq!(rt.paragraphs[0].style.tab_stops_pt[1].leader, TabLeader::Dot);
     }
 
     /// Stops belong to the paragraph that declared them.
@@ -3436,14 +3649,14 @@ mod tests {
     #[test]
     fn different_tab_stops_do_not_share_one_style() {
         let mut d = Document::from_plain_text("first\nsecond");
-        d.paragraphs[0].style.tab_stops_pt = vec![36.0];
-        d.paragraphs[1].style.tab_stops_pt = vec![144.0];
+        d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0)];
+        d.paragraphs[1].style.tab_stops_pt = vec![TabStop::left(144.0)];
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].style.tab_stops_pt.len(), 1);
         assert_eq!(rt.paragraphs[1].style.tab_stops_pt.len(), 1);
-        assert!((rt.paragraphs[0].style.tab_stops_pt[0] - 36.0).abs() < 0.01);
+        assert!((rt.paragraphs[0].style.tab_stops_pt[0].pos_pt - 36.0).abs() < 0.01);
         assert!(
-            (rt.paragraphs[1].style.tab_stops_pt[0] - 144.0).abs() < 0.01,
+            (rt.paragraphs[1].style.tab_stops_pt[0].pos_pt - 144.0).abs() < 0.01,
             "second paragraph got the first one's stops: {:?}",
             rt.paragraphs[1].style.tab_stops_pt
         );

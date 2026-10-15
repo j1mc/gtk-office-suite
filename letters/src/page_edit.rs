@@ -647,7 +647,7 @@ mod tests {
             let styles = |buf: &gtk::TextBuffer| -> Vec<(f32, Vec<f64>)> {
                 let live = crate::live::of(buf).unwrap();
                 let m = live.borrow();
-                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.clone())).collect()
+                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.iter().map(|t| t.pos_pt).collect())).collect()
             };
             let before = { let m = live.borrow(); m.foreign_edits };
 

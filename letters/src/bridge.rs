@@ -769,7 +769,13 @@ fn para_tag_name(style: &letters_core::ParaStyle) -> Option<String> {
     num("r", style.right_indent_pt);
     num("f", style.first_line_indent_pt);
     if !style.tab_stops_pt.is_empty() {
-        let tabs: Vec<String> = style.tab_stops_pt.iter().map(f64::to_string).collect();
+        // Positions alone would collide two stops that differ only in
+        // alignment or leader, so the tag carries the whole stop.
+        let tabs: Vec<String> = style
+            .tab_stops_pt
+            .iter()
+            .map(|t| format!("{:?}:{:?}:{:?}", t.pos_pt, t.align, t.leader))
+            .collect();
         parts.push(format!("t={}", tabs.join(",")));
     }
     if line_spacing_tag_name(style.line_spacing).is_none() && (style.line_spacing - 1.0).abs() > 0.001 {
@@ -816,7 +822,31 @@ fn apply_para_tag_name(name: &str, style: &mut letters_core::ParaStyle) {
             "l" => style.left_indent_pt = f().unwrap_or(0.0),
             "r" => style.right_indent_pt = f().unwrap_or(0.0),
             "f" => style.first_line_indent_pt = f().unwrap_or(0.0),
-            "t" => style.tab_stops_pt = value.split(',').filter_map(|t| t.parse().ok()).collect(),
+            "t" => {
+                style.tab_stops_pt = value
+                    .split(',')
+                    .filter_map(|t| {
+                        let (pos, rest) = t.split_once(':')?;
+                        let (align, leader) = rest.split_once(':')?;
+                        Some(letters_core::TabStop {
+                            pos_pt: pos.parse().ok()?,
+                            align: match align {
+                                "Center" => letters_core::TabAlign::Center,
+                                "Right" => letters_core::TabAlign::Right,
+                                "Decimal" => letters_core::TabAlign::Decimal,
+                                _ => letters_core::TabAlign::Left,
+                            },
+                            leader: match leader {
+                                "Dot" => letters_core::TabLeader::Dot,
+                                "Hyphen" => letters_core::TabLeader::Hyphen,
+                                "Underscore" => letters_core::TabLeader::Underscore,
+                                "MiddleDot" => letters_core::TabLeader::MiddleDot,
+                                _ => letters_core::TabLeader::None,
+                            },
+                        })
+                    })
+                    .collect();
+            }
             "ls" => style.line_spacing = value.parse().unwrap_or(1.0),
             "q" => style.block_quote = true,
             "k" => style.keep_with_next = true,
@@ -1631,7 +1661,7 @@ mod tests {
             left_indent_pt: 36.0,
             right_indent_pt: 4.5,
             first_line_indent_pt: -18.0,
-            tab_stops_pt: vec![36.0, 72.5],
+            tab_stops_pt: vec![letters_core::TabStop::left(36.0), letters_core::TabStop { pos_pt: 72.5, align: letters_core::TabAlign::Right, leader: letters_core::TabLeader::Dot }],
             line_spacing: 1.08,
             block_quote: true,
             list_start: Some(5),

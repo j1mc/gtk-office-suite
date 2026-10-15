@@ -32,6 +32,130 @@ fn record_why(report: &mut CompatibilityReport, (id, label): (&str, &str), locat
     report.record(UnsupportedFeature::new(id, label, location, FeatureDisposition::WarnOnLoss, why));
 }
 
+const PARA_BORDERS: (&str, &str) = ("para-border-styles", "Paragraph border styles");
+const TAB_LEADERS: (&str, &str) = ("tab-leader-styles", "Tab leader styles");
+const WIDOW_COUNTS: (&str, &str) = ("widow-orphan-counts", "Widow and orphan counts");
+
+/// The start of `needle` in `hay`, if present.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The values of attribute `attr` (spelled with its quotes, as in
+/// `w:val="`) in `xml`, in order.
+fn attr_values<'a>(xml: &'a [u8], attr: &[u8]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = find(rest, attr) {
+        rest = &rest[at + attr.len()..];
+        let Some(end) = rest.iter().position(|&b| b == b'"') else { break };
+        out.push(&rest[..end]);
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+/// The `<w:pBdr ...>...</w:pBdr>` regions of a document part: the only
+/// place paragraph border edges live.
+fn pbdr_regions(xml: &[u8]) -> Vec<&[u8]> {
+    const CLOSE: &[u8] = b"</w:pBdr>";
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = find(rest, b"<w:pBdr") {
+        let Some(open) = rest[at..].iter().position(|&b| b == b'>').map(|e| at + e + 1) else { break };
+        if rest[at..open].ends_with(b"/>") {
+            rest = &rest[open..];
+            continue;
+        }
+        let Some(close) = find(&rest[open..], CLOSE).map(|e| open + e) else { break };
+        out.push(&rest[open..close]);
+        rest = &rest[close + CLOSE.len()..];
+    }
+    out
+}
+
+/// The `<style:paragraph-properties ...>...</style:paragraph-properties>`
+/// regions of a style part (self-closed ones included): the only place
+/// paragraph widows, leaders and borders live.
+fn para_prop_regions(xml: &[u8]) -> Vec<&[u8]> {
+    const CLOSE: &[u8] = b"</style:paragraph-properties>";
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = find(rest, b"<style:paragraph-properties") {
+        let Some(open) = rest[at..].iter().position(|&b| b == b'>').map(|e| at + e + 1) else { break };
+        if rest[at..open].ends_with(b"/>") {
+            out.push(&rest[at..open]);
+            rest = &rest[open..];
+            continue;
+        }
+        let Some(close) = find(&rest[open..], CLOSE).map(|e| open + e) else { break };
+        out.push(&rest[at..close]);
+        rest = &rest[close + CLOSE.len()..];
+    }
+    out
+}
+
+/// What the DOCX document part holds that the model drops: paragraph
+/// border looks beyond single, dashed, dotted and double (wave, triple
+/// and the rest, or a bar/between edge), and tab leaders beyond none,
+/// dot, hyphen, underscore and middle dot (heavy draws as an
+/// underscore).
+fn docx_typography(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
+    const BORDERS: &[&[u8]] = &[b"nil", b"none", b"single", b"thick", b"double", b"dotted", b"dashed", b"dashSmallGap"];
+    let mut borders = false;
+    for region in pbdr_regions(xml) {
+        if find(region, b"<w:bar").is_some() || find(region, b"<w:between").is_some() {
+            borders = true;
+            break;
+        }
+        if attr_values(region, b"w:val=\"").iter().any(|v| !BORDERS.contains(v)) {
+            borders = true;
+            break;
+        }
+    }
+    if borders {
+        record_why(report, PARA_BORDERS, member, "Letters keeps single, dashed, dotted and double paragraph borders; anything else is dropped");
+    }
+    const LEADERS: &[&[u8]] = &[b"none", b"dot", b"hyphen", b"underscore", b"middleDot"];
+    if attr_values(xml, b"w:leader=\"").iter().any(|v| !LEADERS.contains(v)) {
+        record_why(report, TAB_LEADERS, member, "Letters keeps dot, hyphen, underscore and middle dot tab leaders; anything else draws as an underscore");
+    }
+}
+
+/// What an ODF style part holds that the model drops: widow/orphan
+/// counts past two (which collapse to controlled), leader styles past
+/// dotted, dashed and solid (wave draws as its character, if any), and
+/// border looks past solid, dashed, dotted and double.
+fn odt_typography(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
+    let regions = para_prop_regions(xml);
+    let counts = ["fo:widows=\"", "fo:orphans=\""].iter().any(|attr| {
+        regions.iter().flat_map(|r| attr_values(r, attr.as_bytes())).any(|v| {
+            v.iter().filter(|b| b.is_ascii_digit()).count() == v.len()
+                && v.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0')) > 2
+        })
+    });
+    if counts {
+        record_why(report, WIDOW_COUNTS, member, "Letters controls widows and orphans, or lets them strand; counts past two collapse to controlled");
+    }
+    const LEADERS: &[&[u8]] = &[b"none", b"dotted", b"dashed", b"solid"];
+    if regions.iter().flat_map(|r| attr_values(r, b"style:leader-style=\"")).any(|v| !LEADERS.contains(&v)) {
+        record_why(report, TAB_LEADERS, member, "Letters keeps dotted, dashed and solid tab leaders; anything else draws as its character, if any");
+    }
+    const BORDERS: &[&[u8]] = &[b"none", b"solid", b"dashed", b"dotted", b"double"];
+    let borders = ["fo:border=\"", "fo:border-top=\"", "fo:border-left=\"", "fo:border-bottom=\"", "fo:border-right=\""]
+        .iter()
+        .any(|attr| {
+            regions.iter().flat_map(|r| attr_values(r, attr.as_bytes())).any(|v| {
+                let mut words = v.split(|b| b.is_ascii_whitespace());
+                let _width = words.next();
+                !matches!(words.next(), Some(w) if BORDERS.contains(&w))
+            })
+        });
+    if borders {
+        record_why(report, PARA_BORDERS, member, "Letters keeps solid, dashed, dotted and double paragraph borders; anything else is dropped");
+    }
+}
+
 /// Whether `xml` opens a `tag` element inside another one: a table in a
 /// table cell. A scan of the bytes like `zip_guard::xml_depth`, so it
 /// cannot recurse; `tag` is matched whole, so `<w:tblPr` is not `<w:tbl`.
@@ -55,6 +179,13 @@ fn nests(xml: &[u8], tag: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// The bytes of the package member `name`, read within budget, if the
+/// package holds it.
+fn member_bytes(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<Vec<u8>> {
+    let mut entry = zip.by_name(name).ok()?;
+    ZipBudget::default().read_entry(&mut entry, name).ok()
 }
 
 /// Whether the package member `name` holds a `tag` inside another.
@@ -92,6 +223,9 @@ pub fn content_a_save_drops(path: &std::path::Path) -> CompatibilityReport {
         if member_nests(&mut zip, "word/document.xml", "w:tbl") {
             record_why(&mut report, NESTED_TABLES, "word/document.xml", flattened);
         }
+        if let Some(xml) = member_bytes(&mut zip, "word/document.xml") {
+            docx_typography(&xml, "word/document.xml", &mut report);
+        }
     } else if names.contains("META-INF/manifest.xml") {
         if let Some(n) = any("Basic/").or_else(|| any("Scripts/")) {
             record(&mut report, MACROS, &n);
@@ -103,6 +237,11 @@ pub fn content_a_save_drops(path: &std::path::Path) -> CompatibilityReport {
         }
         if member_nests(&mut zip, "content.xml", "table:table") {
             record_why(&mut report, NESTED_TABLES, "content.xml", flattened);
+        }
+        for member in ["content.xml", "styles.xml"] {
+            if let Some(xml) = member_bytes(&mut zip, member) {
+                odt_typography(&xml, member, &mut report);
+            }
         }
     }
     report
@@ -180,5 +319,57 @@ mod tests {
         std::fs::write(&t, "# hi").unwrap();
         assert!(ids(&content_a_save_drops(&t)).is_empty());
         assert!(ids(&content_a_save_drops(&dir.path().join("missing.docx"))).is_empty());
+    }
+
+    fn package_with(path: &std::path::Path, marker: &str, members: &[(&str, &str)]) {
+        let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        w.start_file(marker, zip::write::SimpleFileOptions::default()).unwrap();
+        w.write_all(b"x").unwrap();
+        for (n, body) in members {
+            w.start_file(*n, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(body.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn unmodelled_paragraph_borders_and_leaders_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.docx");
+        package_with(&p, "[Content_Types].xml", &[(
+            "word/document.xml",
+            "<w:body><w:p><w:pPr><w:pBdr><w:bottom w:val=\"wave\" w:sz=\"6\" w:color=\"FF0000\"/></w:pBdr>\
+             <w:tabs><w:tab w:val=\"right\" w:pos=\"4320\" w:leader=\"heavy\"/></w:tabs></w:pPr>\
+             <w:r><w:t>text</w:t></w:r></w:p></w:body>",
+        )]);
+        assert_eq!(ids(&content_a_save_drops(&p)), ["para-border-styles", "tab-leader-styles"]);
+    }
+
+    #[test]
+    fn modelled_paragraph_borders_and_leaders_are_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.docx");
+        package_with(&p, "[Content_Types].xml", &[(
+            "word/document.xml",
+            "<w:body><w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:color=\"000000\"/></w:pBdr>\
+             <w:tabs><w:tab w:val=\"right\" w:pos=\"4320\" w:leader=\"dot\"/></w:tabs></w:pPr>\
+             <w:r><w:t>text</w:t></w:r></w:p></w:body>",
+        )]);
+        assert!(ids(&content_a_save_drops(&p)).is_empty());
+    }
+
+    #[test]
+    fn odt_widow_counts_leaders_and_borders_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.odt");
+        package_with(&p, "META-INF/manifest.xml", &[(
+            "content.xml",
+            "<office:body><style:style style:name=\"P1\" style:family=\"paragraph\">\
+             <style:paragraph-properties fo:widows=\"3\" fo:orphans=\"3\" fo:border-bottom=\"0.5pt groove #000000\">\
+             <style:tab-stops><style:tab-stop style:position=\"10cm\" style:type=\"right\" \
+             style:leader-style=\"wave\" style:leader-text=\"~\"/></style:tab-stops>\
+             </style:paragraph-properties></style:style></office:body>",
+        )]);
+        assert_eq!(ids(&content_a_save_drops(&p)), ["widow-orphan-counts", "tab-leader-styles", "para-border-styles"]);
     }
 }
