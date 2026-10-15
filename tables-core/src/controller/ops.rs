@@ -699,16 +699,13 @@ impl super::core::WorkbookController {
         true
     }
 
-    /// Authorize a resize gesture before the view changes any preview size.
-    /// `record_resize` checks again at commit and restores the old size if
-    /// protection changed while dragging.
-    pub fn begin_resize(&mut self) -> bool {
-        if self.sheet_is_protected() {
-            self.protection_rejections = self.protection_rejections.wrapping_add(1);
-            false
-        } else {
-            true
-        }
+    /// Authorize a resize gesture along `axis` before the view changes any
+    /// preview size: a protected sheet allows it only with its format rows
+    /// or columns permission. `record_resize` checks again at commit and
+    /// restores the old size if protection changed while dragging.
+    pub fn begin_resize(&mut self, axis: Axis) -> bool {
+        let sheet = self.state.borrow().sheet().sheet_id;
+        self.authorize_ops(&[Op::Resize { sheet, axis, index: 0, size: 0.0 }])
     }
 
     /// Record a row or column resize the user has already dragged to

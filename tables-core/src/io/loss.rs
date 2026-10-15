@@ -31,7 +31,7 @@
 // | Manual hidden rows/columns, column widths, row heights | kept | loss budget | — |
 // | Print area and page setup | kept | loss budget | — |
 // | Notes and writable validation rules | kept | loss budget | — |
-// | Cell locks, hidden formulas, modeled protection flags | kept (#1552) | loss budget | — |
+// | Cell locks, hidden formulas, every sheet-protection permission (also on unprotected sheets) | kept (#1552, TBL-005) | loss budget | — |
 // | Safe opaque parts (thumbnail, custom XML/properties) | kept (#1274) | package_consistency, opaque-parts smoke | carry, not this file |
 // | Session filter hides with no persisted range/value form | WarnOnLoss (`filter-state`) | loss budget | `model_drops` |
 // | Unsupported filter constructs (top-N, dates, colors, customs, table filters) | WarnOnLoss (`filter-criteria`) | unit tests | `scan_sheet_content`, `inspect_package` |
@@ -39,7 +39,8 @@
 // | Sheet-scoped names (`localSheetId`) | WarnOnLoss (`scoped-names`) | unit tests | `inspect_package` |
 // | Unsupported chart kinds, absolute anchors, unresolvable chart rels | WarnOnLoss (`unsupported-charts`) | unit tests | `scan_chart_xml`, drawing scan |
 // | Unsupported rule shapes (non-cellIs, unknown operator, multi-range, stop-if-true, missing style) | WarnOnLoss (`unsupported-rules`) | unit tests | `scan_sheet_content` |
-// | Pivot definitions, unwritable validation, passwords, inactive permissions | WarnOnLoss | unit tests | `model_drops`, `protection_drops` |
+// | Pivot definitions, unwritable validation, passwords | WarnOnLoss | unit tests | `model_drops`, `protection_drops` |
+// | Allow Edit Ranges, workbook structure/window protection | WarnOnLoss (`protected-ranges`, `workbook-protection`) | unit tests | `protection_drops`, `inspect_package`, `inspect_ods` |
 // | Macros, pictures, comments, Excel tables, slicers, links, connections, OLE, sparklines | WarnOnLoss | unit tests | `inspect_package`, `inspect_ods` |
 // | A binary .xls source (cannot be enumerated) | WarnOnLoss (`legacy-xls-content`) | unit tests | `source_drops` |
 // | An xlsx/xlsm/ods source that cannot be inspected | HardError (`source-inspection-failed`) | unit tests | `source_drops` |
@@ -70,7 +71,8 @@ const SPARKLINES: (&str, &str) = ("sparklines", "Sparklines");
 const CONNECTIONS: (&str, &str) = ("data-connections", "Data connections and queries");
 const OLE: (&str, &str) = ("embedded-objects", "Embedded objects");
 const PROTECTION_PASSWORD: (&str, &str) = ("sheet-protection-password", "Sheet protection passwords");
-const PROTECTION_OPTIONS: (&str, &str) = ("sheet-protection-options", "Sheet protection permissions");
+const PROTECTED_RANGES: (&str, &str) = ("protected-ranges", "Ranges users may edit on protected sheets");
+const WORKBOOK_PROTECTION: (&str, &str) = ("workbook-protection", "Workbook structure protection");
 const FILTER_STATE: (&str, &str) = ("filter-state", "Filter state (which rows a filter hid)");
 const FILTER_CRITERIA: (&str, &str) = ("filter-criteria", "Filter criteria");
 const ARRAY_FORMULAS: (&str, &str) = ("array-formulas", "Array formulas");
@@ -138,7 +140,8 @@ pub fn content_a_save_drops(source: Option<&str>, sheets: &[SheetModel]) -> Comp
 
 /// What the model holds that an xlsx save does not keep, whether or not
 /// the document came from a file. Protection IO itself is #1552's merged
-/// work; this only inventories what that IO cannot reproduce.
+/// work and TBL-005's permission table; this only inventories what that IO
+/// cannot reproduce.
 fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
     for sheet in sheets.iter() {
         if !sheet.pivot_tables.is_empty() {
@@ -149,12 +152,6 @@ fn model_drops(sheets: &[SheetModel], report: &mut CompatibilityReport) {
         }
         if sheet.protection.password_hash.is_some() {
             record(report, PROTECTION_PASSWORD, &sheet.name, "the stored password hash cannot be written; sheet protection is saved without a password");
-        }
-        let protection = &sheet.protection;
-        if !protection.protected && (!protection.allow_select_locked || !protection.allow_select_unlocked
-            || protection.allow_format_cells || protection.allow_insert_rows || protection.allow_delete_rows)
-        {
-            record(report, PROTECTION_OPTIONS, &sheet.name, "nondefault permissions on an unprotected sheet cannot be written; they reset to defaults while cell locks and hidden formulas remain");
         }
         // Filter hides the writer reproduces are the ranged definition's
         // derived rows (written as an autoFilter); any other hidden row —
@@ -284,6 +281,9 @@ fn inspect_package(
     }
     if names.contains("xl/workbook.xml") {
         let xml = read_part(zip, "xl/workbook.xml", budget)?;
+        if xml.contains("<workbookProtection") || xml.contains(":workbookProtection") {
+            record(report, WORKBOOK_PROTECTION, "xl/workbook.xml", "protection of the sheet list (adding, renaming, moving and deleting sheets) or of the window, and its password, aren't kept");
+        }
         // `_xlnm.Print_Area` and `_xlnm._FilterDatabase` are sheet-scoped
         // by OOXML design, but the reader preserves both (into
         // `SheetModel::print_area` and the parsed `<autoFilter>`), so
@@ -466,47 +466,31 @@ fn inspect_ods(
     if content.contains("<table:table-source") {
         record(report, LINKS, "content.xml", "Calc's hidden copies of linked workbooks aren't kept");
     }
+    if content.contains("table:structure-protected=\"true\"") {
+        record(report, WORKBOOK_PROTECTION, "content.xml", "protection of the sheet list (adding, renaming, moving and deleting sheets) and its password aren't kept");
+    }
+    if content.split("<table:table ").skip(1).any(|t| t.split('>').next().unwrap_or("").contains("table:protection-key=")) {
+        record(report, PROTECTION_PASSWORD, "content.xml", "Calc's sheet password digest has no xlsx form; sheet protection is saved without a password");
+    }
     Ok(())
 }
 
 /// The writer accepts plaintext passwords only, not imported legacy hashes or
-/// modern salted credentials. Permissions outside SheetProtection also cannot
-/// be reproduced from the model. Keep these losses in the existing save gate.
+/// modern salted credentials. Every `<sheetProtection>` permission is modeled
+/// (`io/sheet_protection.rs`), but Allow Edit Ranges (`<protectedRanges>`,
+/// each with its own credential) is not. Keep these losses in the save gate.
 fn protection_drops(xml: &str, location: &str, report: &mut CompatibilityReport) {
-    use std::sync::LazyLock;
-    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?sheetProtection\b[^>]*>").unwrap()
-    });
-    static ATTRIBUTE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"\s([A-Za-z][A-Za-z0-9]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
-    });
-    for tag in TAG.find_iter(xml) {
-        let attrs: std::collections::BTreeMap<&str, &str> = ATTRIBUTE.captures_iter(tag.as_str())
-            .map(|a| (a.get(1).unwrap().as_str(), a.get(2).or_else(|| a.get(3)).unwrap().as_str()))
-            .collect();
+    for tag in super::sheet_protection::tags(xml) {
+        let attrs = super::sheet_protection::attributes(tag);
         if attrs.contains_key("password") {
             record(report, PROTECTION_PASSWORD, location, "the imported legacy sheet password hash cannot be written; sheet protection is saved without a password");
         }
         if ["algorithmName", "hashValue", "saltValue", "spinCount"].iter().any(|key| attrs.contains_key(key)) {
             record(report, PROTECTION_PASSWORD, location, "the imported modern salted sheet password credentials cannot be written; sheet protection is saved without a password");
         }
-        if !matches!(attrs.get("sheet"), Some(&"1") | Some(&"true")) {
-            continue;
-        }
-        let unsupported: Vec<&str> = [
-            ("objects", false), ("scenarios", false),
-            ("formatColumns", true), ("formatRows", true), ("insertColumns", true),
-            ("deleteColumns", true), ("insertHyperlinks", true), ("sort", true),
-            ("autoFilter", true), ("pivotTables", true),
-        ].into_iter().filter_map(|(name, default)| {
-            let disallowed = attrs.get(name).map_or(default, |value| matches!(*value, "1" | "true"));
-            (!disallowed).then_some(name)
-        }).collect();
-        if !unsupported.is_empty() {
-            record(report, PROTECTION_OPTIONS, location, &format!(
-                "these unmodeled permissions become disallowed on save: {}", unsupported.join(", ")
-            ));
-        }
+    }
+    if xml.contains("<protectedRange ") || xml.contains(":protectedRange ") {
+        record(report, PROTECTED_RANGES, location, "ranges users may edit on the protected sheet, and their passwords, aren't kept; their cells follow the sheet's protection");
     }
 }
 
@@ -661,30 +645,37 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_sheet_permissions_warn_only_when_their_meaning_changes() {
+    fn every_sheet_permission_is_kept_on_protected_and_unprotected_sheets() {
         let mut report = CompatibilityReport::new("xlsx");
         protection_drops(
-            r#"<worksheet><sheetProtection sheet="1" objects="1" scenarios="1" formatCells="0" insertRows="0" deleteRows="0" selectLockedCells="1" selectUnlockedCells="1"/></worksheet>"#,
-            "Sheet1", &mut report,
-        );
-        assert!(report.features.is_empty(), "modeled permissions are retained");
-        protection_drops(
-            r#"<worksheet><sheetProtection sheet="true" objects="true" scenarios="true" formatColumns="false" sort="0" autoFilter="0"/></worksheet>"#,
+            r#"<worksheet><sheetProtection sheet="true" objects="true" scenarios="true" formatColumns="false" sort="0" autoFilter="0" pivotTables="0" insertHyperlinks="0"/></worksheet>"#,
             "Later", &mut report,
         );
-        assert_eq!(ids(&report), ["sheet-protection-options"]);
-        assert!(report.requires_confirmation());
-        assert!(report.features[0].detail.contains("formatColumns, sort, autoFilter"));
+        assert!(report.features.is_empty(), "every permission is modeled: {:?}", report.features);
+        let mut s = sheet();
+        s.protection.allow_insert_rows = true;
+        s.protection.allow_sort = true;
+        assert!(content_a_save_drops(None, &[s]).features.is_empty(), "an unprotected sheet's permissions are written");
     }
 
     #[test]
-    fn inactive_nondefault_permissions_warn_without_enabling_protection() {
-        let mut s = sheet();
-        s.protection.allow_insert_rows = true;
-        let report = content_a_save_drops(None, &[s]);
-        assert_eq!(ids(&report), ["sheet-protection-options"]);
+    fn allow_edit_ranges_and_workbook_structure_protection_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ranges.xlsx");
+        package(&path, &[
+            ("xl/workbook.xml", r#"<workbook><workbookProtection lockStructure="1" workbookPassword="CC3D"/><sheets/></workbook>"#),
+            ("xl/worksheets/sheet1.xml", r#"<worksheet><sheetProtection sheet="1"/><protectedRanges><protectedRange sqref="A1:B2" name="Inputs"/></protectedRanges></worksheet>"#),
+        ]);
+        let report = content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]);
+        assert_eq!(ids(&report), ["protected-ranges", "workbook-protection"]);
         assert!(report.requires_confirmation());
-        assert!(report.features[0].detail.contains("unprotected sheet"));
+        let ods = dir.path().join("structure.ods");
+        package(&ods, &[
+            ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+            ("content.xml", r#"<office:document-content><office:body><office:spreadsheet table:structure-protected="true"><table:table table:name="S" table:protected="true" table:protection-key="a2V5" table:protection-key-digest-algorithm="http://www.w3.org/2000/09/xmldsig#sha256"/></office:spreadsheet></office:body></office:document-content>"#),
+        ]);
+        let report = content_a_save_drops(Some(ods.to_str().unwrap()), &[sheet()]);
+        assert_eq!(ids(&report), ["sheet-protection-password", "workbook-protection"]);
     }
 
     #[test]

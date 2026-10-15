@@ -32,15 +32,6 @@ impl WorkbookController {
         self.apply_ops(description, vec![super::ops::Op::SetNote { sheet, row, col, note }])
     }
 
-    /// Whether an edit to (`row`, `col`) on the active sheet is refused:
-    /// the sheet is protected and the cell is locked. [`Self::edit_cell`]
-    /// ignores such an edit; the app asks first so it can say why.
-    pub fn refuses_edit(&self, row: usize, col: usize) -> bool {
-        let state = self.state.borrow();
-        let sheet = state.sheet();
-        sheet.protection.protected && sheet.cell_protections.get(row).and_then(|r| r.get(col)).is_some_and(|c| c.locked)
-    }
-
     /// Whether the active sheet is protected, which also refuses inserting
     /// and deleting rows and columns.
     pub fn sheet_is_protected(&self) -> bool {
@@ -196,6 +187,11 @@ impl WorkbookController {
         drop(sheet);
         drop(state);
         if !self.authorize_cells(sheet_id, lines.iter().flat_map(|(_, targets)| targets.iter().copied())) {
+            return;
+        }
+        // A fill copies its sources' inputs: from a hidden formula, that
+        // would put the formula where it can be read (TBL-005).
+        if !self.authorize_sources(sheet_id, lines.iter().flat_map(|(sources, _)| sources.iter().copied())) {
             return;
         }
         let state = self.state.borrow();

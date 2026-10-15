@@ -305,8 +305,10 @@ impl TablesWindow {
             let nb = name_box.clone();
             let stats = stats_label.clone();
             let (ga, h, v) = (grid_area.clone(), h_adj.clone(), v_adj.clone());
-            let isync = inspector_sync.clone();
+            let (isync, fx) = (inspector_sync.clone(), fx_entry.clone());
             Rc::new(move || {
+                // Protection may have changed what can be selected or shown.
+                crate::protection_ui::sync(&fx, &s);
                 {
                     let st = s.borrow();
                     let sh = st.sheet();
@@ -363,14 +365,16 @@ impl TablesWindow {
                         .and_then(|n| tables_core::sheet::parse_defined_name_range(&n.formula))
                 });
                 let Some((top, left, bottom, right)) = target else { return false };
-                {
+                let allowed = {
                     let st = s.borrow();
                     let mut sh = st.sheet_mut();
                     let (max_r, max_c) = (sh.rows.saturating_sub(1), sh.cols.saturating_sub(1));
-                    sh.select_cell(top.min(max_r), left.min(max_c));
-                    if (top, left) != (bottom, right) {
-                        sh.extend_selection(bottom.min(max_r), right.min(max_c));
-                    }
+                    sh.try_select_block(top.min(max_r), left.min(max_c), bottom.min(max_r), right.min(max_c))
+                };
+                if !allowed {
+                    crate::protection_ui::notify(&da, crate::protection_ui::UNSELECTABLE);
+                    refresh();
+                    return false;
                 }
                 refresh();
                 // The grid's accessible description has to follow the jump.
@@ -486,7 +490,7 @@ impl TablesWindow {
                     (r, c)
                 };
                 if crate::sheet_actions::refuse_locked(&ctl, &toasts, r, c) { return; }
-                ctl.borrow_mut().edit_cell(r, c, val);
+                ctl.borrow_mut().commit_formula_bar(r, c, &val);
                 let shown = s.borrow().engine.cell(r, c);
                 update_grid_a11y(&da, &tables_core::sheet::col_label(c), r, &shown);
                 // Commit returns focus to the grid so arrow keys navigate
@@ -532,27 +536,22 @@ impl TablesWindow {
                     let shift = g
                         .current_event_state()
                         .contains(gtk4::gdk::ModifierType::SHIFT_MASK);
-                    {
-                        let st = s.borrow_mut();
-                        {
-                            let shown = st.engine.cell(row, col);
-                            update_grid_a11y(&da, &tables_core::sheet::col_label(col), row, &shown);
-                        }
+                    let moved = {
+                        let st = s.borrow();
                         let mut sh = st.sheet_mut();
-                        if shift {
-                            sh.extend_selection(row, col);
-                        } else {
-                            sh.select_cell(row, col);
-                        }
-                        // The formula bar edits inputs, not displayed
-                        // results: a formula cell shows its formula here.
-                        let val = st.cell_input(row, col);
-                        // fx.set_text() fires `changed` synchronously, and
-                        // for formula text that handler re-borrows this
-                        // same per-sheet RefCell -- drop before calling it.
-                        drop(sh); drop(st);
-                        fx.set_text(&val);
+                        if shift { sh.try_extend_selection(row, col) } else { sh.try_select_cell(row, col) }
+                    };
+                    if !moved {
+                        crate::protection_ui::notify(&da, crate::protection_ui::UNSELECTABLE);
+                        return;
                     }
+                    let shown = s.borrow().engine.cell(row, col);
+                    update_grid_a11y(&da, &tables_core::sheet::col_label(col), row, &shown);
+                    // The formula bar edits inputs, not displayed results:
+                    // a formula cell shows its formula here, unless
+                    // protection hides it.
+                    let (ar, ac) = { let st = s.borrow(); let sh = st.sheet(); (sh.selected_row, sh.selected_col) };
+                    crate::protection_ui::show_input(&fx, &s, ar, ac);
                     refresh();
                     da.grab_focus();
                     da.queue_draw();
@@ -582,7 +581,7 @@ impl TablesWindow {
                 if let Some(col) = hit_col_divider(x, y, h.value(), &sh) {
                     let width = sh.col_width(col);
                     drop(sh); drop(st);
-                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(); }) {
+                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(tables_core::controller::Axis::Cols); }) {
                         dc2.set(Some((col, width)));
                     }
                 }
@@ -638,7 +637,7 @@ impl TablesWindow {
                 if let Some(row) = hit_row_divider(x, y, v.value(), &sh) {
                     let height = sh.row_height(row);
                     drop(sh); drop(st);
-                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(); }) {
+                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(tables_core::controller::Axis::Rows); }) {
                         dr2.set(Some((row, height)));
                     }
                 }
@@ -735,8 +734,11 @@ impl TablesWindow {
                         let Some((col, row)) = xy_to_cell(x, y, h.value(), v.value(), &sh) else { return };
                         drop(sh);
                         let mut sh = st.sheet_mut();
-                        sh.select_cell(ar, ac);
-                        sh.extend_selection(row, col);
+                        // A block protection does not allow keeps the last
+                        // one it did (TBL-005).
+                        if !sh.try_select_block(ar, ac, row, col) {
+                            return;
+                        }
                     }
                     refresh();
                     da.queue_draw();
@@ -1960,32 +1962,17 @@ impl TablesWindow {
                     _ => None,
                 };
                 if let Some((dr, dc)) = delta {
-                    let moved_val = {
+                    // Shift extends from the range's moving end; a plain
+                    // arrow moves the anchor cell, past cells protection
+                    // does not let the user select (TBL-005).
+                    let moved = {
                         let st = s.borrow();
                         let mut sh = st.sheet_mut();
-                        // Shift extends from the range's moving end; a plain
-                        // arrow moves the anchor cell.
-                        let (br, bc) = if shift {
-                            (sh.sel_end_row, sh.sel_end_col)
-                        } else {
-                            (sh.selected_row, sh.selected_col)
-                        };
-                        let nr = (br as i64 + dr).clamp(0, sh.rows as i64 - 1) as usize;
-                        let nc = (bc as i64 + dc).clamp(0, sh.cols as i64 - 1) as usize;
-                        if shift {
-                            sh.extend_selection(nr, nc);
-                            None
-                        } else {
-                            sh.select_cell(nr, nc);
-                            Some(st.cell_input(nr, nc))
-                        }
+                        sh.try_step_selection(dr, dc, shift) && !shift
                     };
-                    // fx.set_text() fires `changed` synchronously, and for
-                    // formula text that handler re-borrows this same
-                    // per-sheet RefCell -- call it only after `sh`/`st`
-                    // above have dropped.
-                    if let Some(val) = moved_val {
-                        fx.set_text(&val);
+                    if moved {
+                        let (r, c) = { let st = s.borrow(); let sh = st.sheet(); (sh.selected_row, sh.selected_col) };
+                        crate::protection_ui::show_input(&fx, &s, r, c);
                     }
                     {
                         let st = s.borrow();
@@ -2022,12 +2009,8 @@ impl TablesWindow {
                     }
                 }
                 if keyval == Key::F2 || keyval == Key::Return || keyval == Key::KP_Enter {
-                    let current = {
-                        let st = s.borrow();
-                        let (r, c) = (st.sheet().selected_row, st.sheet().selected_col);
-                        st.cell_input(r, c)
-                    };
-                    fx.set_text(&current);
+                    let (r, c) = { let st = s.borrow(); let sh = st.sheet(); (sh.selected_row, sh.selected_col) };
+                    crate::protection_ui::show_input(&fx, &s, r, c);
                     fx.grab_focus();
                     fx.set_position(-1);
                     return gtk4::glib::Propagation::Stop;

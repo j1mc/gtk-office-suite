@@ -47,9 +47,10 @@ impl WorkbookState {
 
     /// The editable input for a cell on the active sheet: its formula with
     /// the leading `=`, else the text it was typed as (`""` when empty).
-    /// Setting this back recreates the cell. This is what the formula bar,
-    /// copy, undo and save use — never the displayed value below, which
-    /// would flatten a formula into its current result.
+    /// Setting this back recreates the cell. This is what editing, fill,
+    /// undo and save use — never the displayed value below, which would
+    /// flatten a formula into its current result. What the user is *shown*
+    /// is [`Self::presented_input`].
     pub fn cell_input(&self, row: usize, col: usize) -> String {
         self.cell_input_at(self.active_sheet, row, col)
     }
@@ -57,6 +58,19 @@ impl WorkbookState {
     /// [`Self::cell_input`] on `sheet` instead of the active one.
     pub fn cell_input_at(&self, sheet: usize, row: usize, col: usize) -> String {
         self.engine.editable_input_at(sheet, row, col)
+    }
+
+    /// The input the formula bar shows for a cell on the active sheet, or
+    /// `None` when protection withholds it (TBL-005): the cell's formula is
+    /// hidden on the protected sheet, or the cell cannot be selected. The
+    /// grid still shows the calculated value either way.
+    pub fn presented_input(&self, row: usize, col: usize) -> Option<String> {
+        let sheet = self.sheet();
+        if sheet.formula_hidden(row, col) || !sheet.may_select(row, col) {
+            return None;
+        }
+        drop(sheet);
+        Some(self.cell_input(row, col))
     }
 
     /// The cell's displayed value on the active sheet: read-only

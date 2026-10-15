@@ -12,6 +12,7 @@ pub mod fill;
 pub mod formula_edit;
 pub mod fragment;
 pub mod io;
+mod protection;
 pub mod sheet;
 pub mod snapshot;
 pub mod sparse;
