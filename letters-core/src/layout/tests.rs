@@ -876,3 +876,73 @@ fn bordered_paragraphs_open_their_box_where_they_split() {
     assert_eq!(lines_per_page(&t), vec![46, 3]);
     assert_eq!(para_boxes(&t).iter().map(|b| (b.2, b.3)).collect::<Vec<_>>(), vec![(true, false), (false, true)]);
 }
+
+/// Give `doc` sections starting at `starts`, on `pages` (LET-005S).
+fn sectioned(doc: &mut Document, starts: &[usize], pages: &[PageGeometry]) {
+    let n = doc.paragraphs.len();
+    doc.sections = starts
+        .iter()
+        .enumerate()
+        .map(|(k, &s)| crate::model::DocSection {
+            id: k as u32,
+            range: crate::model::ParagraphRange::new(s, starts.get(k + 1).copied().unwrap_or(n)),
+            geometry: pages[k],
+            header: None,
+            footer: None,
+        })
+        .collect();
+    doc.page = Some(pages[0]);
+}
+
+fn landscape_two_columns() -> PageGeometry {
+    PageGeometry { width_pt: 841.9, height_pt: 595.3, margin_left_pt: 36.0, margin_right_pt: 36.0, columns: 2, column_gap_pt: 24.0, ..PageGeometry::default() }
+}
+
+/// Each section starts a page of its own size, lays its text out in its
+/// own margins and columns, and shows its own header.
+#[test]
+fn each_section_is_laid_out_on_its_own_pages() {
+    let portrait = PageGeometry::default();
+    let landscape = landscape_two_columns();
+    let mut d = doc_of(61, "text");
+    sectioned(&mut d, &[0, 1], &[portrait, landscape]);
+    d.header = Some("Doc".into());
+    d.sections[1].header = Some("Appendix {page}".into());
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2, "the second section starts a page and fills both its columns");
+    assert_eq!((t.pages[0].width_pt, t.pages[0].height_pt), (portrait.width_pt, portrait.height_pt));
+    assert_eq!((t.pages[1].width_pt, t.pages[1].height_pt), (841.9, 595.3));
+    assert_eq!(lines_per_page(&t), vec![1, 60]);
+    // 595.3 - 144 points of text area hold 30 lines a column.
+    let xs: Vec<f64> = line_items(&t.pages[1]).iter().map(|l| l.2).collect();
+    let column_w = (841.9 - 72.0 - 24.0) / 2.0;
+    assert!(xs[..30].iter().all(|x| (x - 36.0).abs() < 1e-6), "{xs:?}");
+    assert!(xs[30..].iter().all(|x| (x - (36.0 + column_w + 24.0)).abs() < 1e-6), "{xs:?}");
+    let headers = |p: &Page| {
+        p.items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Line { source: Source::Header, text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(headers(&t.pages[0]), vec!["Doc"]);
+    assert_eq!(headers(&t.pages[1]), vec!["Appendix 2"]);
+}
+
+/// A section that starts with a table puts the whole table on its own
+/// first page; a heading ending the section before is not kept with it.
+#[test]
+fn a_section_starting_with_a_table_keeps_the_table_whole() {
+    let mut d = doc_of(1, "before");
+    d.paragraphs[0].style.heading = Some(1);
+    d.insert_table_at(1, 2, 2);
+    sectioned(&mut d, &[0, 1], &[PageGeometry::default(), landscape_two_columns()]);
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    let cells_on = |p: &Page| p.items.iter().filter(|i| matches!(i, Item::Cell { .. })).count();
+    assert_eq!(cells_on(&t.pages[0]), 0);
+    assert!(cells_on(&t.pages[1]) > 0);
+    assert_eq!(lines_per_page(&t)[0], 1, "the heading stays in its own section");
+}

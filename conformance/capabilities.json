@@ -242,6 +242,35 @@
       }
     },
     {
+      "id": "letters.sections.page-setup",
+      "app": "letters",
+      "title": "Sections give parts of a document their own page, columns and header",
+      "scope": "Insert/Remove Section Break at the caret and Page Setup on the caret's section are one undo step each; each section lays out on its own pages; .docx (w:sectPr per section) and .odt (a master page per section) keep the sections through Writer both ways. Every break is a next-page break; continuous/odd/even breaks, unequal columns and numbering restarts are loss-reported (LET-005S).",
+      "issue": 1580,
+      "status": "verified",
+      "revision": "b8160b4d3f3978d32424510621b03785e0e06a8e",
+      "requires": [
+        "model",
+        "gui",
+        "format"
+      ],
+      "evidence": {
+        "model": [
+          "letters-core::sections::tests::section_delete_restores_ranges_and_ids",
+          "letters-core::sections::tests::table_never_splits_across_section_break",
+          "letters-core::sections::tests::page_setup_sets_the_carets_section",
+          "letters-core::layout::tests::each_section_is_laid_out_on_its_own_pages"
+        ],
+        "gui": [
+          "tests/gui/test_smoke.py::LettersSectionSetupSmoke::test_page_setup_sets_the_carets_section_and_undo_takes_it_back"
+        ],
+        "format": [
+          "letters-core::docx::multi_section_docx_round_trips_geometry_and_headers",
+          "letters-core::odt::tests::multi_section_odt_round_trips_geometry_and_headers"
+        ]
+      }
+    },
+    {
       "id": "letters.word-count",
       "app": "letters",
       "title": "Word count counts writing, not presentation",

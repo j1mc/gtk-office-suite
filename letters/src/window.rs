@@ -109,6 +109,8 @@ impl LettersWindow {
             ("app.list-outdent", &suite_common::i18n("Outdent List")),
             ("app.list-restart-numbering", &suite_common::i18n("Restart Numbering")),
             ("app.insert-page-break", &suite_common::i18n("Insert Page Break")),
+            ("app.insert-section-break", &suite_common::i18n("Insert Section Break")),
+            ("app.remove-section-break", &suite_common::i18n("Remove Section Break")),
             ("app.cycle-line-spacing", &suite_common::i18n("Cycle Line Spacing")),
             ("app.keep-lines-together", &suite_common::i18n("Keep Lines Together")),
             ("app.widow-control", &suite_common::i18n("Widow and Orphan Control")),
@@ -403,9 +405,10 @@ impl LettersWindow {
         app.add_action(&a);
         app.set_accels_for_action("app.find", &["<Primary>f"]);
 
-        // ── Page Setup action ─────────────────────────────────────
-        // Page Setup edits the open document's page (an undoable model
-        // edit), which its page view, print and every save use.
+        // ── Page Setup and section breaks ─────────────────────────
+        // Page Setup edits the page of the caret's section (an undoable
+        // model edit), which its page view, print and every save use;
+        // Insert/Remove Section Break start or join sections (LET-005S).
         {
             let w = win.clone();
             let tv = tab_view.clone();
@@ -413,31 +416,26 @@ impl LettersWindow {
             a.connect_activate(move |_, _| {
                 let Some(buf) = active_buffer(&tv) else { return };
                 let Some(pc) = tv.selected_page().as_ref().and_then(page_container) else { return };
-                let current = crate::live::of(&buf)
-                    .and_then(|m| m.borrow_mut().document().page)
-                    .unwrap_or_else(|| crate::doc_tab::layout_options(&pc).page);
-                let page = suite_common::page_setup::Page {
-                    width_pt: current.width_pt,
-                    height_pt: current.height_pt,
-                    margin_top_pt: current.margin_top_pt,
-                    margin_bottom_pt: current.margin_bottom_pt,
-                    margin_left_pt: current.margin_left_pt,
-                    margin_right_pt: current.margin_right_pt,
-                };
-                suite_common::page_setup::show(&w, page, move |p| {
-                    crate::dialogs::apply_page_geometry(&buf, letters_core::model::PageGeometry {
-                        width_pt: p.width_pt,
-                        height_pt: p.height_pt,
-                        margin_top_pt: p.margin_top_pt,
-                        margin_bottom_pt: p.margin_bottom_pt,
-                        margin_left_pt: p.margin_left_pt,
-                        margin_right_pt: p.margin_right_pt,
-                        ..Default::default()
-                    });
-                });
+                crate::dialogs::show_page_setup(&w, &pc, &buf);
             });
             app.add_action(&a);
             app.set_accels_for_action("app.page-setup", &["<Primary><Shift>l"]);
+            let tv = tab_view.clone();
+            let a = gtk::gio::SimpleAction::new("insert-section-break", None);
+            a.connect_activate(move |_, _| {
+                let Some(buf) = active_buffer(&tv) else { return };
+                let Some(pc) = tv.selected_page().as_ref().and_then(page_container) else { return };
+                crate::dialogs::insert_section_break(&pc, &buf);
+            });
+            app.add_action(&a);
+            let tv = tab_view.clone();
+            let a = gtk::gio::SimpleAction::new("remove-section-break", None);
+            a.connect_activate(move |_, _| {
+                if let Some(buf) = active_buffer(&tv) {
+                    crate::dialogs::remove_section_break(&buf);
+                }
+            });
+            app.add_action(&a);
         }
 
         // ── Actions ────────────────────────────────────────────────

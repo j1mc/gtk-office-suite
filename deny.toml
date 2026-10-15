@@ -25,6 +25,11 @@ ignore = [
     # once citationberg moves off 0.38; see the note in suite-export/Cargo.toml.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38.4 via citationberg 0.7.0 (typst bibliography); no patched 0.38.x; our generated Typst never parses CSL (#225); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38.4 via citationberg 0.7.0 (typst bibliography); no patched 0.38.x; our generated Typst never parses CSL (#225); review by 2027-01-01" },
+    # unsafe-libyaml: typst -> hayagriva 0.10.1 (the latest) -> serde_yaml,
+    # which is deprecated and has no maintained release. It parses CSL/YAML
+    # bibliographies, and our generated Typst never loads one (as for the
+    # quick-xml entries above, #225).
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained via serde_yaml/hayagriva 0.10.1 (typst bibliography); no maintained release; our generated Typst never parses YAML bibliographies (#225); review by 2027-01-01" },
     # syntect (syntax highlighting) pulls both; not in the untrusted-input path.
     { id = "RUSTSEC-2025-0141", reason = "bincode development ceased, no patched release; via syntect — build/display only (#1197); review by 2027-01-01" },
     { id = "RUSTSEC-2024-0320", reason = "yaml-rust unmaintained, no patched release; via syntect — display only (#1197); review by 2027-01-01" },
