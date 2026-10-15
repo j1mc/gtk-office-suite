@@ -25,14 +25,12 @@ Confirmed harness gaps: fixed :99 display, shared /tmp schemas, EXIT traps bypas
       stdout/stderr, AT-SPI tree, screenshot, input trace and normalized
       state on setup/test failures — `_capture_failure_artifacts`, and
       `addCleanup`/`tearDown` for every launched process.
-- [ ] Replace sleeps with bounded state predicates; timeout reports the last
-      observed state — **partly done**: the runner's setup sleeps are gone,
-      `BaseGUITestCase.wait_until` reports the last observed value on
-      timeout, and the three journeys that measurably depended on a fixed
-      wait now use predicates. The remaining `time.sleep` calls in the
-      other journeys are measurably *not* load-bearing (see below), so
-      they are dead weight rather than a flake risk, and converting them is
-      a mechanical follow-up.
+- [x] Replace sleeps with bounded state predicates; timeout reports the last
+      observed state — `BaseGUITestCase.wait_until` reports the last observed
+      value on timeout; the remaining input-pacing and negative-observation
+      sleeps carry explicit `# pacing:`/`# settling:` reasons. The
+      `tests/test_gui_sleeps.py` checker rejects any unexplained call and is
+      passing.
 - [x] Detect duplicate test definitions before collection; reconcile and
       reactivate the #137 regression after live verification —
       `conformance/validate_capabilities.py` (C6) rejects a duplicate class
@@ -103,12 +101,11 @@ use?") instead of silently sharing.
 attempt that never started a journey is classified as infrastructure rather
 than as an unexplained product result.
 
-Nine of the ten items are complete. The one that is not is the sleep
-conversion: the runner's setup sleeps are gone and the three journeys that
-measurably depended on a fixed wait use predicates, but the remaining
-`time.sleep` calls in the other journeys — measurably not load-bearing, see
-below — are still there. This issue stays open for that mechanical
-follow-up.
+All ten items are complete. The sleep conversion closed with #1271:
+`BaseGUITestCase.wait_until` reports the last observed value on timeout,
+and `tests/test_gui_sleeps.py` rejects undocumented `time.sleep` calls.
+Remaining sleeps identify input pacing or negative-observation settling;
+the checker passes.
 
 ## Which fixed waits were actually load-bearing
 

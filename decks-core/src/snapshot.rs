@@ -16,6 +16,9 @@ use crate::engine::SlideObject;
 
 pub struct ObjectSnapshot {
     pub index: usize,
+    /// The object's stable id: what selection, undo and collaboration
+    /// name. The view index above is draw order only.
+    pub id: u64,
     pub kind: &'static str,
     pub text: Option<String>,
     pub x: f64,
@@ -33,26 +36,31 @@ pub struct ObjectSnapshot {
 
 pub struct SlideSnapshot {
     pub index: usize,
+    /// The slide's stable id.
+    pub id: u64,
     pub title: String,
     /// The slide's speaker notes.
     pub notes: String,
-    /// The slide's layout and its name.
-    pub layout: Option<(usize, String)>,
+    /// The slide's master, by stable id.
+    pub master_id: Option<u64>,
+    /// The slide's layout id and its name.
+    pub layout: Option<(u64, String)>,
     pub objects: Vec<ObjectSnapshot>,
 }
 
 pub struct DeckSnapshot {
     pub slide_count: usize,
-    /// Each master's name and how many decorations it has.
-    pub masters: Vec<(String, usize)>,
+    /// Each master's stable id, name and how many decorations it has.
+    pub masters: Vec<(u64, String, usize)>,
     /// Each master's decorations, as [`ObjectSnapshot::detail`].
     pub master_details: Vec<Vec<String>>,
-    /// The master being edited, while the master view is open.
-    pub editing_master: Option<usize>,
+    /// The master being edited, by stable id, while the master view is open.
+    pub editing_master: Option<u64>,
     pub slides: Vec<SlideSnapshot>,
-    /// The window's current slide and selected object, which the window
-    /// (not the controller) holds and fills in.
-    pub selection: Option<(usize, Option<usize>)>,
+    /// The controller-owned selection (stable ids, never positions),
+    /// filled in by [`snapshot`]. View indices for it are derived in
+    /// [`DeckSnapshot::to_json`] alongside the legacy positional keys.
+    pub selection: crate::controller::SelectionState,
 }
 
 /// `obj` in full, its picture (if any) named by a hash of the bytes.
@@ -72,7 +80,7 @@ pub fn detail(obj: &SlideObject) -> String {
     format!("{obj:?}")
 }
 
-fn object_snapshot(index: usize, obj: &SlideObject) -> ObjectSnapshot {
+fn object_snapshot(index: usize, id: u64, obj: &SlideObject) -> ObjectSnapshot {
     let (kind, text) = match obj {
         SlideObject::TextBox { text, .. } => ("TextBox", Some(text.clone())),
         SlideObject::Rect { .. } => ("Rect", None),
@@ -93,7 +101,7 @@ fn object_snapshot(index: usize, obj: &SlideObject) -> ObjectSnapshot {
         o => (o.x(), o.y()),
     };
     let (w, h) = obj.size();
-    ObjectSnapshot { index, kind, text, x, y, w, h, detail: detail(obj) }
+    ObjectSnapshot { index, id, kind, text, x, y, w, h, detail: detail(obj) }
 }
 
 pub fn snapshot(controller: &DecksController) -> DeckSnapshot {
@@ -105,28 +113,61 @@ pub fn snapshot(controller: &DecksController) -> DeckSnapshot {
         .enumerate()
         .map(|(index, slide)| SlideSnapshot {
             index,
+            id: slide.ids.slide,
             title: slide.title.clone(),
             notes: slide.notes.clone(),
-            layout: slide.layout.map(|l| {
-                let name = slide
-                    .master_idx
-                    .and_then(|m| masters_ref.get(m))
-                    .and_then(|m| m.layouts.get(l))
+            master_id: slide.master_id,
+            layout: slide.layout_id.map(|id| {
+                let name = masters_ref
+                    .iter()
+                    .find(|m| Some(m.id) == slide.master_id)
+                    .and_then(|m| m.layouts.iter().find(|l| l.id == id))
                     .map(|l| l.name.clone())
                     .unwrap_or_default();
-                (l, name)
+                (id, name)
             }),
             objects: slide
                 .objects
                 .iter()
                 .enumerate()
-                .map(|(i, obj)| object_snapshot(i, obj))
+                .map(|(i, obj)| object_snapshot(i, slide.ids.objects.get(i).copied().unwrap_or(0), obj))
                 .collect(),
         })
         .collect();
-    let masters = masters_ref.iter().map(|m| (m.name.clone(), m.shapes.len())).collect();
+    let masters = masters_ref.iter().map(|m| (m.id, m.name.clone(), m.shapes.len())).collect();
     let master_details = masters_ref.iter().map(|m| m.shapes.iter().map(detail).collect()).collect();
-    DeckSnapshot { slide_count, masters, master_details, editing_master: controller.editing_master(), slides: snapshots, selection: None }
+    DeckSnapshot { slide_count, masters, master_details, editing_master: controller.editing_master(), slides: snapshots, selection: controller.selection() }
+}
+
+/// What the session's source context holds, for GUI journeys to assert
+/// provenance instead of scraping dialogs (DCK-002). `None` for new
+/// documents and recovered snapshots: no context, no claims. Separate
+/// from [`DeckSnapshot`] so existing consumers never change shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvenanceSnapshot {
+    pub format: String,
+    pub carried_names: Vec<String>,
+    pub opaque_names: Vec<String>,
+    pub opaque_complete: bool,
+    pub edited_slides: Vec<u64>,
+    pub structure_changed: bool,
+    pub masters_touched: bool,
+    pub history_stepped: bool,
+    pub destructive_loss_ids: Vec<String>,
+}
+
+pub fn provenance_snapshot(controller: &DecksController) -> Option<ProvenanceSnapshot> {
+    controller.provenance_facts().map(|f| ProvenanceSnapshot {
+        format: f.format,
+        carried_names: f.carried_names,
+        opaque_names: f.opaque_names,
+        opaque_complete: f.opaque_complete,
+        edited_slides: f.edited_slides,
+        structure_changed: f.structure_changed,
+        masters_touched: f.masters_touched,
+        history_stepped: f.history_stepped,
+        destructive_loss_ids: f.destructive_loss_ids,
+    })
 }
 
 fn escape_json(s: &str) -> String {
@@ -167,8 +208,9 @@ impl DeckSnapshot {
                     .iter()
                     .map(|o| {
                         format!(
-                            "{{\"index\":{},\"kind\":{},\"text\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"detail\":{}}}",
+                            "{{\"index\":{},\"id\":{},\"kind\":{},\"text\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"detail\":{}}}",
                             o.index,
+                            o.id,
                             json_str(o.kind),
                             json_opt_str(&o.text),
                             o.x,
@@ -181,11 +223,13 @@ impl DeckSnapshot {
                     .collect::<Vec<_>>()
                     .join(",");
                 format!(
-                    "{{\"index\":{},\"title\":{},\"notes\":{},\"layout\":{},\"objects\":[{}]}}",
+                    "{{\"index\":{},\"id\":{},\"title\":{},\"notes\":{},\"master_id\":{},\"layout\":{},\"objects\":[{}]}}",
                     s.index,
+                    s.id,
                     json_str(&s.title),
                     json_str(&s.notes),
-                    s.layout.as_ref().map_or("null".to_string(), |(i, n)| format!("{{\"index\":{i},\"name\":{}}}", json_str(n))),
+                    s.master_id.map_or("null".to_string(), |id| id.to_string()),
+                    s.layout.as_ref().map_or("null".to_string(), |(id, n)| format!("{{\"id\":{id},\"name\":{}}}", json_str(n))),
                     objects,
                 )
             })
@@ -195,20 +239,43 @@ impl DeckSnapshot {
             .masters
             .iter()
             .zip(self.master_details.iter().chain(std::iter::repeat(&Vec::new())))
-            .map(|((name, shapes), details)| {
+            .map(|((id, name, shapes), details)| {
                 let details = details.iter().map(|d| json_str(d)).collect::<Vec<_>>().join(",");
-                format!("{{\"name\":{},\"shapes\":{shapes},\"details\":[{details}]}}", json_str(name))
+                format!("{{\"id\":{id},\"name\":{},\"shapes\":{shapes},\"details\":[{details}]}}", json_str(name))
             })
             .collect::<Vec<_>>()
             .join(",");
-        let editing = self.editing_master.map_or("null".to_string(), |i| i.to_string());
-        let (current, selected) = match self.selection {
-            Some((c, s)) => (c.to_string(), s.map_or("null".to_string(), |s| s.to_string())),
-            None => ("null".to_string(), "null".to_string()),
+        let editing = self.editing_master.map_or("null".to_string(), |id| id.to_string());
+        // The selection, by stable ids, plus the view indices derived from
+        // it that existing journeys assert on (`current_slide`,
+        // `selected`/`selected_object` name the primary object's
+        // z-position, or null).
+        let current_index = self.selection.slide_id.and_then(|id| self.slides.iter().find(|s| s.id == id)).map(|s| s.index);
+        let primary_index = self.selection.primary_object_id.and_then(|id| {
+            self.slides
+                .iter()
+                .find(|s| Some(s.id) == self.selection.slide_id)?
+                .objects
+                .iter()
+                .find(|o| o.id == id)
+                .map(|o| o.index)
+        });
+        let selected_ids = self.selection.object_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        let mode = match self.selection.mode {
+            crate::controller::SelectionMode::Object => "object",
+            crate::controller::SelectionMode::Text => "text",
+            crate::controller::SelectionMode::TableCell => "table-cell",
+            crate::controller::SelectionMode::GroupScope => "group-scope",
         };
         format!(
-            "{{\"slide_count\":{},\"masters\":[{masters}],\"editing_master\":{editing},\"current_slide\":{current},\"selected\":{selected},\"selected_object\":{selected},\"slides\":[{}]}}",
-            self.slide_count, slides
+            "{{\"slide_count\":{},\"masters\":[{masters}],\"editing_master\":{editing},\"current_slide\":{},\"selected\":{},\"selected_object\":{},\"slide_id\":{},\"selected_ids\":[{selected_ids}],\"primary_object_id\":{},\"selection_mode\":\"{mode}\",\"slides\":[{}]}}",
+            self.slide_count,
+            current_index.map_or("null".to_string(), |i| i.to_string()),
+            primary_index.map_or("null".to_string(), |i| i.to_string()),
+            primary_index.map_or("null".to_string(), |i| i.to_string()),
+            self.selection.slide_id.map_or("null".to_string(), |id| id.to_string()),
+            self.selection.primary_object_id.map_or("null".to_string(), |id| id.to_string()),
+            slides
         )
     }
 }
@@ -219,23 +286,27 @@ mod tests {
     use crate::engine::Slide;
 
     fn slide(title: &str) -> Slide {
-        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None }
+        Slide { title: title.into(), background: "#fff".into(), objects: vec![], notes: String::new(), master_id: Some(0), transition: Default::default(), builds: vec![], ids: Default::default(), layout_id: None }
     }
 
     #[test]
     fn snapshot_reports_slides_and_objects() {
         let c = DecksController::new(vec![slide("S1"), slide("S2")], vec![]);
-        c.add_object(0, SlideObject::Rect { x: 1.0, y: 2.0, w: 10.0, h: 10.0, rotation: 0.0 });
-        c.add_object(1, SlideObject::TextBox {
+        let (first, second) = (c.slide_id_at(0).unwrap(), c.slide_id_at(1).unwrap());
+        c.add_object(first, SlideObject::Rect { x: 1.0, y: 2.0, w: 10.0, h: 10.0, rotation: 0.0 });
+        c.add_object(second, SlideObject::TextBox {
             text: "hi".into(), x: 0.0, y: 0.0, w: 5.0, h: 5.0, runs: vec![],
             rotation: 0.0,
             body: Default::default(),
         });
         let snap = snapshot(&c);
         assert_eq!(snap.slide_count, 2);
+        assert_eq!(snap.slides[0].id, first);
         assert_eq!(snap.slides[0].objects.len(), 1);
         assert_eq!(snap.slides[0].objects[0].kind, "Rect");
         assert_eq!(snap.slides[1].objects[0].text.as_deref(), Some("hi"));
+        // The selection is controller-owned ids, not window positions.
+        assert_eq!(snap.selection.slide_id, Some(first));
     }
 
     #[test]
@@ -280,9 +351,10 @@ mod tests {
             SlideObject::Circle { x: 1.0, y: 2.0, r: 3.0, rotation: 0.0 },
             SlideObject::Image { path: "p.png".into(), x: 1.0, y: 2.0, w: 3.0, h: 4.0, rotation: 0.0, crop: Default::default() },
         ];
-        let kinds = objs.iter().enumerate().map(|(i, o)| object_snapshot(i, o)).collect::<Vec<_>>();
+        let kinds = objs.iter().enumerate().map(|(i, o)| object_snapshot(i, 100 + i as u64, o)).collect::<Vec<_>>();
         assert_eq!(kinds[0].kind, "TextBox");
         assert_eq!(kinds[0].text.as_deref(), Some("t"));
+        assert_eq!(kinds[0].id, 100);
         assert_eq!(kinds[1].kind, "Rect");
         assert!(kinds[1].text.is_none());
         assert_eq!(kinds[2].kind, "Circle");

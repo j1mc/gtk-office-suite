@@ -61,9 +61,11 @@ pub fn print(win: &adw::ApplicationWindow, container: &PageContainer, buf: &gtk:
     let _ = op.run(gtk::PrintOperationAction::PrintDialog, Some(win));
 }
 
-/// Ask where to save, then write the tab's pages as a PDF.
+/// Ask where to save, then write the tab's pages as a PDF: laid out fresh
+/// from one `LiveModel::snapshot` at save time (LET-004), so the PDF is the
+/// current revision even if the document changed while the chooser was open.
 pub fn export_pdf(win: &adw::ApplicationWindow, container: &PageContainer, buf: &gtk::TextBuffer) {
-    let typeset = crate::doc_tab::typeset_for(container, buf);
+    let (container, buf) = (container.clone(), buf.clone());
     let dlg = gtk::FileDialog::new();
     let f = gtk::FileFilter::new();
     f.add_pattern("*.pdf");
@@ -75,8 +77,9 @@ pub fn export_pdf(win: &adw::ApplicationWindow, container: &PageContainer, buf: 
     let w = win.clone();
     dlg.save(Some(win), None::<&gio::Cancellable>, move |result: Result<gio::File, glib::Error>| {
         let Ok(file) = result else { return };
-        let written = suite_common::locations::save_location(&file)
-            .and_then(|path| typeset.write_pdf(&path).and_then(|()| suite_common::locations::commit_save(&path)));
+        let written = suite_common::locations::save_location(&file).and_then(|path| {
+            crate::doc_tab::typeset_for(&container, &buf).write_pdf(&path).and_then(|()| suite_common::locations::commit_save(&path))
+        });
         if let Err(e) = written {
             suite_common::show_error_dialog(Some(&w), &suite_common::i18n("Could Not Export PDF"), &e);
         }

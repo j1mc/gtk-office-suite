@@ -510,12 +510,13 @@ fn run_lengths(run: &Run) -> (usize, usize) {
 /// list or a table came out shifted by those characters.
 pub fn selection_fragment(buf: &gtk::TextBuffer, start: usize, end: usize) -> letters_core::fragment::Fragment {
     let Some(m) = crate::live::of(buf) else { return letters_core::fragment::Fragment::Text(Vec::new()) };
-    let (doc, starts) = m.borrow_mut().snapshot();
+    let snap = m.borrow_mut().snapshot();
+    let (doc, starts) = (&snap.doc, &snap.starts);
     let seq = |off: usize| {
-        let (para, offset) = paragraph_offset(&doc, &starts, off);
-        letters_core::edit::paragraph_start(&doc, para) + offset
+        let (para, offset) = paragraph_offset(doc, starts, off);
+        letters_core::edit::paragraph_start(doc, para) + offset
     };
-    letters_core::fragment::from_sequence(&doc, seq(start), seq(end))
+    letters_core::fragment::from_sequence(doc, seq(start), seq(end))
 }
 
 /// Buffer offset of char `offset` of paragraph `para`'s layout text, the
@@ -1230,6 +1231,14 @@ pub fn load_file_to_buffer(path: &str, buf: &gtk::TextBuffer) -> Result<(), Stri
     Ok(())
 }
 
+/// The import provenance for `path`: carried parts + loss findings pinned to
+/// the bytes on disk right now (LET-001). Window open paths store this on
+/// the new tab's session beside `file`, so saves and loss dialogs reuse the
+/// imported revision instead of re-reading the live source path.
+pub fn import_context_for(path: &str) -> letters_core::session::ImportProvenance {
+    letters_core::session::DocumentSession::capture_import_context(std::path::Path::new(path))
+}
+
 /// Save the buffer through letters-core in the format the path implies.
 /// Capture the buffer as a document and write it in the format `path`
 /// names, reporting what that format could not carry.
@@ -1305,13 +1314,19 @@ pub fn insert_footnote_marker(buf: &gtk::TextBuffer, insert: &mut gtk::TextIter,
     buf.insert_with_tags_by_name(insert, &format!("[{}]", idx + 1), &[&name]);
 }
 
-/// Model offset (`Document`'s global char offsets) of buffer offset `off`.
+/// Buffer offset `off` in `Document` char offsets: the structured editor's
+/// space, where objects count their text rather than one sequence char.
+/// Kept beside `LiveModel::sequence_offset` (the ops' space) deliberately:
+/// the two mappings agree on plain text and differ on objects, and each
+/// consumer needs its own (LET-003). Collapsing them misplaces structured
+/// commands in documents with footnotes or chips before a table.
 fn model_offset(doc: &Document, starts: &[usize], off: usize) -> usize {
     let (para, offset) = paragraph_offset(doc, starts, off);
     doc.paragraph_offset(para) + offset
 }
 
-/// Buffer offset of model offset `off`.
+/// Buffer offset of `Document` char offset `off` (the inverse of
+/// `model_offset`, for restoring the caret where a command left it).
 fn buffer_offset_of_model(doc: &Document, starts: &[usize], off: usize) -> usize {
     let para = doc.paragraph_at(off).min(doc.paragraphs.len().saturating_sub(1));
     let within = off.saturating_sub(doc.paragraph_offset(para));
@@ -1322,30 +1337,31 @@ fn structured_edit_on_model<F>(buf: &gtk::TextBuffer, m: &std::rc::Rc<std::cell:
 where
     F: FnOnce(&mut letters_core::structured::StructuredEditor),
 {
-    let (doc, starts) = m.borrow_mut().snapshot();
+    let snap = m.borrow_mut().snapshot();
+    let (doc, starts) = (&snap.doc, &snap.starts);
     let mut editor = letters_core::structured::StructuredEditor::new(doc.clone());
-    editor.set_cursor(model_offset(&doc, &starts, buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
+    editor.set_cursor(model_offset(doc, starts, buf.iter_at_mark(&buf.get_insert()).offset().max(0) as usize));
     if let Some((start, end)) = buf.selection_bounds() {
         editor.select(
-            model_offset(&doc, &starts, start.offset().max(0) as usize),
-            model_offset(&doc, &starts, end.offset().max(0) as usize),
+            model_offset(doc, starts, start.offset().max(0) as usize),
+            model_offset(doc, starts, end.offset().max(0) as usize),
         );
     }
     edit(&mut editor);
-    let ops = letters_core::edit::diff(&doc, editor.document());
+    let ops = letters_core::edit::diff(doc, editor.document());
     if ops.is_empty() {
         return;
     }
     let mut m = m.borrow_mut();
     if m.apply_user_ops(buf, &ops, false) {
         // The caret where the command left it (the new table's first cell).
-        let (doc, starts) = m.snapshot();
-        let off = buffer_offset_of_model(&doc, &starts, editor.cursor());
+        let snap = m.snapshot();
+        let off = buffer_offset_of_model(&snap.doc, &snap.starts, editor.cursor());
         buf.place_cursor(&buf.iter_at_offset(off as i32));
     }
 }
 
-/// Apply a structured editing operation directly to the GtkTextBuffer through
+/// Apply a structured editing operation to the tab's live model through
 /// letters_core::StructuredEditor, preserving document structure and cursor position.
 pub fn apply_structured_edit<F>(buf: &gtk::TextBuffer, edit: F)
 where

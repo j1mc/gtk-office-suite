@@ -113,6 +113,17 @@ EXPORT = {
 # "mq4" in ours (pixels equivalent), so word recall is 0.833 < 0.90 with
 # lost_lines 0. Same class as the letters/nested-list amber; covering it
 # keeps every eligible fixture inside the ratchet instead of outside it.
+#
+# NOTE (letters/nested-list #1127, letters/super-subscript #1115: accepted
+# OCR-artifact ambers, same class as render #904). Reduced to a layout/pango
+# cause per LET-004 and none found — the export pixels agree: nested-list
+# SSIM 0.9992 with disp 0.47pt, super-subscript SSIM 1.0000 with disp 0.0pt,
+# ink ~1.0 and lost_lines 0 on both (scorecard-export.json, main). Word
+# recall alone ambers them (0.889 / 0.75): the reference decodes misread a
+# bullet-adjacent "two" and the small raised/lowered "2" glyphs, while 4x
+# crops of ours-vs-LO are pixel-identical (indents, markers, super/subscript
+# shaping). There is no geometry miss to fix, so no thresholds are tuned and
+# no geometry is churned to chase the OCR: the ambers stand as documented.
 
 
 def add(app, feature, path, expect):
@@ -562,6 +573,23 @@ def tables():
     save(wb, "values", "A 5x4 block of integers, right-aligned in their cells")
 
     wb, ws = book()
+    pivot_rows = [
+        ("Region", "Apparel - Sum of Sales", "Electronics - Sum of Sales"),
+        ("North", 50, 100),
+        ("South", 0, 200),
+    ]
+    for row_index, row in enumerate(pivot_rows, start=1):
+        for col_index, value in enumerate(row, start=1):
+            ws.cell(row_index, col_index, value)
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 27
+    save(
+        wb,
+        "pivot-crosstab",
+        "A column-field pivot output: North and South sales by Apparel and Electronics",
+    )
+
+    wb, ws = book()
     # Name the face and size, as Excel and Calc always do. openpyxl's bare
     # Font(bold=True) writes a <font> with no name, which Calc draws in its
     # own serif fallback: that measured the fallback, not the style.
@@ -616,6 +644,14 @@ def tables():
     save(wb, "wrap-text", "A1 text wraps onto several lines; row 1 grows")
 
     wb, ws = book()
+    ws["A1"] = "A merged cell with wrapped text needs the combined width of its columns to fit its row."
+    ws.merge_cells("A1:B1")
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 12
+    save(wb, "wrap-merged", "Wrapped text across merged columns; row height follows the combined column width")
+
+    wb, ws = book()
     ws.column_dimensions["B"].width = 40
     ws.row_dimensions[3].height = 60
     ws["B3"] = "wide and tall"
@@ -628,6 +664,27 @@ def tables():
         "A1:A10", CellIsRule(operator="greaterThan", formula=["50"], fill=PatternFill("solid", bgColor="FFC7CE"))
     )
     save(wb, "conditional", "A6:A10 (values > 50) are pink; A1:A5 are not")
+
+    # TBL-003: a value filter over a labeled column (only North shows;
+    # South/East rows are hidden by the filter, not by hand) plus a
+    # conditional rule owned by the later sheet — the visible
+    # filtered/cleared comparison for worksheet-scoped rules and
+    # persistent filters.
+    wb, ws = book()
+    for r, (region, amount) in enumerate(
+        (("Region", "Amount"), ("North", 10), ("South", 20), ("North", 30), ("East", 40)), start=1
+    ):
+        ws.cell(r, 1, region)
+        ws.cell(r, 2, amount)
+    ws.auto_filter.ref = "A1:B5"
+    ws.auto_filter.add_filter_column(0, ["North"])
+    later = wb.create_sheet("Later")
+    for i in range(1, 6):
+        later.cell(i, 1, i * 10)
+    later.conditional_formatting.add(
+        "A1:A5", CellIsRule(operator="greaterThan", formula=["25"], fill=PatternFill("solid", bgColor="FFC7CE"))
+    )
+    save(wb, "filtered", "Only the North rows show (South/East filtered out); the Later sheet carries its own pink rule")
 
     wb, ws = book()
     for r in range(1, 40):
@@ -702,6 +759,27 @@ def tables():
     ch.width, ch.height = 9, 6
     ws.add_chart(ch, "D2")
     save(wb, "chart-scatter", "An XY scatter of (1,3) (2.5,7) (4,5) (6,9) as points, anchored at D2")
+
+    # TBL-002: two named series with a bottom legend, so a visual
+    # comparison covers multi-series legends — what the single-series
+    # fixtures above cannot show. (No chart/axis titles: neither these
+    # fixtures nor the grid's chart drawing carry them.)
+    from openpyxl.chart.series import SeriesLabel
+    wb, ws = book()
+    for i, (q, a, b) in enumerate((("Q1", 3, 2), ("Q2", 7, 5), ("Q3", 5, 6), ("Q4", 9, 4)), start=1):
+        ws.cell(i, 1, q)
+        ws.cell(i, 2, a)
+        ws.cell(i, 3, b)
+    ch = BarChart()
+    ch.legend.position = "b"
+    ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[0].title = SeriesLabel(v="Sales")
+    ch.add_data(Reference(ws, min_col=3, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[1].title = SeriesLabel(v="Plan")
+    ch.set_categories(Reference(ws, min_col=1, min_row=1, max_row=4))
+    ch.width, ch.height = 9, 6
+    ws.add_chart(ch, "D2")
+    save(wb, "chart-multi", "A bar chart of Sales (3,7,5,9) and Plan (2,5,6,4) over Q1..Q4 with a bottom legend, anchored at D2")
 
 
 # ── Decks (pptx) ──────────────────────────────────────────────────────────

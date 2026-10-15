@@ -1,14 +1,11 @@
 // engine.rs — Spreadsheet engine using IronCalc for formula evaluation.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Decision: IronCalc (v0.7.1) over Formualizer.
-// Rationale:
-//   - IronCalc is MIT/Apache 2.0 licensed (Formualizer license unclear)
-//   - 83 functions covering all common spreadsheet operations
-//   - Pure Rust, minimal dependencies
-//   - Active development, v0.7.1 stable
-//   - Simpler API surface for our needs
-//   - XLSX import/export via calamine + rust_xlsxwriter (existing deps)
+// Decision: IronCalc; `ironcalc_base = "0.8"` is locked to 0.8.3.
+// Upstream 0.8 added dynamic arrays/spilling, LAMBDA/LET, and 100+ functions.
+// Tables delegates evaluation, but its tests only establish the SEQUENCE
+// spill cases below; they do not certify the full upstream or Excel feature set.
+// XLSX import/export remain separate: calamine + rust_xlsxwriter.
 //
 // Architecture:
 //   TablesEngine wraps ironcalc_base::Model and provides:
@@ -466,6 +463,35 @@ mod tests {
         engine.set_cell_text(2, 0, "30");
         engine.set_cell_text(2, 1, "=SUM(A1:A3)");
         assert_eq!(engine.cell(2, 1), "60");
+    }
+
+    #[test]
+    fn sequence_formula_spills_values_into_the_rendered_grid() {
+        let mut engine = TablesEngine::new(4, 2).unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(3)");
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "1");
+        assert_eq!(grid[1][0], "2");
+        assert_eq!(grid[2][0], "3");
+        let mut sheet = crate::sheet::SheetModel::new("Sheet1", 4, 2, 0);
+        sheet.sync_from_engine(&engine);
+        assert_eq!(sheet.data[0][0], "1");
+        assert_eq!(sheet.data[1][0], "2");
+        assert_eq!(sheet.data[2][0], "3");
+        assert!(sheet.formulas[0][0]);
+        assert!(!sheet.formulas[1][0]);
+    }
+
+    #[test]
+    fn sequence_formula_surfaces_spill_blocked_by_existing_cell() {
+        let mut engine = TablesEngine::new(4, 4).unwrap();
+        engine.set_cell_text(1, 1, "blocked");
+        engine.set_cell_text(0, 0, "=SEQUENCE(2,2)");
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "#SPILL!");
+        assert_eq!(grid[1][1], "blocked");
     }
 
     #[test]

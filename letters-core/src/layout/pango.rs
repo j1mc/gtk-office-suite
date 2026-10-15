@@ -12,12 +12,12 @@
 // out once, in points, and only scaled for display.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pango::prelude::*;
 
 use super::{paragraph_request, request_key, Item, LayoutOptions, LineBox, Look, RenderTree, ShapeCache, ShapeRequest, Shaper, Source};
-use crate::model::{Alignment, Document, VertAlign};
+use crate::model::{Alignment, Document, Paragraph, VertAlign};
 
 /// Pango's fixed-point scale.
 const SCALE: f64 = pango::SCALE as f64;
@@ -74,6 +74,12 @@ impl PangoShaper {
         layout.set_font_description(Some(&font));
         layout.set_text(label);
         layout
+    }
+
+    /// Installed family names, lowercased: what `Typeset` checks the
+    /// document's families against for missing-font reporting.
+    fn family_names(&self) -> HashSet<String> {
+        self.context.list_families().iter().map(|f| f.name().to_string().to_lowercase()).collect()
     }
 
     /// The Pango layout of one paragraph, exactly as the engine shapes it.
@@ -361,6 +367,10 @@ pub struct Typeset {
     cache: RefCell<HashMap<u64, pango::Layout>>,
     images: RefCell<HashMap<String, Option<cairo::ImageSurface>>>,
     loader: Box<ImageLoader>,
+    /// The `LiveModel` revision this was laid out from (0 = unpinned, as in
+    /// tests that build documents by hand). Print, thumbnails, PDF and
+    /// headless export carry the revision they drew.
+    revision: u64,
 }
 
 /// Decodes the image at a path for drawing.
@@ -453,6 +463,7 @@ impl Typeset {
             cache: RefCell::new(HashMap::new()),
             images: RefCell::new(HashMap::new()),
             loader: Box::new(load_png),
+            revision: 0,
         }
     }
 
@@ -468,11 +479,14 @@ impl Typeset {
 
     /// Lay out `doc` in place of the current document, re-shaping only the
     /// paragraphs that changed (ADR 0010 stage 3c). Returns how many were
-    /// shaped.
+    /// shaped. The revision is unpinned (0) until the caller pins the new
+    /// document's with `set_revision`: an updated tree must never claim the
+    /// old revision.
     pub fn update(&mut self, doc: Document, opts: LayoutOptions) -> usize {
         self.opts = opts.for_document(&doc);
         self.tree = super::relayout(&doc, &self.opts, &mut self.shaper, &mut self.shapes);
         self.doc = doc;
+        self.revision = 0;
         let shaped = self.shapes.misses;
         self.shapes.prune();
         let keep: std::collections::HashSet<u64> = self.shapes.keys().copied().collect();
@@ -483,6 +497,76 @@ impl Typeset {
 
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    /// Pin the `LiveModel` revision this layout was drawn from (LET-004).
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
+    /// The pinned revision (0 = unpinned).
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Families the document asks for that Pango has no face for, one
+    /// sorted list per page (LET-004): Pango substitutes silently, so the
+    /// export names the substituting family per page in the log instead of
+    /// failing — a test fails only where its fixture requires the missing
+    /// face.
+    pub fn missing_fonts_by_page(&self) -> Vec<Vec<String>> {
+        // Pango's CSS generics always resolve through fontconfig; only a
+        // named family with no installed face substitutes silently.
+        const GENERIC: [&str; 3] = ["sans", "serif", "monospace"];
+        let installed = self.shaper.family_names();
+        let mut out: Vec<Vec<String>> = Vec::with_capacity(self.tree.pages.len());
+        for page in &self.tree.pages {
+            let mut fams: HashSet<String> = HashSet::new();
+            let mut add = |p: &Paragraph| {
+                fams.insert(self.opts.font_family.clone());
+                if p.style.code_block.is_some() {
+                    fams.insert("Liberation Mono".to_string());
+                }
+                if let Some(level) = p.style.heading {
+                    if let Some(f) = self.opts.heading_style(level).and_then(|h| h.font_family.clone()) {
+                        fams.insert(f);
+                    }
+                }
+                fams.extend(p.runs.iter().filter_map(|r| r.style.font_family.clone()));
+            };
+            for item in &page.items {
+                match item {
+                    Item::Line { source: Source::Paragraph(p), .. }
+                    | Item::Marker { para: p, .. }
+                    | Item::Chip { para: p, .. }
+                    | Item::NoteRef { para: p, .. } => {
+                        if let Some(p) = self.doc.paragraphs.get(*p) {
+                            add(p);
+                        }
+                    }
+                    Item::Line { source: Source::Footnote(n), .. } => {
+                        add(&super::note_paragraph(&self.doc, *n, &self.opts));
+                    }
+                    // Headers, footers, rules, images and cell boxes draw in
+                    // the base family or no text at all: the base is pinned
+                    // below.
+                    _ => {}
+                }
+            }
+            // The base family underlies every page (headers, footers, the
+            // footnote area): report it missing wherever it is asked for.
+            fams.insert(self.opts.font_family.clone());
+            let mut missing: Vec<String> = fams
+                .into_iter()
+                .filter(|f| {
+                    let lower = f.to_lowercase();
+                    !GENERIC.contains(&lower.as_str()) && !installed.contains(&lower)
+                })
+                .collect();
+            missing.sort();
+            out.push(missing);
+        }
+        out
     }
 
     /// Decode images with `loader` (path to a Cairo surface) rather than
@@ -583,6 +667,13 @@ impl Typeset {
     /// view and printing use, so the PDF is the Print Layout.
     pub fn write_pdf(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
         let first = self.tree.pages.first().ok_or("no pages to write")?;
+        // Missing fonts substitute silently in Pango: name the substituting
+        // family per page, so an export that fell back is explicit (LET-004).
+        for (index, missing) in self.missing_fonts_by_page().iter().enumerate() {
+            for family in missing {
+                eprintln!("letters: PDF export substitutes for missing font family '{family}' on page {}", index + 1);
+            }
+        }
         let surface = cairo::PdfSurface::new(first.width_pt, first.height_pt, path.as_ref())
             .map_err(|e| format!("cannot create {}: {e}", path.as_ref().display()))?;
         // PDF 1.4: readable everywhere, and no compressed object streams, so
@@ -1198,5 +1289,25 @@ mod tests {
         let page_objects = text.matches("/Type /Page").count() - text.matches("/Type /Pages").count();
         assert_eq!(page_objects, pages, "one PDF page per laid-out page");
         assert!(text.contains("/MediaBox [ 0 0 612 792 ]"), "pages keep their size in points");
+    }
+
+    /// A family nothing provides is reported on the pages that ask for it,
+    /// and only there: Pango substitutes silently, so the export names the
+    /// substituting family per page instead of failing (LET-004). Only the
+    /// fixture's own missing face is asserted — the runner's installed
+    /// faces are its business.
+    #[test]
+    fn missing_fonts_name_the_substituting_family_per_page() {
+        let text = "The quick brown fox jumps over the lazy dog. ".repeat(4);
+        let mut d = doc(40, text.trim_end());
+        d.paragraphs[0].runs[0].style.font_family = Some("No Such Family XYZ".into());
+        let t = Typeset::new(d, LayoutOptions::default());
+        assert!(t.tree().pages.len() >= 2, "the document runs to several pages");
+        let missing = t.missing_fonts_by_page();
+        assert_eq!(missing.len(), t.tree().pages.len());
+        assert!(missing[0].contains(&"No Such Family XYZ".to_string()), "page 1 names its missing face: {missing:?}");
+        for rest in &missing[1..] {
+            assert!(!rest.contains(&"No Such Family XYZ".to_string()), "no other page asks for it: {missing:?}");
+        }
     }
 }

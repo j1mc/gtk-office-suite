@@ -38,11 +38,10 @@ Building the trace found one path writing around the boundary: **the Decks close
 | letters | The writer, inside the save transaction | `letters/src/window/saving.rs` | `save_buffer_to_file` | 1 | helper | `tests/gui/test_smoke.py::LettersSaveFormatSmoke` |
 | tables | The writer, behind every save | `tables/src/persistence.rs` | `save_sheets_to_xlsx_with_engine` | 1 | helper | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
 | tables | Export as PDF | `tables/src/window.rs` | `to_pdf_with_setup` | 1 | export | `tables-core/src/export.rs::to_pdf_with_setup` |
-| tables | Close guard's Save, file already has a path | `tables/src/window.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
-| tables | Close guard's Save, never saved (asks for a name) | `tables/src/window.rs` | `save_engine_to_xlsx` | 2 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
+| tables | Save (Ctrl+S) through the shared save contract (`request_save`: one loss question, one writer call) | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
+| tables | Save As through the shared save contract | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesXlsSaveSmoke` |
+| tables | Close guard's Save through the shared save contract | `tables/src/persistence.rs` | `save_engine_to_xlsx` | 1 | asks | `tests/gui/test_smoke.py::TablesCloseGuardSmoke` |
 | tables | Open… dialog | `tables/src/window.rs` | `load_workbook` | 1 | read | `tests/gui/test_smoke.py::TablesOpenDialogSmoke` |
-| tables | Save As | `tables/src/window.rs` | `save_engine_to_xlsx` | 3 | asks | `tests/gui/test_smoke.py::TablesFormatSafeSaveMixin` |
-| tables | Save (Ctrl+S) | `tables/src/window.rs` | `save_engine_to_xlsx` | 4 | asks | `tests/gui/test_smoke.py::TablesLossQuestionSmoke` |
 | tables | Autosave now (the action) | `tables/src/window.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::TablesAutosaveSmoke` |
 | tables | Autosave timer | `tables/src/window.rs` | `slot.write` | 2 | snapshot | `tests/gui/test_smoke.py::TablesUnattendedAutosaveSmoke` |
 | tables | Open from the command line, a file manager or a drop (`GApplication::open`), and recovery | `tables/src/window.rs` | `load_workbook` | 2 | read | `tests/gui/test_smoke.py::TablesDropGuardSmoke` |
@@ -55,9 +54,7 @@ Building the trace found one path writing around the boundary: **the Decks close
 | decks | Open… dialog | `decks/src/window.rs` | `read_deck` | 1 | read | `tests/gui/test_smoke.py::test_open_dialog_opens_the_chosen_file` |
 | decks | Save (Ctrl+S) | `decks/src/window.rs` | `save_deck` | 3 | asks | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |
 | decks | Save As | `decks/src/window.rs` | `save_deck` | 4 | asks | none: a Save As journey lands with #1270 |
-| decks | Autosave now (the action) | `decks/src/window.rs` | `write_deck` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
-| decks | Autosave now: the snapshot write | `decks/src/window.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
-| decks | Autosave timer | `decks/src/window.rs` | `write_deck` | 2 | snapshot | `tests/gui/test_smoke.py::DecksUnattendedAutosaveSmoke` |
-| decks | Autosave timer: the snapshot write | `decks/src/window.rs` | `slot.write` | 2 | snapshot | `tests/gui/test_smoke.py::DecksUnattendedAutosaveSmoke` |
-| decks | Open from the command line, a file manager or a drop (`GApplication::open`), and recovery | `decks/src/window.rs` | `read_deck` | 2 | read | `tests/gui/test_smoke.py::test_a_dropped_deck_opens_beside_unsaved_work` |
-| decks | The writer, behind every save | `decks/src/window.rs` | `write_deck` | 3 | helper | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |
+| decks | Legacy and newer-version package snapshots staged for recovery | `decks/src/persistence.rs` | `read_deck` | 1 | read | `tests/gui/test_smoke.py::DecksTwoDocumentsSmoke` |
+| decks | Autosave (the action and the timer share one helper): the snapshot write | `decks/src/persistence.rs` | `slot.write` | 1 | snapshot | `tests/gui/test_smoke.py::DecksAutosaveSmoke` |
+| decks | Open from the command line, a file manager or a drop (`GApplication::open`) | `decks/src/window.rs` | `read_deck` | 2 | read | `tests/gui/test_smoke.py::test_a_dropped_deck_opens_beside_unsaved_work` |
+| decks | The writer, behind every save | `decks/src/window.rs` | `write_deck` | 1 | helper | `tests/gui/test_smoke.py::DecksUnsupportedContentSmoke` |

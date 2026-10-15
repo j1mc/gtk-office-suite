@@ -4,7 +4,7 @@ use letters_core::model::Run;
 //
 // Split out of engine.rs (issue #247).
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Deck {
     pub slides: Vec<Slide>,
     pub masters: Vec<MasterSlide>,
@@ -27,26 +27,39 @@ pub fn slide_page_size_pt() -> (f64, f64) {
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slide {
     pub title: String,
     pub background: String,
     pub objects: Vec<SlideObject>,
     pub notes: String,
-    pub master_idx: Option<usize>,
+    /// The master this slide uses, by [`MasterSlide::id`]; `None` for none.
+    /// Readers assign master ids once at import and resolve slides to them
+    /// by name — never by position, which reordering invalidates.
+    pub master_id: Option<u64>,
     /// How this slide arrives when presented (PowerPoint's model: the
     /// transition belongs to the slide it leads into).
     pub transition: Transition,
     /// Objects that build in or out, one per click, in order
-    /// (decks_core::builds).
+    /// (decks_core::builds). Each build names its object by stable object
+    /// id ([`crate::ops::SlideIds::objects`]), never by z-position, so
+    /// reordering keeps every reference.
     pub builds: Vec<crate::builds::Build>,
     /// Stable identities for editing by ops (decks_core::ops): the slide's
     /// id, one id per object, and the ids of deleted objects (tombstones).
     /// Readers leave it empty; ops fill it in (`ops::ensure_ids`).
     pub ids: crate::ops::SlideIds,
-    /// Which of its master's layouts the slide uses (an index into
-    /// `MasterSlide::layouts`); `None` for none.
-    pub layout: Option<usize>,
+    /// Which of its master's layouts the slide uses, by
+    /// [`crate::layouts::Layout::id`]; `None` for none. View indices into
+    /// `MasterSlide::layouts` are derived from this at the point of use.
+    pub layout_id: Option<u64>,
+}
+
+impl Slide {
+    /// The z-position of object `id` on this slide, if it is still there.
+    pub fn object_index(&self, id: u64) -> Option<usize> {
+        self.ids.objects.iter().position(|o| *o == id)
+    }
 }
 
 /// How much of a picture's source is cut from each side, as fractions of
@@ -54,7 +67,7 @@ pub struct Slide {
 /// and ODF's `fo:clip`. The rest is stretched to the picture's box, which
 /// is how PowerPoint and Impress draw a picture, cropped or not.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Crop {
     pub left: f64,
     pub top: f64,
@@ -96,7 +109,7 @@ impl Crop {
 
 /// A slide transition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Transition {
     #[default]
     None,
@@ -123,8 +136,13 @@ impl Transition {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MasterSlide {
+    /// Stable identity within the session (DCK-005). Readers assign ids
+    /// once at import; 0 means not assigned yet (`ops::ensure_all_ids`).
+    /// Slides name this master by id ([`Slide::master_id`]), never by
+    /// position in `Deck::masters`.
+    pub id: u64,
     pub name: String,
     pub background: String,
     pub default_font: String,
@@ -163,10 +181,21 @@ impl MasterSlide {
         let named = self.default_font.trim();
         if named.is_empty() { Self::DEFAULT_FONT } else { named }
     }
+
+    /// The layout `id` of this master, if it still has one by that id.
+    pub fn layout_by_id(&self, id: u64) -> Option<&crate::layouts::Layout> {
+        self.layouts.iter().find(|l| l.id == id)
+    }
+
+    /// The view index of layout `id` within this master, for positional
+    /// widgets. Derived from the stable id at the point of use.
+    pub fn layout_index(&self, id: u64) -> Option<usize> {
+        self.layouts.iter().position(|l| l.id == id)
+    }
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum SlideObject {
     TextBox {
         text: String,
@@ -193,7 +222,7 @@ pub enum SlideObject {
     /// A picture, stretched to its box after `crop` trims its source.
     Image {
         path: String, x: f64, y: f64, w: f64, h: f64, rotation: f64,
-        #[cfg_attr(feature = "serde", serde(default))]
+        #[serde(default)]
         crop: Crop,
     },
     /// A table (engine::table): a grid of styled cells in a box.
@@ -268,6 +297,7 @@ impl Default for Deck {
 impl Deck {
     pub fn new() -> Self {
         let default_master = MasterSlide {
+            id: 1,
             name: "Default".into(),
             background: "#ffffff".into(),
             default_font: MasterSlide::DEFAULT_FONT.into(),
@@ -281,14 +311,48 @@ impl Deck {
                 background: "#ffffff".into(),
                 objects: vec![],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: Some(default_master.id),
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
             masters: vec![default_master],
         }
+    }
+
+    /// The position of slide `id`, if it is still in the deck.
+    pub fn slide_index(&self, id: u64) -> Option<usize> {
+        self.slides.iter().position(|s| s.ids.slide == id)
+    }
+
+    /// The master `id`, if it is still in the deck.
+    pub fn master_by_id(&self, id: u64) -> Option<&MasterSlide> {
+        self.masters.iter().find(|m| m.id == id)
+    }
+
+    /// The master a slide uses: its [`Slide::master_id`], or the deck's
+    /// first master when it names none (what a fresh slide inherits).
+    /// An unknown id resolves to no master rather than a positional guess.
+    pub fn master_of(&self, slide: &Slide) -> Option<&MasterSlide> {
+        match slide.master_id {
+            Some(id) => self.master_by_id(id),
+            None => self.masters.first(),
+        }
+    }
+
+    /// The layout a slide uses, resolved by stable id within its master.
+    pub fn layout_of(&self, slide: &Slide) -> Option<&crate::layouts::Layout> {
+        let master = self.master_of(slide)?;
+        slide.layout_id.and_then(|id| master.layouts.iter().find(|l| l.id == id))
+    }
+
+    /// The view index of a slide's layout within its master, for combo rows
+    /// and other positional widgets. Derived from the stable id at the
+    /// point of use; `None` when the slide uses no listed layout.
+    pub fn layout_index(&self, slide: &Slide) -> Option<usize> {
+        let master = self.master_of(slide)?;
+        slide.layout_id.and_then(|id| master.layouts.iter().position(|l| l.id == id))
     }
 }
 

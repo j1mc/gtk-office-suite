@@ -17,18 +17,18 @@ use letters_core::model::Run;
 /// `rowSpan`); each cell it covers is still in the grid, marked `covered`
 /// (`hMerge`, `vMerge`), as DrawingML keeps them.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TableCell {
     pub runs: Vec<Run>,
     pub fill: Option<Color>,
     /// Columns the cell spans; 0 and 1 are one.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub col_span: u32,
     /// Rows the cell spans; 0 and 1 are one.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub row_span: u32,
     /// Covered by a merged cell before it.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub covered: bool,
 }
 
@@ -47,7 +47,7 @@ impl TableCell {
 /// and row heights are as the file states them (the drawn table scales them
 /// to its box, as PowerPoint does when the two disagree).
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TableData {
     pub col_widths: Vec<f64>,
     pub row_heights: Vec<f64>,
@@ -98,7 +98,7 @@ impl TableData {
 
 /// How one cell is painted under the table style.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CellPaint {
     pub fill: Option<Color>,
     pub text: Color,

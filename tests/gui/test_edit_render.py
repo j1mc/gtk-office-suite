@@ -20,7 +20,7 @@ import time
 import zipfile
 
 from framework import BaseGUITestCase
-from test_smoke import TablesCellEntryMixin
+from test_smoke import TablesCellEntryMixin, DecksCanvasGeometry
 
 PARAGRAPH = "Edited in the app, saved, and reopened."
 
@@ -59,9 +59,9 @@ def save_as(test, aid, path):
 
 
 class LettersEditRenderJourney(BaseGUITestCase):
-    """Type a paragraph, bold a word, add a bulleted item, save as DOCX,
-    reopen: the saved document and the reopened model both carry the bold
-    run and the bullet."""
+    """Type a paragraph, bold a word, add a bulleted item, insert a table
+    and type in its first cell, save as DOCX, reopen: the saved document
+    and the reopened model carry the bold run, the bullet and the cell."""
 
     app_name = "letters"
 
@@ -74,7 +74,11 @@ class LettersEditRenderJourney(BaseGUITestCase):
         s = self.trigger_snapshot("org.tunaos.letters")
         return [("".join(r["text"] for r in p["runs"]),
                  [r["text"] for r in p["runs"] if r.get("style", {}).get("bold")],
-                 p["style"].get("list")) for p in s["paragraphs"]]
+                 p["style"].get("list"),
+                 p["style"].get("table_cell")) for p in s["paragraphs"]]
+
+    def _shape(self, model):
+        return [(t, b, l if l != "None" else None, c is not None) for t, b, l, c in model]
 
     def test_type_bold_bullet_save_and_reopen(self):
         from dogtail import rawinput
@@ -83,27 +87,34 @@ class LettersEditRenderJourney(BaseGUITestCase):
         # no order between them: a Bold pressed right after typing can land
         # after the next keystrokes. Each step waits for the model first.
         def settled(want, description):
-            self.wait_until(self._model, lambda got: [(t, b, l if l != "None" else None) for t, b, l in got] == want,
+            self.wait_until(self._model, lambda got: self._shape(got) == want,
                             interval=0.3, description=description)
 
         bold = lambda: self.app.child(name="Bold (Ctrl+B)", roleName="push button").do_action(0)
         self.wait_for_node(name="New Document", roleName="push button").do_action(0)
         self.wait_for_node(roleName="text")
         rawinput.typeText(PARAGRAPH + " ")
-        settled([(PARAGRAPH + " ", [], None)], "the paragraph typed")
+        settled([(PARAGRAPH + " ", [], None, False)], "the paragraph typed")
         bold()
         time.sleep(0.5)  # pacing: no state to wait on before the next input
         rawinput.typeText("Bold words.")
-        settled([(PARAGRAPH + " Bold words.", ["Bold words."], None)], "the bold words typed bold")
+        settled([(PARAGRAPH + " Bold words.", ["Bold words."], None, False)], "the bold words typed bold")
         bold()
         time.sleep(0.5)  # pacing: no state to wait on before the next input
         rawinput.keyCombo("Return")
         rawinput.typeText("A bulleted item")
-        settled([(PARAGRAPH + " Bold words.", ["Bold words."], None), ("A bulleted item", [], None)],
+        settled([(PARAGRAPH + " Bold words.", ["Bold words."], None, False), ("A bulleted item", [], None, False)],
                 "the second paragraph typed plain")
         self.gapplication_action("org.tunaos.letters", "bullet-list")
-        want = [(PARAGRAPH + " Bold words.", ["Bold words."], None), ("A bulleted item", [], "Bullet")]
+        want = [(PARAGRAPH + " Bold words.", ["Bold words."], None, False), ("A bulleted item", [], "Bullet", False)]
         settled(want, "the second paragraph to become a bullet item")
+        # A table after the bullet: nine empty cells with the caret in the
+        # first, so typing lands in it.
+        self.gapplication_action("org.tunaos.letters", "insert-table")
+        settled(want + [("", [], None, True)] * 9, "the inserted table's empty cells")
+        rawinput.typeText("Cell one")
+        want = want + [("Cell one", [], None, True)] + [("", [], None, True)] * 8
+        settled(want, "the table cell typed in")
 
         path = out_path(self, "letters", "docx")
         parts = save_as(self, "org.tunaos.letters", path)
@@ -111,9 +122,11 @@ class LettersEditRenderJourney(BaseGUITestCase):
         self.assertRegex(body, re.compile(r"<w:r>\s*<w:rPr>\s*<w:b/>.*?<w:t>Bold words\.</w:t>", re.S),
                          "the bold run was not saved bold")
         self.assertIn("<w:numPr>", body, "the bullet was not saved as a list item")
+        self.assertIn("<w:tbl>", body, "the table was not saved as a table")
+        self.assertIn("Cell one", body, "the cell text was not saved")
 
         self.relaunch_app(launch_args=[path])
-        self.wait_until(self._model, lambda got: [(t, b, l if l != "None" else None) for t, b, l in got] == want,
+        self.wait_until(self._model, lambda got: self._shape(got) == want,
                         interval=0.3, description="the reopened document to match what was saved")
         self.assertIsNone(self.process.poll(), "letters crashed in the edit-render journey")
 
@@ -173,9 +186,8 @@ class TablesEditRenderJourney(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed in the edit-render journey")
 
 
-class DecksEditRenderJourney(BaseGUITestCase):
-    """Add a text box and a shape to a new deck, save as PPTX, reopen: the
-    saved slide and the reopened model carry both objects."""
+class DecksEditRenderJourney(DecksCanvasGeometry, BaseGUITestCase):
+    """Edit a text box and add a shape, then save/reopen and render the result."""
 
     app_name = "decks"
 
@@ -194,6 +206,26 @@ class DecksEditRenderJourney(BaseGUITestCase):
         self.wait_until(lambda: len(self._kinds()) >= 1, bool, description="a new deck")
         before = self._kinds()[0]
         self.gapplication_action(aid, "add-text-box")
+        from dogtail import rawinput
+
+        obj = self.trigger_snapshot(aid)["slides"][0]["objects"][-1]
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2,
+                                       obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Slide text editor",
+                                       retry=False, requireResult=False),
+            lambda n: n is not None and n.showing,
+            description="the slide text editor",
+        )
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Edited slide title")
+        rawinput.keyCombo("<Control>Return")
+        self.wait_until(
+            lambda: self.trigger_snapshot(aid)["slides"][0]["objects"][-1]["text"],
+            lambda text: text == "Edited slide title",
+            description="the edited slide title",
+        )
         self.gapplication_action(aid, "add-shape")
         added = self.wait_until(lambda: self._kinds()[0], lambda got: len(got) == len(before) + 2,
                                 interval=0.3, description="the text box and the shape on slide 1")
@@ -201,10 +233,13 @@ class DecksEditRenderJourney(BaseGUITestCase):
         path = out_path(self, "decks", "pptx")
         parts = save_as(self, aid, path)
         slide = parts["ppt/slides/slide1.xml"]
-        self.assertIn(">Text<", slide, "the text box's text was not saved")
+        self.assertIn(">Edited slide title<", slide, "the edited text was not saved")
         self.assertGreaterEqual(len(re.findall(r"<p:sp>", slide)), 2, "the slide lost a shape")
 
         self.relaunch_app(launch_args=[path])
         self.wait_until(lambda: self._kinds()[0] if self._kinds() else None, lambda got: got == added,
                         interval=0.3, description="the reopened slide to hold the same objects")
+        texts = [o["text"] for o in self.trigger_snapshot(aid)["slides"][0]["objects"]
+                 if o["kind"] == "TextBox"]
+        self.assertIn("Edited slide title", texts)
         self.assertIsNone(self.process.poll(), "decks crashed in the edit-render journey")

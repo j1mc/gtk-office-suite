@@ -24,13 +24,15 @@ mod odp_layouts;
 pub mod ops;
 mod odp_text;
 pub mod presenter;
+pub mod provenance;
+pub mod recovery;
 pub mod snapshot;
 pub mod templates;
 pub mod undo;
 
-pub use controller::DecksController;
+pub use controller::{DecksController, SelectionMode, SelectionState, TextRange, TxnOutcome};
 pub use engine::{Deck, MasterSlide, Slide, SlideObject};
-
+pub use provenance::{DeckSourceContext, MutationSet, ProvenanceFacts, SourceState};
 /// Read a presentation, dispatching on extension (.pptx or .odp).
 pub fn read_deck(path: &str) -> Result<engine::Deck, String> {
     if path.to_lowercase().ends_with(".odp") {
@@ -44,17 +46,23 @@ pub fn read_deck(path: &str) -> Result<engine::Deck, String> {
 pub fn read_deck_with_report(path: &str) -> Result<(engine::Deck, suite_common_core::interop::CompatibilityReport, suite_common_core::interop::OpaquePackage), String> {
     let deck = read_deck(path)?;
     let format = if path.to_lowercase().ends_with(".odp") { "odp" } else { "pptx" };
-    let recognized: &[&str] = if format == "odp" {
-        &["mimetype", "META-INF/manifest.xml", "content.xml", "styles.xml", "settings.xml"]
-    } else {
-        &["[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml", "ppt/_rels/presentation.xml.rels"]
-    };
-    let opaque = suite_common_core::interop::OpaquePackage::capture(path, recognized)?;
+    let opaque = suite_common_core::interop::OpaquePackage::capture(path, provenance::recognized_parts(format))?;
     let mut report = suite_common_core::interop::CompatibilityReport::new(format);
     for name in opaque.part_names() {
         report.record(suite_common_core::interop::UnsupportedFeature::new("uninterpreted-package-part", "Uninterpreted package part", name, suite_common_core::interop::FeatureDisposition::OpaquePassThrough, "will be copied through on an opaque save"));
     }
     Ok((deck, report, opaque))
+}
+
+/// Read a deck together with its session-owned source context (DCK-002):
+/// the model, the import report, and the provenance pinned to the same
+/// opened bytes. The caller installs the model and the context together
+/// only after this returns `Ok` — never one without the other. This is
+/// the only opener the window uses; `read_deck` stays for tests and
+/// headless tooling with no session to own a context.
+pub fn read_deck_with_context(path: &str) -> Result<(engine::Deck, DeckSourceContext), String> {
+    let (deck, _, _) = read_deck_with_report(path)?;
+    Ok((deck, DeckSourceContext::capture(std::path::Path::new(path))))
 }
 
 /// The formats Decks opens and saves, declared once (#1206): the Open
@@ -93,9 +101,55 @@ pub fn write_deck(path: &str, deck: &engine::Deck) -> Result<(), String> {
     }
 }
 
-pub fn write_deck_with_opaque(path: &str, deck: &engine::Deck, opaque: &suite_common_core::interop::OpaquePackage) -> Result<(), String> {
-    write_deck(path, deck)?;
-    opaque.append_to(path)
+/// Write `deck` to `path` with the imported revision's safe parts, as one
+/// staged-package transaction (DCK-002). This is the only live save path:
+/// the old write-then-append helper is gone, so no caller can bypass the
+/// staging, the carried-part hygiene, or the post-commit consistency
+/// check. `carried` is the context's `carried_for_save` — pinned bytes
+/// from the opened revision, never a re-read of the live source.
+///
+/// Validation runs before anything is written (unknown extension, hostile
+/// carried names); the writers' output plus the carried parts are checked
+/// for package consistency before this returns. A part the writer wrote
+/// itself is left as written, and a cross-format target drops the carried
+/// set whole (`Carried::apply`); the dialog, not this function, reports
+/// those by name.
+pub fn write_deck_with_context(
+    path: &str,
+    deck: &engine::Deck,
+    carried: &suite_common_core::carry::Carried,
+) -> Result<(), String> {
+    let carried_names: Vec<String> = carried.names().map(str::to_string).collect();
+    for name in &carried_names {
+        if provenance::carried_name_is_hostile(name) {
+            return Err(format!(
+                "save blocked: the original file names a carried part that is not a safe relative path ({name})"
+            ));
+        }
+    }
+    carried.write_with(std::path::Path::new(path), |p| {
+        write_deck(
+            p.to_str().ok_or_else(|| "save path is not UTF-8".to_string())?,
+            deck,
+        )
+    })?;
+    // Tripwire, not a second safety boundary: `carry` maintains content
+    // types/relationships/manifest entries itself, so a problem naming a
+    // carried part means the save just wrote a half-consistent package.
+    // Anything else is the writers' own business (DCK-001 row 9 pins a
+    // clean Decks-written package separately).
+    let problems: Vec<String> = suite_common_core::carry::problems(std::path::Path::new(path))
+        .into_iter()
+        .filter(|problem| carried_names.iter().any(|name| problem.contains(name)))
+        .collect();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "save blocked: the saved package is inconsistent: {}",
+            problems.join("; ")
+        ))
+    }
 }
 
 /// Render a presentation to an in-memory buffer without touching disk, in
@@ -108,7 +162,6 @@ pub fn write_deck_bytes(format_hint: &str, deck: &engine::Deck) -> Result<Vec<u8
         engine::write_pptx_bytes(deck)
     }
 }
-
 
 #[cfg(test)]
 mod format_tests {

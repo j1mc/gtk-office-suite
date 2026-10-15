@@ -405,13 +405,15 @@ fn read_layout(
         .filter_map(|p| {
             let role = crate::layouts::Placeholder::from_pptx(Some(&p.key.ty))?;
             let r = p.rect.or_else(|| inherited_rect(&p.key, &layout_phs, master_phs))?;
-            Some(LayoutPlaceholder { role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y })
+            Some(LayoutPlaceholder { id: 0, role, x: r.x * scale.x, y: r.y * scale.y, w: r.w * scale.x, h: r.h * scale.y })
         })
         .collect();
     let name = parse_c_sld_name(xml).unwrap_or_else(|| {
         Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Layout".into())
     });
-    Layout { name, kind, background: bg.filter(|b| Some(b.as_str()) != master_bg), shapes, placeholders }
+    // Ids are stamped by the caller from the session space (DCK-005):
+    // 0 here means not assigned yet.
+    Layout { id: 0, name, kind, background: bg.filter(|b| Some(b.as_str()) != master_bg), shapes, placeholders }
 }
 
 /// A part's own background, if it states one.
@@ -546,6 +548,12 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     let theme = read_theme(&archive.optional_part_to_string("ppt/theme/theme1.xml", &mut budget));
 
     let mut slides = Vec::new();
+    // Stable ids minted once at import (DCK-005): one counter for the
+    // whole package, so slide, object, master, layout and placeholder ids
+    // are all distinct. Slides and objects are stamped as each slide is
+    // read (the builds below name object ids); masters and layouts when
+    // their parts resolve afterwards.
+    let mut fresh = 1u64;
     // Layout part path per slide (slide → layout → master mapping is
     // resolved after the slide loop, when `archive` is free again).
     let mut slide_layout_paths: Vec<Option<String>> = Vec::new();
@@ -553,7 +561,6 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     let mut placeholder_cache: std::collections::HashMap<String, (Vec<Placeholder>, Vec<Placeholder>, Inherited)> =
         std::collections::HashMap::new();
 
-    // 3. Parse each slide XML file
     for (slide_index, r_id) in ordered_slide_rids.iter().enumerate() {
         let target_path = match slide_paths.get(r_id) {
             Some(t) => {
@@ -1112,6 +1119,16 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
 
         slide_layout_paths.push(layout_path);
 
+        // The slide's stable id and one per object, minted once at import
+        // (DCK-005). The builds below name these ids, never positions, so
+        // a later reorder keeps every reference.
+        let slide_id = fresh;
+        fresh += 1;
+        let mut ids = crate::ops::SlideIds { slide: slide_id, objects: Vec::new(), deleted: Vec::new() };
+        for _ in &objects {
+            ids.objects.push(fresh);
+            fresh += 1;
+        }
         slides.push(Slide {
             // The name the slide carries, falling back to a positional
             // label. The fallback is why the loss was invisible: the reader
@@ -1126,11 +1143,13 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             background,
             objects,
             notes,
-            master_idx: Some(0),
+            // Resolved to a master id once the master parts below are
+            // read; `None` meanwhile falls back to the first master.
+            master_id: None,
             transition: parse_transition(&slide_xml),
-            builds: super::timing::read_builds(&slide_xml, |spid| object_ids.iter().position(|id| *id == Some(spid))),
-            ids: Default::default(),
-            layout: None,
+            builds: super::timing::read_builds(&slide_xml, |spid| object_ids.iter().position(|id| *id == Some(spid)).and_then(|i| ids.objects.get(i).copied())),
+            ids,
+            layout_id: None,
         });
     }
 
@@ -1222,6 +1241,8 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                 // one blank layout carried the master's.
                 let layout_bg = if none { parse_layout_background(&layout_xml, scale, &theme) } else { None };
                 masters.push(MasterSlide {
+                    // Stamped with the session id below; 0 is never stored.
+                    id: 0,
                     name,
                     background: master_bg.or(layout_bg).unwrap_or_else(|| "#ffffff".into()),
                     default_font: theme_font.unwrap_or_else(|| MasterSlide::DEFAULT_FONT.into()),
@@ -1229,18 +1250,39 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                     page_emu: None,
                     layouts,
                 });
+                // Stable master, layout and placeholder ids, minted once
+                // at import from the same session space as the slides.
+                {
+                    let m = &mut masters[mi];
+                    m.id = fresh;
+                    fresh += 1;
+                    for l in m.layouts.iter_mut() {
+                        l.id = fresh;
+                        fresh += 1;
+                        for p in l.placeholders.iter_mut() {
+                            p.id = fresh;
+                            fresh += 1;
+                        }
+                    }
+                }
                 for (j, lp) in layout_paths.iter().enumerate() {
                     slot_of.insert(lp.clone(), (mi, (!none).then_some(j)));
                 }
             }
+            // Slides name their master and layout by stable id (DCK-005):
+            // the (master, layout) positions above only live inside this
+            // import. A slide whose layout part resolved to nothing keeps
+            // `None` and falls back to the first master.
             if let (Some(s), Some(&(mi, layout))) = (slides.get_mut(i), slot_of.get(layout_path)) {
-                s.master_idx = Some(mi);
-                s.layout = layout;
+                s.master_id = Some(masters[mi].id);
+                s.layout_id = layout.and_then(|j| masters[mi].layouts.get(j)).map(|l| l.id);
             }
         }
     }
     if masters.is_empty() {
         masters.push(MasterSlide {
+            // Stamped by the ensure below, once, with everything else.
+            id: 0,
             name: "Default".into(),
             background: "#ffffff".into(),
             default_font: MasterSlide::DEFAULT_FONT.into(),
@@ -1256,17 +1298,20 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             background: "#ffffff".into(),
             objects: vec![],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: None,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         });
     }
 
     for m in &mut masters {
         m.page_emu = page_emu;
     }
+    // Safety net: anything the paths above left at 0 (a reader branch a
+    // later edit adds) gets a session id here, still once per document.
+    crate::ops::ensure_all_ids(&mut slides, &mut masters);
     Ok(Deck { slides, masters })
 }
 

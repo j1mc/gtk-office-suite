@@ -693,6 +693,10 @@ pub fn xy_to_cell(x: f64, y: f64, scroll_x: f64, scroll_y: f64, sheet: &SheetMod
 
 /// A cell-value conditional-formatting rule (ADR 0003 §4): when a
 /// numeric cell in `range` satisfies the comparison, paint `fill`.
+///
+/// `priority` is the OOXML rule priority (1 is evaluated first); rules
+/// are kept sorted by it, so the first matching rule in `cond_rules` is
+/// the one the renderer paints (TBL-003).
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "collab", derive(serde::Serialize, serde::Deserialize))]
 pub struct CondRule {
@@ -704,6 +708,8 @@ pub struct CondRule {
     pub value2: f64,
     /// Fill color as RRGGBB hex (no '#').
     pub fill: String,
+    /// OOXML `priority` (1 first); rules sort by this, stable.
+    pub priority: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -730,6 +736,131 @@ impl CondRule {
     pub fn contains(&self, row: usize, col: usize) -> bool {
         let (r0, c0, r1, c1) = self.range;
         row >= r0 && row <= r1 && col >= c0 && col <= c1
+    }
+}
+
+/// One filtered column of an explicit filter definition (TBL-003): the
+/// rows whose formatted value in `col` is in `hidden` are hidden, rows
+/// showing any other value stay visible. Values compare as displayed
+/// (the same formatted text the column menu lists), so a number and the
+/// text spelling it match — the documented numeric-vs-text equality.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "collab", derive(serde::Serialize, serde::Deserialize))]
+pub struct FilterColumn {
+    pub col: usize,
+    /// Formatted values hidden in this column; empty hides nothing.
+    pub hidden: std::collections::HashSet<String>,
+}
+
+/// An explicit filter definition (TBL-003): the range it covers and one
+/// criterion per filtered column. `hidden_rows` is derived from this
+/// (see [[FilterDef::derive_hidden]]); manual hides stay independent in
+/// `hidden_rows_manual`, so clearing a filter never reveals a row the
+/// user deliberately hid.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "collab", derive(serde::Serialize, serde::Deserialize))]
+pub struct FilterDef {
+    /// (first_row, first_col, last_row, last_col), zero-based inclusive.
+    /// `None` is a whole-sheet session filter with no header: every
+    /// non-blank row is data, as the pre-TBL-003 filters behaved. A ranged
+    /// filter treats its top row as a label header that is never hidden.
+    pub range: Option<(usize, usize, usize, usize)>,
+    /// One entry per filtered column; all of them must let a row through
+    /// for it to stay visible.
+    pub columns: Vec<FilterColumn>,
+}
+
+impl FilterDef {
+    /// The rows this definition hides on `sheet`: every non-blank row of
+    /// the data area (the range below its header, or the whole sheet for
+    /// a rangeless filter) that any active column criterion hides. A row
+    /// with no data anywhere has nothing to filter on and stays visible.
+    pub fn derive_hidden(&self, sheet: &SheetModel) -> std::collections::HashSet<usize> {
+        let mut out = std::collections::HashSet::new();
+        if self.columns.is_empty() || sheet.rows == 0 {
+            return out;
+        }
+        let (r0, _, r1, _) = self.range.unwrap_or((0, 0, sheet.rows.saturating_sub(1), sheet.cols.saturating_sub(1)));
+        // A ranged filter's top row is its label header: explicitly
+        // excluded from evaluation, never hidden by the filter.
+        let first_data = if self.range.is_some() { r0.saturating_add(1) } else { r0 };
+        let last = r1.min(sheet.rows.saturating_sub(1));
+        for r in first_data..=last {
+            if (0..sheet.cols).all(|c| sheet.cell(r, c).is_empty()) {
+                continue;
+            }
+            let hide = self.columns.iter().any(|criterion| {
+                criterion.col < sheet.cols
+                    && criterion.hidden.contains(&sheet.formats[r][criterion.col].format(sheet.cell(r, criterion.col)))
+            });
+            if hide {
+                out.insert(r);
+            }
+        }
+        out
+    }
+
+    /// The distinct formatted values in `col` over the data area (blank
+    /// rows excluded), in first-seen order: what a filter round-trips
+    /// through a value list, and what the column menu lists.
+    pub fn distinct_values(&self, sheet: &SheetModel, col: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        if col >= sheet.cols || sheet.rows == 0 {
+            return out;
+        }
+        let (r0, _, r1, _) = self.range.unwrap_or((0, 0, sheet.rows.saturating_sub(1), sheet.cols.saturating_sub(1)));
+        let first_data = if self.range.is_some() { r0.saturating_add(1) } else { r0 };
+        let last = r1.min(sheet.rows.saturating_sub(1));
+        for r in first_data..=last {
+            if (0..sheet.cols).all(|c| sheet.cell(r, c).is_empty()) {
+                continue;
+            }
+            let text = sheet.formats[r][col].format(sheet.cell(r, col));
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    /// Short human text for the native filter controls: the range in A1
+    /// notation and how many columns carry criteria.
+    pub fn description(&self) -> String {
+        let range = match self.range {
+            Some((r0, c0, r1, c1)) => format!("{}{}:{}{}", col_label(c0), r0 + 1, col_label(c1), r1 + 1),
+            None => "whole sheet".to_string(),
+        };
+        let cols = self.columns.len();
+        format!("{} · {} filtered column{}", range, cols, if cols == 1 { "" } else { "s" })
+    }
+
+    /// Build the definition an imported value filter means on `sheet`:
+    /// `shown` holds each column's values the file lists (plus whether
+    /// blanks show), and the hidden sets are whatever distinct values
+    /// remain — computed against the loaded cells, so the derived
+    /// visibility matches the file's without storing its row numbers.
+    pub fn from_shown_values(
+        range: (usize, usize, usize, usize),
+        shown: &[(usize, std::collections::HashSet<String>, bool)],
+        sheet: &SheetModel,
+    ) -> FilterDef {
+        let probe = FilterDef { range: Some(range), columns: Vec::new() };
+        let columns = shown
+            .iter()
+            .filter(|(col, _, _)| *col < SHEET_MAX_COLS)
+            .map(|(col, values, show_blanks)| {
+                let mut hidden: std::collections::HashSet<String> = probe
+                    .distinct_values(sheet, *col)
+                    .into_iter()
+                    .filter(|v| !values.contains(v))
+                    .collect();
+                if !show_blanks {
+                    hidden.insert(String::new());
+                }
+                FilterColumn { col: *col, hidden }
+            })
+            .collect();
+        FilterDef { range: Some(range), columns }
     }
 }
 
@@ -775,19 +906,64 @@ pub struct ChartSpec {
 }
 
 impl ChartSpec {
+    /// A single-series chart from one category/value range: the canonical
+    /// series vector holds the series and the legacy `cat`/`val` mirror
+    /// it, so readers, the writer and callers never hold two copies that
+    /// can disagree (TBL-002).
+    pub fn single_series(
+        kind: ChartKind,
+        title: String,
+        cat: (usize, usize, usize),
+        val: (usize, usize, usize),
+        anchor: (usize, usize),
+        width_px: f64,
+        height_px: f64,
+    ) -> ChartSpec {
+        ChartSpec {
+            kind,
+            title,
+            x_axis_title: None,
+            y_axis_title: None,
+            legend_position: LegendPosition::Right,
+            series: vec![ChartSeries { name: String::new(), cat, val, color: None }],
+            cat,
+            val,
+            anchor,
+            width_px,
+            height_px,
+        }
+    }
+
+    /// Every admitted series, in file order. The legacy `cat`/`val` are a
+    /// mirror of the first series, not a second copy: a chart built before
+    /// the series vector existed (empty `series`) reads through it.
+    pub fn canonical_series(&self) -> Vec<ChartSeries> {
+        if self.series.is_empty() {
+            vec![ChartSeries { name: String::new(), cat: self.cat, val: self.val, color: None }]
+        } else {
+            self.series.clone()
+        }
+    }
+
+    /// The first series' ranges: what a single-series plot draws and what
+    /// the legacy `cat`/`val` mirror.
+    pub fn primary_ranges(&self) -> ((usize, usize, usize), (usize, usize, usize)) {
+        self.series.first().map_or((self.cat, self.val), |s| (s.cat, s.val))
+    }
+
     /// The name a single series is shown under: its own, else the one
     /// LibreOffice gives an untitled series, "Column B".
     pub fn series_name(&self) -> String {
         match self.series.first() {
             Some(s) if !s.name.trim().is_empty() => s.name.clone(),
-            _ => format!("Column {}", col_label(self.val.1)),
+            _ => format!("Column {}", col_label(self.primary_ranges().1.1)),
         }
     }
 
     /// The (category, value) points a single-series chart plots, read from
     /// the sheet. A value that isn't a number plots as 0, as in Excel.
     pub fn points(&self, sheet: &SheetModel) -> Vec<(String, f64)> {
-        let (cat, val) = self.series.first().map_or((self.cat, self.val), |s| (s.cat, s.val));
+        let (cat, val) = self.primary_ranges();
         let (r0, vc, r1) = val;
         (r0..=r1)
             .map(|r| {
@@ -932,10 +1108,16 @@ pub struct SheetModel {
     /// Cell notes (Excel's notes, Calc's comments): plain text shown on
     /// hover, marked by a red corner.
     pub notes: Vec<Vec<Option<String>>>,
+    /// The explicit filter definition (TBL-003), if the sheet has one.
+    /// `hidden_rows` below is derived from it; the definition is what
+    /// persists (xlsx autoFilter), undoes and clears as one.
+    pub filter: Option<FilterDef>,
     /// Rows currently hidden by a column-value filter (#113). Purely a
     /// display concern — data, formulas, and formatting for a hidden row
     /// are untouched; rendering and hit-testing are expected to skip
-    /// indices in this set.
+    /// indices in this set. Derived from `filter` (see
+    /// [[SheetModel::recompute_filter]]); the pre-TBL-003 dialog filter
+    /// still writes it directly as a session-only filter.
     pub hidden_rows: Tracked<std::collections::HashSet<usize>>,
     /// Rows/columns manually hidden by the user (#113 "row/column
     /// hiding"), independent of `hidden_rows`'s filter — clearing a
@@ -1012,6 +1194,7 @@ impl SheetModel {
             cond_rules: Vec::new(),
             validations: vec![vec![None; cols]; rows],
             notes: vec![vec![None; cols]; rows],
+            filter: None,
             hidden_rows: Default::default(),
             hidden_rows_manual: Default::default(),
             hidden_cols: Default::default(),
@@ -1118,6 +1301,13 @@ impl SheetModel {
             shift(&mut pivot.target_cell.0);
         }
         if let Some(area) = &mut self.print_area { shift(&mut area.0); shift(&mut area.2); }
+        // The filter range moves with its rows (TBL-007 will own general
+        // range transforms; this matches what cond rules already do). The
+        // derived hidden rows are recomputed by the controller op, not
+        // shifted here.
+        if let Some(def) = &mut self.filter {
+            if let Some(range) = &mut def.range { shift(&mut range.0); shift(&mut range.2); }
+        }
     }
 
     fn shift_col_metadata(&mut self, at: usize, delta: isize) {
@@ -1140,12 +1330,27 @@ impl SheetModel {
             for field in &mut pivot.data_fields { shift(&mut field.col_index); }
         }
         if let Some(area) = &mut self.print_area { shift(&mut area.1); shift(&mut area.3); }
+        if let Some(def) = &mut self.filter {
+            if let Some(range) = &mut def.range { shift(&mut range.1); shift(&mut range.3); }
+            for criterion in &mut def.columns { shift(&mut criterion.col); }
+        }
     }
 
     /// Whether `row` should be skipped by rendering/hit-testing — hidden
     /// either by the active filter or by a manual hide.
     pub fn is_row_hidden(&self, row: usize) -> bool {
         self.hidden_rows.contains(&row) || self.hidden_rows_manual.contains(&row)
+    }
+
+    /// Re-derive `hidden_rows` from the explicit filter definition, if
+    /// any. Manual hides are untouched. Called after every authorized
+    /// cell/row change lands (controller ops recompute inside the same
+    /// op application, so undo restores definition and visibility
+    /// together) and after import sets a definition.
+    pub fn recompute_filter(&mut self) {
+        if let Some(def) = &self.filter {
+            *self.hidden_rows = def.derive_hidden(self);
+        }
     }
 
     /// Whether `col` should be skipped by rendering/hit-testing.
@@ -1594,7 +1799,7 @@ mod selection_tests {
         s.merges.push((1, 1, 2, 2));
         s.cond_rules.push(CondRule {
             range: (1, 1, 2, 2), op: CondOp::Greater, value: 1.0, value2: 0.0,
-            fill: "ff0000".into(),
+            fill: "ff0000".into(), priority: 1,
         });
         s.select_cell(1, 1);
         s.insert_rows(1, 2);

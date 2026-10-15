@@ -100,7 +100,7 @@ pub fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, v: &gtk::Ad
         let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
         button.connect_clicked(move |_| {
             popover.popdown();
-            ctl.borrow_mut().edit_cell(row, col, item.clone());
+            crate::sheet_actions::apply(&ctl, &grid, |c| c.edit_cell(row, col, item.clone()));
             refresh();
             grid.queue_draw();
             grid.grab_focus();

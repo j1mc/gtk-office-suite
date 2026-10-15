@@ -38,7 +38,11 @@ fn through_a_snapshot(deck: &Deck, kind: &str, tag: &str) -> Deck {
 
 /// A deck of exactly these slides, with no masters.
 fn deck_of(slides: Vec<Slide>) -> Deck {
-    Deck { slides, masters: vec![] }
+    let mut deck = Deck { slides, masters: vec![] };
+    // Writers map builds to file ids through stable object ids, so the
+    // deck needs them before the snapshot (DCK-005).
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck
 }
 
 /// A slide carrying only what the caller cares about.
@@ -48,11 +52,11 @@ fn slide_of(objects: Vec<SlideObject>, notes: &str, background: &str) -> Slide {
         background: background.to_string(),
         objects,
         notes: notes.to_string(),
-        master_idx: None,
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -321,9 +325,11 @@ fn slide_order_survives_a_snapshot() {
 fn masters_survive_a_snapshot() {
     let mut complaints: Vec<String> = Vec::new();
     for kind in FORMATS {
-        let deck = Deck {
+        let mut deck = Deck {
             masters: vec![
                 MasterSlide {
+                    // Stamped with session ids below, once, with the slides.
+                    id: 0,
                     name: "House Style".into(),
                     background: "#204060".into(),
                     default_font: "Cantarell".into(),
@@ -332,6 +338,7 @@ fn masters_survive_a_snapshot() {
                     layouts: Vec::new(),
                 },
                 MasterSlide {
+                    id: 0,
                     name: "Second".into(),
                     background: "#a01020".into(),
                     default_font: "Cantarell".into(),
@@ -346,11 +353,12 @@ fn masters_survive_a_snapshot() {
                     background: String::new(),
                     objects: vec![text_box("on the house master", 10.0, 10.0)],
                     notes: String::new(),
-                    master_idx: Some(0),
+                    // Stamped with the masters' ids below.
+                    master_id: None,
                     transition: Default::default(),
                     builds: Vec::new(),
                     ids: Default::default(),
-                    layout: None,
+                    layout_id: None,
                 },
                 // On the *second* master, which is what makes the mapping
                 // testable: a reader that loses it falls back to master 0,
@@ -361,14 +369,19 @@ fn masters_survive_a_snapshot() {
                     background: String::new(),
                     objects: vec![text_box("on the second master", 10.0, 10.0)],
                     notes: String::new(),
-                    master_idx: Some(1),
+                    master_id: None,
                     transition: Default::default(),
                     builds: Vec::new(),
                     ids: Default::default(),
-                    layout: None,
+                    layout_id: None,
                 },
             ],
         };
+        // Stable master and slide ids, minted once here (DCK-005): the
+        // first slide stays on the first master, the second on the second.
+        decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+        deck.slides[0].master_id = Some(deck.masters[0].id);
+        deck.slides[1].master_id = Some(deck.masters[1].id);
         let back = through_a_snapshot(&deck, kind, "masters");
         if back.masters.is_empty() {
             complaints.push(format!("{kind}: the deck came back with no masters at all"));
@@ -402,12 +415,13 @@ fn masters_survive_a_snapshot() {
             ));
         }
         // Each slide must still name the master it was on, not merely
-        // find some master in the package.
-        let mapping: Vec<Option<usize>> =
-            back.slides.iter().map(|s| s.master_idx).collect();
-        if mapping != vec![Some(0), Some(1)] {
+        // find some master in the package. Master ids are session-local,
+        // so the assertion is on names, which persist.
+        let mapping: Vec<Option<String>> =
+            back.slides.iter().map(|s| back.master_of(s).map(|m| m.name.clone())).collect();
+        if mapping != vec![Some("House Style".into()), Some("Second".into())] {
             complaints.push(format!(
-                "{kind}: the slides were on masters [0, 1] and came back on {mapping:?}"
+                "{kind}: the slides were on masters [House Style, Second] and came back on {mapping:?}"
             ));
         }
         // And the slide's own content must not have absorbed the master's.
@@ -541,6 +555,7 @@ fn the_masters_font_survives_a_snapshot() {
     for kind in FORMATS {
         let deck = Deck {
             masters: vec![MasterSlide {
+                id: 0,
                 name: "House Style".into(),
                 background: "#ffffff".into(),
                 // A real face rather than a generic family: "Sans" is the
@@ -556,11 +571,11 @@ fn the_masters_font_survives_a_snapshot() {
                 background: String::new(),
                 objects: vec![text_box("body text", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
         };
         let back = through_a_snapshot(&deck, kind, "master-font");
@@ -590,9 +605,10 @@ fn the_masters_font_survives_a_snapshot() {
 /// readers honour, this test is the one that should fail.
 #[test]
 fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
-    let deck = Deck {
+    let mut deck = Deck {
         masters: vec![
             MasterSlide {
+                id: 0,
                 name: "First".into(),
                 background: "#ffffff".into(),
                 default_font: "Liberation Serif".into(),
@@ -601,6 +617,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 layouts: Vec::new(),
             },
             MasterSlide {
+                id: 0,
                 name: "Second".into(),
                 background: "#ffffff".into(),
                 default_font: "Liberation Mono".into(),
@@ -615,25 +632,28 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 background: String::new(),
                 objects: vec![text_box("on first", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(0),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             },
             Slide {
                 title: String::new(),
                 background: String::new(),
                 objects: vec![text_box("on second", 10.0, 10.0)],
                 notes: String::new(),
-                master_idx: Some(1),
+                master_id: None,
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             },
         ],
     };
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck.slides[0].master_id = Some(deck.masters[0].id);
+    deck.slides[1].master_id = Some(deck.masters[1].id);
 
     let pptx = through_a_snapshot(&deck, "pptx", "two-fonts");
     let pptx_fonts: Vec<&str> = pptx.masters.iter().map(|m| m.default_font.as_str()).collect();
@@ -669,6 +689,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
 fn the_pptx_declares_the_theme_part_it_ships() {
     let deck = Deck {
         masters: vec![MasterSlide {
+            id: 7,
             name: "House Style".into(),
             background: "#ffffff".into(),
             default_font: "Liberation Serif".into(),
@@ -681,11 +702,11 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             background: String::new(),
             objects: vec![],
             notes: String::new(),
-            master_idx: Some(0),
+            master_id: Some(7),
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }],
     };
     let bytes = decks_core::write_deck_bytes("pptx", &deck).expect("write pptx");
@@ -804,6 +825,7 @@ fn a_master_decorations_run_styling_survives_a_snapshot() {
         let deck = Deck {
             slides: vec![slide_of(vec![text_box("Slide body", 10.0, 10.0)], "", "")],
             masters: vec![MasterSlide {
+                id: 0,
                 name: "House Style".into(),
                 background: "#ffffff".into(),
                 default_font: "Cantarell".into(),
@@ -892,6 +914,7 @@ fn a_masters_run_styles_do_not_collide_with_a_slides_in_odp() {
             "",
         )],
         masters: vec![MasterSlide {
+            id: 0,
             name: "House".into(),
             background: "#ffffff".into(),
             default_font: "Cantarell".into(),
@@ -1568,17 +1591,442 @@ fn slide_transitions_survive_a_snapshot() {
 #[test]
 fn object_builds_survive_a_snapshot() {
     use decks_core::builds::{Build, BuildEffect, Edge};
-    let builds = vec![
-        Build { object: 2, effect: BuildEffect::Dissolve, out: false },
-        Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-        Build { object: 1, effect: BuildEffect::Appear, out: true },
+    // Builds name stable object ids; across a save and reopen the ids
+    // are minted fresh, so the assertion is on (position, effect, out).
+    let mut slide = slide_of(vec![text_box("a", 10.0, 10.0), text_box("b", 10.0, 100.0), text_box("c", 10.0, 200.0)], "", "#ffffff");
+    decks_core::ops::ensure_all_ids(std::slice::from_mut(&mut slide), &mut []);
+    let ids = slide.ids.objects.clone();
+    slide.builds = vec![
+        Build { object: ids[2], effect: BuildEffect::Dissolve, out: false },
+        Build { object: ids[0], effect: BuildEffect::Move(Edge::Left), out: false },
+        Build { object: ids[1], effect: BuildEffect::Appear, out: true },
     ];
-    let slide = Slide {
-        builds: builds.clone(),
-        ..slide_of(vec![text_box("a", 10.0, 10.0), text_box("b", 10.0, 100.0), text_box("c", 10.0, 200.0)], "", "#ffffff")
-    };
     for kind in FORMATS {
         let back = through_a_snapshot(&deck_of(vec![slide.clone()]), kind, "builds");
-        assert_eq!(back.slides[0].builds, builds, "{kind}");
+        let got: Vec<(usize, BuildEffect, bool)> = back.slides[0].builds.iter().map(|b| {
+            (back.slides[0].object_index(b.object).unwrap(), b.effect, b.out)
+        }).collect();
+        assert_eq!(got, vec![
+            (2, BuildEffect::Dissolve, false),
+            (0, BuildEffect::Move(Edge::Left), false),
+            (1, BuildEffect::Appear, true),
+        ], "{kind}");
     }
+}
+
+/// The session's provenance is visible to test introspection and follows
+/// the session: installed at open, recording edits, conservative across
+/// undo, and gone after recovery-style adoption (DCK-002).
+#[test]
+fn provenance_snapshot_follows_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prov.pptx");
+    decks_core::write_deck(
+        path.to_str().unwrap(),
+        &deck_of(vec![slide_of(
+            vec![text_box("a", 10.0, 10.0)],
+            "",
+            "#ffffff",
+        )]),
+    )
+    .unwrap();
+    let (deck, context) = decks_core::read_deck_with_context(path.to_str().unwrap()).unwrap();
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    // No context before the open lands: no claims.
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None
+    );
+    controller.install_opened_deck(deck, context);
+    let opened =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context installed at open");
+    assert_eq!(opened.format, "pptx");
+    assert!(opened.opaque_complete);
+    assert!(
+        opened.edited_slides.is_empty() && !opened.structure_changed && !opened.masters_touched
+    );
+    // An edit records its dependency; undo keeps the knowledge.
+    controller.add_slide(1, slide_of(vec![], "", "#ffffff"));
+    let edited =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context survives edits");
+    assert!(
+        edited.structure_changed,
+        "an inserted slide is a structural dependency"
+    );
+    assert!(controller.undo());
+    let undone =
+        decks_core::snapshot::provenance_snapshot(&controller).expect("context survives undo");
+    assert!(
+        undone.history_stepped,
+        "undo must not forget what became unsafe"
+    );
+    assert!(
+        undone.structure_changed,
+        "undo must not clear dependencies either"
+    );
+    // Recovery adopts bytes, not provenance.
+    controller.clear_source_context();
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None
+    );
+}
+
+/// A snapshot that cannot even be built must not clear the good one an
+/// earlier revision wrote, and the failure must be told exactly as the
+/// notifier policy says — once, then silence until it either repeats
+/// often enough or recovers (DCK-003, error propagation).
+#[test]
+fn serialization_failure_retains_last_generation() {
+    use suite_common_core::autosave::{AutosaveNotices, AutosaveSlot, SnapshotMeta};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let slot = AutosaveSlot::new(dir.path().join("state"), "doc-1");
+    let mut policy = AutosaveNotices::new();
+    assert!(policy.succeeded().is_none(), "a quiet session stays quiet");
+    // First generation: a plain deck snapshots fine.
+    let good = deck_of(vec![slide_of(vec![text_box("kept", 10.0, 10.0)], "", "")]);
+    let bytes = decks_core::write_deck_bytes("pptx", &good).expect("a plain deck snapshots");
+    let meta = SnapshotMeta { original_path: None, kind: "pptx".into() };
+    slot.write(&bytes, &meta).expect("the first generation lands");
+    // Second generation: the picture's file is gone, so there are no
+    // bytes to write — only the failure, reported once without spam.
+    let gone = dir.path().join("gone.png");
+    let bad = deck_of(vec![slide_of(
+        vec![SlideObject::Image {
+            path: gone.to_string_lossy().to_string(),
+            x: 10.0, y: 10.0, w: 30.0, h: 30.0,
+            rotation: 0.0,
+            crop: Default::default(),
+        }],
+        "",
+        "",
+    )]);
+    let err = decks_core::write_deck_bytes("pptx", &bad).expect_err("a missing picture must fail the snapshot");
+    assert!(err.contains("gone.png"), "the failure names the file: {err}");
+    assert!(policy.failed(&err).is_some(), "the first failure is told");
+    assert!(policy.failed(&err).is_none(), "the second identical failure is not repeated");
+    // Nothing was written, so the previous generation reads back whole.
+    let (back, back_meta) = slot.read().expect("the prior generation survives");
+    assert_eq!(back, bytes, "the slot still holds the first generation");
+    assert_eq!(back_meta.kind, "pptx");
+    let path = dir.path().join("legacy.pptx");
+    std::fs::write(&path, &back).expect("stage the generation");
+    let recovered = decks_core::read_deck(path.to_str().unwrap()).expect("it still opens");
+    let texts: Vec<&str> = recovered.slides.iter().flat_map(|s| s.objects.iter().filter_map(|o| match o {
+        SlideObject::TextBox { text, .. } => Some(text.as_str()),
+        _ => None,
+    })).collect();
+    assert!(texts.contains(&"kept"), "the work is still there: {texts:?}");
+    // A later success closes the streak visibly.
+    slot.write(&bytes, &meta).expect("a later generation lands");
+    assert!(policy.succeeded().is_some(), "the recovery is told");
+}
+
+/// The 1×1 PNG the reader tests use: a real picture with real bytes.
+const RECOVERY_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, b'I', b'H', b'D',
+    b'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0,
+    12, b'I', b'D', b'A', b'T', 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 3, 0,
+    1, 0x9e, 0xdd, 0x22, 0x71, 0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42,
+    0x60, 0x82,
+];
+
+/// Recovery keeps the opaque graph and the pictures (DCK-003): a session
+/// opened from a package with carried parts, edited, snapshotted and
+/// decoded comes back with the same identities, the same carried bytes
+/// for the next save, and pictures that survive their files being
+/// deleted before the relaunch.
+#[test]
+fn recovery_keeps_opaque_graph_and_assets() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pic = dir.path().join("pic.png");
+    std::fs::write(&pic, RECOVERY_PNG).expect("picture");
+    let deck = deck_of(vec![slide_of(
+        vec![
+            text_box("opaque", 10.0, 10.0),
+            SlideObject::Image {
+                path: pic.to_string_lossy().to_string(),
+                x: 10.0, y: 100.0, w: 30.0, h: 30.0,
+                rotation: 0.0,
+                crop: Default::default(),
+            },
+        ],
+        "say it",
+        "#112233",
+    )]);
+    // The source holds one carried part the model never sees.
+    let src = dir.path().join("src.pptx");
+    decks_core::write_deck(src.to_str().unwrap(), &deck).expect("source");
+    const CARRIED_NAME: &str = "customXml/item1.xml";
+    const CARRIED_BYTES: &[u8] = b"<props><tag>kept</tag></props>";
+    {
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&src).expect("reopen");
+        let mut zip = zip::ZipWriter::new_append(file).expect("append");
+        zip.start_file(CARRIED_NAME, zip::write::SimpleFileOptions::default()).expect("part");
+        zip.write_all(CARRIED_BYTES).expect("bytes");
+        zip.finish().expect("finish");
+    }
+    let (opened, context) = decks_core::read_deck_with_context(src.to_str().unwrap()).expect("open");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_opened_deck(opened, context);
+    let before = decks_core::snapshot::provenance_snapshot(&controller).expect("context at open");
+    assert!(
+        before.carried_names.contains(&CARRIED_NAME.to_string()),
+        "the carried part is pinned: {:?}",
+        before.carried_names,
+    );
+    // One edit: the snapshot pins a non-zero revision and a dependency.
+    controller.add_slide(1, slide_of(vec![text_box("second", 10.0, 10.0)], "", ""));
+    let rev = controller.revision();
+    assert!(rev > 0, "the snapshot pins a real revision");
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    // The picture's file vanishes before the relaunch.
+    std::fs::remove_file(&pic).expect("delete the picture");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    let back = *back;
+    assert!(back.unresolved_assets.is_empty(), "captured pictures restage: {:?}", back.unresolved_assets);
+    assert_eq!(back.revision, rev, "the revision travels with the snapshot");
+    // Same identities the crashed session had.
+    let before_ids: Vec<u64> = controller.deck().slides.iter().map(|s| s.ids.slide).collect();
+    let after_ids: Vec<u64> = back.deck.slides.iter().map(|s| s.ids.slide).collect();
+    assert_eq!(before_ids, after_ids, "slide identities survive recovery");
+    // The picture points at bytes, not at the deleted file.
+    let image_path = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::Image { path, .. } => Some(path.clone()),
+        _ => None,
+    }).expect("the picture survives");
+    assert_ne!(image_path, pic.to_string_lossy().to_string(), "the deleted file is not referenced");
+    assert_eq!(std::fs::read(&image_path).expect("restaged bytes read"), RECOVERY_PNG);
+    // Reinstalled as one session, the next save is as safe as the
+    // crashed one's: same carried names and inventory, source intact,
+    // and the save carries the same bytes.
+    let recovered = decks_core::DecksController::new(vec![], vec![]);
+    recovered.install_recovered_session(back.deck, back.context, back.revision);
+    assert!(recovered.dirty.get(), "recovered work counts as dirty");
+    let after = decks_core::snapshot::provenance_snapshot(&recovered).expect("context reinstalled");
+    assert_eq!(after.carried_names, before.carried_names);
+    assert_eq!(after.opaque_names, before.opaque_names);
+    assert_eq!(after.format, "pptx");
+    assert!(after.structure_changed, "the stored dependency survives");
+    assert_eq!(recovered.source_state(), decks_core::SourceState::Intact);
+    let out = dir.path().join("out.pptx");
+    decks_core::write_deck_with_context(
+        out.to_str().unwrap(),
+        &recovered.deck(),
+        &recovered.carried_for_save(),
+    ).expect("the next save carries");
+    let file = std::fs::File::open(&out).expect("saved");
+    let mut zip = zip::ZipArchive::new(file).expect("reopen saved");
+    let mut buf = Vec::new();
+    use std::io::Read as _;
+    zip.by_name(CARRIED_NAME).expect("carried part saved").read_to_end(&mut buf).expect("read");
+    assert_eq!(buf, CARRIED_BYTES, "the carried part is byte-identical through recovery");
+}
+
+/// A picture lost before the snapshot does not lose the snapshot
+/// (DCK-003): the edits are still protected, the path is preserved for
+/// repair, and the gap is listed.
+#[test]
+fn recovery_without_snapshot_bytes_reports_gaps() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gone = dir.path().join("gone.png");
+    let deck = deck_of(vec![slide_of(
+        vec![
+            text_box("kept", 10.0, 10.0),
+            SlideObject::Image {
+                path: gone.to_string_lossy().to_string(),
+                x: 10.0, y: 10.0, w: 30.0, h: 30.0,
+                rotation: 0.0,
+                crop: Default::default(),
+            },
+        ],
+        "",
+        "",
+    )]);
+    let controller = decks_core::DecksController::new(deck.slides, deck.masters);
+    // The canonical snapshot succeeds without the picture — and without
+    // an interchange fallback, which cannot be built without it.
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx")
+        .expect("the edits are protected despite the missing picture");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    assert!(
+        back.unresolved_assets.iter().any(|u| u.contains("gone.png")),
+        "the gap is listed: {:?}",
+        back.unresolved_assets,
+    );
+    let kept = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::TextBox { text, .. } => Some(text.clone()),
+        _ => None,
+    }).expect("the text box survives");
+    assert_eq!(kept, "kept");
+    let kept_path = back.deck.slides[0].objects.iter().find_map(|o| match o {
+        SlideObject::Image { path, .. } => Some(path.clone()),
+        _ => None,
+    }).expect("the picture node survives");
+    assert_eq!(kept_path, gone.to_string_lossy().to_string(), "the path is preserved for repair");
+}
+
+/// The full editable document round-trips the canonical snapshot:
+/// notes, run styles, masters with layouts, builds and tables come back
+/// JSON-identical, and the recovered deck saves and reopens in both
+/// formats.
+#[test]
+fn recovery_rich_state_round_trip() {
+    use decks_core::builds::{Build, BuildEffect};
+    use decks_core::layouts::{Layout, LayoutKind, LayoutPlaceholder, Placeholder};
+    let cell = |t: &str| decks_core::engine::table::TableCell {
+        runs: vec![Run { text: t.into(), style: Default::default() }],
+        fill: None,
+        col_span: 1,
+        row_span: 1,
+        covered: false,
+    };
+    let slide = slide_of(
+        vec![
+            SlideObject::TextBox {
+                text: "loud".into(),
+                x: 10.0, y: 10.0, w: 200.0, h: 50.0,
+                rotation: 0.0,
+                runs: vec![styled_run("loud")],
+                body: Default::default(),
+            },
+            SlideObject::Table {
+                x: 10.0, y: 200.0, w: 300.0, h: 100.0,
+                rotation: 0.0,
+                table: decks_core::engine::table::TableData {
+                    col_widths: vec![150.0, 150.0],
+                    row_heights: vec![50.0, 50.0],
+                    rows: vec![vec![cell("a"), cell("b")], vec![cell("c"), cell("d")]],
+                    first_row: true,
+                    band_row: false,
+                    accent: None,
+                    cell_margins: None,
+                },
+            },
+        ],
+        "say it out loud",
+        "#204060",
+    );
+    let mut deck = Deck {
+        slides: vec![slide],
+        masters: vec![MasterSlide {
+            id: 0,
+            name: "House".into(),
+            background: "#aabbcc".into(),
+            default_font: "Cantarell".into(),
+            shapes: vec![text_box("footer", 20.0, 500.0)],
+            page_emu: None,
+            layouts: vec![Layout {
+                id: 0,
+                name: "Title".into(),
+                kind: LayoutKind::Title,
+                background: None,
+                shapes: vec![],
+                placeholders: vec![LayoutPlaceholder {
+                    id: 0,
+                    role: Placeholder::Title,
+                    x: 10.0, y: 10.0, w: 300.0, h: 80.0,
+                }],
+            }],
+        }],
+    };
+    decks_core::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+    deck.slides[0].master_id = Some(deck.masters[0].id);
+    deck.slides[0].layout_id = Some(deck.masters[0].layouts[0].id);
+    deck.slides[0].builds = vec![Build {
+        object: deck.slides[0].ids.objects[0],
+        effect: BuildEffect::Dissolve,
+        out: false,
+    }];
+    let controller = decks_core::DecksController::new(deck.slides, deck.masters);
+    controller.add_slide(1, slide_of(vec![text_box("second", 10.0, 10.0)], "", ""));
+    let rev = controller.revision();
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    assert_eq!(back.revision, rev);
+    assert!(back.context.is_none(), "a new document pins no context");
+    assert!(back.unresolved_assets.is_empty());
+    let before = serde_json::to_value(controller.deck()).expect("before serializes");
+    let after = serde_json::to_value(&back.deck).expect("after serializes");
+    assert_eq!(before, after, "the canonical state is identical");
+    // The recovered deck saves and reopens in both formats.
+    for kind in FORMATS {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("recovered.{kind}"));
+        decks_core::write_deck(path.to_str().unwrap(), &back.deck).expect("save after recovery");
+        let reopened = decks_core::read_deck(path.to_str().unwrap()).expect("reopen after recovery");
+        assert_eq!(reopened.slides.len(), 2, "{kind}: slide count");
+        assert_eq!(reopened.slides[0].notes, "say it out loud", "{kind}: notes");
+    }
+}
+
+/// Package-shaped snapshots from before the versioned payload stay
+/// readable migration input — and install with no context, so the
+/// restored document makes no source-loss claims it no longer possesses.
+#[test]
+fn legacy_package_snapshot_recovers_without_claims() {
+    let deck = deck_of(vec![slide_of(vec![text_box("legacy", 10.0, 10.0)], "old note", "")]);
+    // Exactly what the old autosave wrote: bare package bytes.
+    let package = decks_core::write_deck_bytes("pptx", &deck).expect("legacy-shaped bytes");
+    let decks_core::recovery::SnapshotKind::Package(staged) = decks_core::recovery::decode_snapshot(&package) else {
+        panic!("package-shaped bytes must decode as a package");
+    };
+    assert_eq!(staged, package);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.pptx");
+    std::fs::write(&path, &staged).expect("stage");
+    let back = decks_core::read_deck(path.to_str().unwrap()).expect("legacy bytes open");
+    assert_eq!(back.slides[0].notes, "old note", "the work is still there");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_recovered_session(back, None, 0);
+    assert_eq!(
+        decks_core::snapshot::provenance_snapshot(&controller),
+        None,
+        "a legacy recovery claims no provenance",
+    );
+    assert!(controller.dirty.get(), "recovered work counts as dirty");
+    assert_eq!(controller.revision(), 0);
+    assert_ne!(controller.deck().slides[0].ids.slide, 0, "reader-zeroed ids are assigned once, on install");
+}
+
+/// A source replaced between snapshot and relaunch keeps its stored loss
+/// report but carries nothing: the restored document never claims the
+/// safety its original revision had.
+#[test]
+fn recovery_after_source_replacement_keeps_no_carry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src.pptx");
+    decks_core::write_deck(
+        src.to_str().unwrap(),
+        &deck_of(vec![slide_of(vec![text_box("first", 10.0, 10.0)], "", "")]),
+    ).expect("source");
+    let (opened, context) = decks_core::read_deck_with_context(src.to_str().unwrap()).expect("open");
+    let controller = decks_core::DecksController::new(vec![], vec![]);
+    controller.install_opened_deck(opened, context);
+    let bytes = decks_core::recovery::encode_snapshot(&controller, "pptx").expect("encode");
+    // The original is replaced while the app is dead.
+    decks_core::write_deck(
+        src.to_str().unwrap(),
+        &deck_of(vec![slide_of(vec![text_box("stranger", 10.0, 10.0)], "", "")]),
+    ).expect("replace");
+    let decks_core::recovery::SnapshotKind::Versioned(back) = decks_core::recovery::decode_snapshot(&bytes) else {
+        panic!("the snapshot must decode as versioned");
+    };
+    let back = *back;
+    let recovered = decks_core::DecksController::new(vec![], vec![]);
+    recovered.install_recovered_session(back.deck, back.context, back.revision);
+    assert_eq!(recovered.source_state(), decks_core::SourceState::Replaced);
+    assert!(
+        recovered.carried_for_save().is_empty(),
+        "a replaced source carries nothing from the old revision",
+    );
+    let facts = decks_core::snapshot::provenance_snapshot(&recovered).expect("degraded context installed");
+    assert!(!facts.opaque_complete, "another revision's inventory is never advertised complete");
 }

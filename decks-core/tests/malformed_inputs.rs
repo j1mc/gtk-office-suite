@@ -289,6 +289,43 @@ fn mutated_packages_are_errors_not_crashes() {
     assert!(panicked.is_empty(), "the reader panicked on seeds: {panicked:?}");
 }
 
+/// The loss scan over mutated packages: it must never panic, it must still
+/// name unsupported content when the part decodes, and a part it cannot
+/// decode is a hard error that confirmation cannot override (DCK-001: an
+/// incomplete analysis never authorizes a save).
+#[test]
+fn loss_scan_of_mutated_packages_never_panics_and_never_authorizes_on_failure() {
+    const LOSSY_XML: &str = "<office:document-content><draw:page>\
+        <office:annotation/><draw:plugin xlink:href=\"v.mp4\"/>\
+        <anim:par presentation:preset-class=\"motion-path\"/></draw:page></office:document-content>";
+    let dir = tempfile::tempdir().unwrap();
+    let base = package(LOSSY_XML);
+    let unmutated = dir.path().join("lossy.odp");
+    std::fs::write(&unmutated, &base).unwrap();
+    let ids = |path: &std::path::Path| {
+        let report = decks_core::loss::content_a_save_drops(path.to_str().unwrap());
+        let mut v: Vec<String> = report.features.iter().map(|f| f.id.clone()).collect();
+        v.sort();
+        (v, report.has_hard_errors(), report.validate_save(true).is_ok())
+    };
+    let (v, hard, confirmed) = ids(&unmutated);
+    assert_eq!(v, ["animations", "comments", "media"]);
+    assert!(!hard && confirmed);
+    for seed in 1..=FIXED_SEEDS {
+        let path = dir.path().join(format!("mutated-{seed}.odp"));
+        std::fs::write(&path, mutate(seed, &base)).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| ids(&path)));
+        let (v, hard, confirmed) = match result {
+            Ok(found) => found,
+            Err(_) => panic!("the loss scan panicked on seed {seed}"),
+        };
+        if hard {
+            assert!(!confirmed, "seed {seed}: a failed inspection authorized a confirmed save");
+        }
+        let _ = v;
+    }
+}
+
 /// Mutations of the document XML, repackaged so every seed reaches the
 /// parser. This is the half that exercises this crate rather than `zip`.
 #[test]

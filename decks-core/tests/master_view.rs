@@ -21,8 +21,8 @@ pub fn edited() -> (DecksController, SlideObject) {
         rotation: 0.0,
         style: ShapeStyle { fill: Some(Color(0xE0, 0x1B, 0x24)), gradient: None, stroke: None },
     };
-    c.edit_master(0).unwrap();
-    c.add_object(0, triangle.clone());
+    c.edit_master(c.slide_id_at(0).unwrap()).unwrap();
+    c.add_object(c.slide_id_at(0).unwrap(), triangle.clone());
     c.finish_master().unwrap();
     (c, triangle)
 }

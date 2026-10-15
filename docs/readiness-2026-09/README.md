@@ -10,6 +10,44 @@ Letters, Tables and Decks must reliably complete create/open → edit → undo/r
 
 “Done” means current-revision tests prove the behavior, not that an issue was closed or a model field exists. No known P0 crash/data-loss issue, silently skipped release-critical test, or unapproved format loss may remain. Advanced features already admitted by newer ADRs require evidence or an explicit revised scope decision; collaboration, plugin marketplaces and enterprise policy systems do not block dependable everyday editing.
 
+## Product direction reassessment — 2026-10-13
+
+Keep Rust document engines/controllers and GTK/libadwaita interfaces. The
+architecture is a viable direction, not evidence that the products are already
+viable replacements. Prioritize complete edit/save/reopen workflows over
+increasing the number of model fields, toolbar actions or supported imports.
+
+| App | Intended alternative | Roadmap emphasis |
+|---|---|---|
+| Letters | Native Word-style document authoring | Canonical rich document state, faithful editing bridge, consistent screen/page/export layout, DOCX/ODT loss accounting |
+| Tables | Native Excel-style workbook authoring | IronCalc calculation authority, safe XLSX editing, lossless supported metadata, coherent keyboard/grid workflows |
+| Decks | Native PowerPoint-style authoring and presentation design | Shared slide geometry, master/theme/layout authoring, reliable canvas manipulation, persisted designs and presenter workflows |
+
+The app assessments and ordered acceptance gates live in
+[Letters](letters-fidelity.md), [Tables](tables-readiness.md), and
+[Decks](decks-readiness.md). Existing checked historical journeys below must
+not be read as certification of these broader product goals. Render scorecards,
+real-document results and exact-revision installed-release evidence remain
+separate gates.
+
+Use maintained open-source engines and public format specifications first.
+Evaluate BetterOffice/other import-layout implementations against the same
+corpus before adopting them; audit licenses and provenance before copying.
+ArtCraft, Word/Excel/PowerPoint and Pages/Numbers/Keynote can inform interaction
+specifications, but a reference product's features are not this suite's features.
+[REA](https://github.com/morluto/rea) is optional investigation tooling, not a
+document engine or a turnkey port. A pilot must answer a bounded unresolved
+question with reproducible observations, respect target access/licensing, and
+produce a behavior specification plus regression fixture. No proprietary
+reference application was executed in this assessment.
+
+For implementation, use the [agent-ready specifications](../implementation/README.md).
+They expand the remaining app and shared requirements into bounded work packages
+with source entry points, dependencies, invariants, regression plans and exit
+evidence. The specifications are pending work; this ledger remains the record of
+observed results.
+
+
 ## Architecture to preserve
 
 1. `suite-common-core` owns GTK-free lifecycle policy, durability, compatibility reports and genuinely shared primitives. `suite-common` adapts those policies to GTK dialogs/actions/settings.
@@ -42,7 +80,7 @@ document, never from whether an issue happens to be closed.
 - [x] #437 — durable shared saves — [atomic-save.md](atomic-save.md) 8/8
 - [x] #436 — Letters save transactions — [save-transactions.md](save-transactions.md) 6/6
 - [x] #241 — GTK test thread/display ownership — [gtk-threading.md](gtk-threading.md) 6/6
-- [~] #354 — deterministic GUI infrastructure — [gui-testing.md](gui-testing.md) 9/10
+- [x] #354 — deterministic GUI infrastructure — [gui-testing.md](gui-testing.md) 10/10
 - [~] #313 — CI validator and test gates — [ci-gates.md](ci-gates.md) 7/8
 - [~] #442 — crash and flake campaign — [crash-stress.md](crash-stress.md) 2/8
 - [~] #441 — capability evidence ledger — [capability-evidence.md](capability-evidence.md) 6/7
@@ -83,20 +121,22 @@ Use fixtures spanning empty/large/sparse/image-heavy content, Unicode/RTL, malfo
 
 ## First implementation slice
 
-Opened PRs: [#444 — shared save safety](https://github.com/tuna-os/gtk-office-suite/pull/444)
-and [#445 — GUI crash/flake infrastructure](https://github.com/tuna-os/gtk-office-suite/pull/445).
-The latter is draft pending live GUI verification. Neither closes its broader
-acceptance contract by itself.
+Initial PRs: [#444 — shared save safety](https://github.com/tuna-os/gtk-office-suite/pull/444)
+is merged; [#445 — GUI crash/flake infrastructure](https://github.com/tuna-os/gtk-office-suite/pull/445)
+is closed. #445's major components landed separately (#517, #568, #448, #1053);
+the detailed acceptance state is the execution ledger above, not those historical PR descriptions.
 
 - Shared atomic save: regression tests reproduced stale-temp-symlink overwrite and permission widening. Exclusive temporary files, permissions, owned cleanup and Unix directory sync implemented locally. On updated main: 89 shared-core unit tests plus one parity-conformance test passed. Full format/GUI integration is still pending.
-- GUI harness: private schemas/XDG/display allocation, owned process cleanup, correct snapshot artifact source; duplicate named-range test exposed under a unique class name. The still-skipped #137 reproduction needs live verification.
+- GUI harness: private schemas/XDG/display allocation, owned process cleanup, correct snapshot artifact source, and active
+  far-jump/return regression journeys for the #137 AT-SPI crash, fixed by #514. The direct reproduction and the named-range
+  accessibility walk pass in CI; see `gui-testing.md` and #137's closure evidence.
 - Repeated journey runner: `tests/gui/stress.py` is on main and runs nightly (`.github/workflows/gui-stress.yml`) in the GUI
   container. It records seeds, revision, binary SHA-256, every attempt's order, verdict, log, JUnit and artifacts, classifies
   failures (product crash / assertion / timeout / infrastructure), reports the first-attempt failure rate, and never retries.
-  Its first display-matrix run found #516 (Tables lost the name box below the narrow breakpoint, so `Ctrl+G` had nothing to
-  focus and silently swallowed every keystroke at 400px); that is fixed, and a full matrix pass then turned up further
-  narrow-width gaps (#520), so the nightly stays on the baseline display until those close. It repeats existing journeys; stateful random edits and save-fault injection are next. The corpus and engine
-  work from the same slice is still on PR #445.
+  The #516 name-box and #520 fill-handle regressions are fixed (#518, #526, #1067); the scheduled display matrix now runs
+  in its own nightly job. Controller stateful and malformed-input campaigns also run nightly. Remaining #442 work includes
+  multi-window close/save races and release-candidate soak/evidence. Recovery-checkpoint fault injection is now covered by
+  `recovery.md`; wiring that result into release-candidate certification remains open.
 - Dependency-free Python tests and CI wiring cover validators, duplicate collection and stress orchestration. GUI failure artifacts are uploaded even when smoke fails.
 
 Run after building current binaries and installing Xvfb, Matchbox, xdotool and the documented GUI dependencies:

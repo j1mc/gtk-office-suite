@@ -118,6 +118,47 @@ fn a_default_sheet_gains_no_layout_it_never_had() {
     }
 }
 
+/// TBL-002: charts ride the same snapshot bytes as everything else — a
+/// later sheet's multi-series chart, with names, colors, titles, legend
+/// and size, recovers where it was.
+#[test]
+fn charts_survive_a_snapshot() {
+    use tables_core::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition};
+    let mut first = SheetModel::new("First", 8, 5, 0);
+    first.data[0][0] = "1".into();
+    let mut later = SheetModel::new("Later", 8, 5, 1);
+    for (r, (label, v)) in [("North", "10"), ("South", "20")].iter().enumerate() {
+        later.data[r + 1][0] = label.to_string();
+        later.data[r + 1][1] = v.to_string();
+    }
+    later.charts.push(ChartSpec {
+        kind: ChartKind::Bar,
+        title: "Later sales".into(),
+        x_axis_title: Some("Region".into()),
+        y_axis_title: Some("Revenue".into()),
+        legend_position: LegendPosition::Bottom,
+        series: vec![
+            ChartSeries { name: "Sales".into(), cat: (1, 0, 2), val: (1, 1, 2), color: Some("4472C4".into()) },
+            ChartSeries { name: "Plan".into(), cat: (1, 0, 2), val: (1, 2, 2), color: None },
+        ],
+        cat: (1, 0, 2),
+        val: (1, 1, 2),
+        anchor: (1, 3),
+        width_px: 320.0,
+        height_px: 200.0,
+    });
+    let back = through_a_snapshot(&[first, later], "charts");
+    assert_eq!(back.len(), 2);
+    assert!(back[0].charts.is_empty(), "no chart leaks onto the first sheet");
+    let c = &back[1].charts[0];
+    assert_eq!((c.title.as_str(), c.series.len()), ("Later sales", 2));
+    assert_eq!(c.series[0].name, "Sales");
+    assert_eq!(c.series[0].color.as_deref(), Some("4472C4"));
+    assert_eq!(c.x_axis_title.as_deref(), Some("Region"));
+    assert_eq!(c.legend_position, LegendPosition::Bottom);
+    assert!((c.width_px - 320.0).abs() < 1.0, "size survives recovery: {}", c.width_px);
+}
+
 #[test]
 fn layout_is_kept_per_sheet_not_smeared_across_them() {
     // Sheet properties are resolved by name through workbook.xml's rels;
@@ -138,4 +179,54 @@ fn layout_is_kept_per_sheet_not_smeared_across_them() {
         (back[1].col_widths[1] - 222.0).abs() >= 1.0,
         "sheet 2 inherited sheet 1's 222px column width",
     );
+}
+
+/// TBL-003: rules keep their owning sheet and priority, and a ranged
+/// filter keeps its definition, derived hides and independent manual
+/// hides, through the same snapshot bytes recovery reads.
+#[test]
+fn rules_and_filters_survive_a_snapshot() {
+    use tables_core::sheet::{CondOp, CondRule, FilterColumn, FilterDef};
+    let mut first = SheetModel::new("First", 8, 5, 0);
+    first.data[0][0] = "keep".into();
+    // Two rules out of priority order: the writer numbers rules in
+    // document order (rust_xlsxwriter assigns sequential priorities), so
+    // absolute stored numbers normalize to dense ranks — evaluation order
+    // is the invariant that must survive.
+    first.cond_rules.push(CondRule {
+        range: (0, 0, 2, 0), op: CondOp::Greater, value: 1.0, value2: 1.0,
+        fill: "C6EFCE".into(), priority: 5,
+    });
+    first.cond_rules.push(CondRule {
+        range: (0, 1, 2, 1), op: CondOp::Less, value: 0.0, value2: 0.0,
+        fill: "FFEB9C".into(), priority: 2,
+    });
+    let mut later = SheetModel::new("Later", 8, 5, 1);
+    for (r, v) in ["Name", "ask", "hide", "ask"].iter().enumerate() {
+        later.data[r][0] = v.to_string();
+    }
+    later.cond_rules.push(CondRule {
+        range: (1, 0, 3, 0), op: CondOp::Equal, value: 0.0, value2: 0.0,
+        fill: "FFC7CE".into(), priority: 1,
+    });
+    later.filter = Some(FilterDef {
+        range: Some((0, 0, 3, 0)),
+        columns: vec![FilterColumn { col: 0, hidden: ["hide".to_string()].into_iter().collect() }],
+    });
+    later.recompute_filter();
+    later.hidden_rows_manual.insert(3);
+    let back = through_a_snapshot(&[first, later], "rules-filters");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].cond_rules.len(), 2, "no rule leaks between sheets");
+    assert_eq!((back[0].cond_rules[0].op, back[0].cond_rules[0].priority), (CondOp::Less, 1));
+    assert_eq!((back[0].cond_rules[1].op, back[0].cond_rules[1].priority), (CondOp::Greater, 2));
+    assert!(back[1].hidden_rows.contains(&2), "the filter hide recovers");
+    assert!(!back[1].hidden_rows.contains(&0), "the header is not a filter hide");
+    assert!(back[1].hidden_rows_manual.contains(&3), "the manual hide recovers independent");
+    assert!(!back[1].hidden_rows.contains(&3), "the manual hide is not a filter hide");
+    let def = back[1].filter.as_ref().expect("the definition recovers");
+    assert_eq!(def.range, Some((0, 0, 3, 0)));
+    assert!(def.columns.iter().any(|c| c.col == 0 && c.hidden.contains("hide")));
+    let rule = back[1].cond_rules.iter().find(|r| r.op == CondOp::Equal).expect("the later rule recovers");
+    assert_eq!((rule.range, rule.priority), ((1, 0, 3, 0), 1));
 }

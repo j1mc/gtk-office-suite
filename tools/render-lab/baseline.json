@@ -242,6 +242,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/chart-multi": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/chart-pie": {
     "A": "green",
     "B": "green",
@@ -271,6 +276,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/filtered": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/frozen": {
     "A": "green",
     "B": "green",
@@ -286,10 +296,18 @@
     "B": "amber",
     "C": "amber"
   },
+  "tables/pivot-crosstab": {
+    "A": "green",
+    "B": "green"
+  },
   "tables/values": {
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "tables/wrap-merged": {
+    "A": "amber",
+    "B": "amber"
   },
   "tables/wrap-text": {
     "A": "amber",

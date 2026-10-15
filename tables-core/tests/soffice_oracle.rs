@@ -557,6 +557,51 @@ fn chart_survives_calc_rewrite() {
     assert_eq!(c.val, (1, 1, 3), "values range changed: {c:?}");
 }
 
+/// TBL-002: every admitted field must survive a Calc rewrite — title, both
+/// named series, axis titles and legend — read back by our own chart
+/// reader through Calc's own relationship/anchor layout.
+#[test]
+fn chart_fields_survive_calc_rewrite() {
+    if !require_or_skip() { return; }
+    use tables_core::sheet::{ChartKind, ChartSeries, ChartSpec, LegendPosition, SheetModel};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chart-fields.xlsx");
+    let mut sh = SheetModel::new("Sheet1", 10, 5, 0);
+    for (i, (l, a, b)) in [("North", "10", "4"), ("South", "20", "6"), ("East", "30", "2")].iter().enumerate() {
+        sh.data[i + 1][0] = l.to_string();
+        sh.data[i + 1][1] = a.to_string();
+        sh.data[i + 1][2] = b.to_string();
+    }
+    sh.charts.push(ChartSpec {
+        kind: ChartKind::Bar,
+        title: "Regions".into(),
+        x_axis_title: Some("Area".into()),
+        y_axis_title: Some("Sales".into()),
+        legend_position: LegendPosition::Bottom,
+        series: vec![
+            ChartSeries { name: "Sold".into(), cat: (1, 0, 3), val: (1, 1, 3), color: Some("4472C4".into()) },
+            ChartSeries { name: "Back".into(), cat: (1, 0, 3), val: (1, 2, 3), color: None },
+        ],
+        cat: (1, 0, 3),
+        val: (1, 1, 3),
+        anchor: (5, 3),
+        width_px: 480.0,
+        height_px: 280.0,
+    });
+    tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[sh]).unwrap();
+
+    let rewritten = convert(&path, "xlsx").expect("Calc rewrite failed");
+    let charts = tables_core::io::read_charts_from_xlsx(rewritten.to_str().unwrap());
+    assert_eq!(charts.len(), 1, "Calc dropped or duplicated the chart");
+    let c = &charts[0];
+    assert_eq!(c.title, "Regions", "chart title changed: {c:?}");
+    assert_eq!(c.series.len(), 2, "Calc dropped a series: {c:?}");
+    assert_eq!((c.cat, c.val), ((1, 0, 3), (1, 1, 3)), "ranges changed: {c:?}");
+    assert_eq!(c.x_axis_title.as_deref(), Some("Area"), "x-axis title changed: {c:?}");
+    assert_eq!(c.y_axis_title.as_deref(), Some("Sales"), "y-axis title changed: {c:?}");
+    assert_eq!(c.legend_position, LegendPosition::Bottom, "legend moved: {c:?}");
+}
+
 // ── Conditional formatting (ADR 0003 §4) ─────────────────────────────
 
 /// A cell-value rule must survive a Calc rewrite: operator, threshold,
@@ -577,6 +622,7 @@ fn cond_rule_survives_calc_rewrite() {
         value: 25.0,
         value2: 25.0,
         fill: "FFC0C0".into(),
+        priority: 1,
     });
     tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[sh]).unwrap();
 
@@ -1004,4 +1050,44 @@ fn cell_styles_survive_calc_into_its_xlsx() {
     assert_eq!(head.h_align, HAlign::Center);
     assert_eq!(s.borders[1][1].top, BorderStyle::Thick, "{:?}", s.borders[1][1]);
     assert!(s.styles[2][2].is_default() && s.borders[2][2].is_none());
+}
+
+// ── Worksheet-scoped rules and persistent filters (TBL-003) ──────────
+
+/// A ranged value filter and a later sheet's rule must survive a Calc
+/// rewrite — the autoFilter still in the XML for every reader, and the
+/// range, derived hides and rule intact when read back by our importer.
+#[test]
+fn filter_and_later_rule_survive_calc_rewrite() {
+    if !require_or_skip() { return; }
+    use tables_core::sheet::{CondOp, CondRule, FilterColumn, FilterDef};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("filter.xlsx");
+    let mut first = SheetModel::new("Sheet1", 8, 4, 0);
+    for (r, v) in ["Region", "North", "South", "North"].iter().enumerate() {
+        first.data[r][0] = v.to_string();
+    }
+    first.filter = Some(FilterDef {
+        range: Some((0, 0, 3, 0)),
+        columns: vec![FilterColumn { col: 0, hidden: ["South".to_string()].into_iter().collect() }],
+    });
+    first.recompute_filter();
+    let mut later = SheetModel::new("Later", 8, 4, 1);
+    later.data[0][1] = "5".into();
+    later.cond_rules.push(CondRule {
+        range: (0, 1, 2, 1), op: CondOp::Greater, value: 1.0, value2: 1.0,
+        fill: "C6EFCE".into(), priority: 1,
+    });
+    tables_core::io::save_sheets_to_xlsx(path.to_str().unwrap(), &[first, later]).unwrap();
+
+    let rewritten = calc_rewrite(&path);
+    let xml = xlsx_member(&rewritten, "xl/worksheets/sheet1.xml");
+    assert!(xml.contains("autoFilter"), "Calc dropped the autoFilter: {xml}");
+    let (_e, sheets) = load_workbook(rewritten.to_str().unwrap()).expect("open");
+    let def = sheets[0].filter.as_ref().expect("the filter survives Calc");
+    assert_eq!(def.range, Some((0, 0, 3, 0)), "the range survives Calc: {def:?}");
+    assert!(sheets[0].hidden_rows.contains(&2), "South stays hidden: {:?}", sheets[0].hidden_rows);
+    assert!(!sheets[0].hidden_rows.contains(&0), "the header stays out");
+    let rule = sheets[1].cond_rules.iter().find(|r| r.op == CondOp::Greater).expect("the later rule survives Calc");
+    assert_eq!(rule.range, (0, 1, 2, 1), "the later rule's range survives Calc: {rule:?}");
 }

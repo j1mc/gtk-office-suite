@@ -152,18 +152,19 @@ fn bullet() -> ParaStyle {
     ParaStyle { bullet: Bullet::Char("\u{2022}".into()), margin_left: 36.0, indent: -28.0, ..Default::default() }
 }
 
-fn slide(title: &str, layout: usize, objects: Vec<SlideObject>) -> Slide {
+fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
     Slide {
         title: title.into(),
         // White is "unset": the slide shows its master's background.
         background: "#ffffff".into(),
         objects,
         notes: String::new(),
-        master_idx: Some(0),
+        // Stamped with the template master's id below, once it has one.
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: Some(layout),
+        layout_id: None,
     }
 }
 
@@ -171,7 +172,9 @@ fn slide(title: &str, layout: usize, objects: Vec<SlideObject>) -> Slide {
 /// the last template.
 pub fn deck(index: usize) -> Option<(Vec<Slide>, Vec<MasterSlide>)> {
     let theme = themes().into_iter().nth(index)?;
-    let master = MasterSlide {
+    let mut masters = vec![MasterSlide {
+        // Stamped with a session id below, once, with everything else.
+        id: 0,
         name: theme.template.name.into(),
         background: theme.background.into(),
         default_font: theme.font.into(),
@@ -181,25 +184,33 @@ pub fn deck(index: usize) -> Option<(Vec<Slide>, Vec<MasterSlide>)> {
         // The standard six: the title slide is on the first, the bulleted
         // one on Title and Content, in exactly their places.
         layouts: crate::layouts::standard(),
-    };
-    let title_slide = slide(
-        "Title",
-        0,
-        vec![
-            text(Placeholder::Title, "Presentation Title", (80.0, 150.0, 800.0, 130.0), theme.title, 48, true, vec![centred()], Anchor::Bottom),
-            text(Placeholder::Subtitle, "Subtitle", (80.0, 300.0, 800.0, 60.0), theme.body, 24, false, vec![centred()], Anchor::Top),
-        ],
-    );
+    }];
     let points = "First point\nSecond point\nThird point";
-    let bullets_slide = slide(
-        "Title & Bullets",
-        1,
-        vec![
-            text(Placeholder::Title, "Slide Title", (80.0, 40.0, 800.0, 90.0), theme.title, 36, true, vec![ParaStyle::default()], Anchor::Bottom),
-            text(Placeholder::Body, points, (80.0, 150.0, 800.0, 320.0), theme.body, 24, false, vec![bullet()], Anchor::Top),
-        ],
-    );
-    Some((vec![title_slide, bullets_slide], vec![master]))
+    let mut slides = vec![
+        slide(
+            "Title",
+            vec![
+                text(Placeholder::Title, "Presentation Title", (80.0, 150.0, 800.0, 130.0), theme.title, 48, true, vec![centred()], Anchor::Bottom),
+                text(Placeholder::Subtitle, "Subtitle", (80.0, 300.0, 800.0, 60.0), theme.body, 24, false, vec![centred()], Anchor::Top),
+            ],
+        ),
+        slide(
+            "Title & Bullets",
+            vec![
+                text(Placeholder::Title, "Slide Title", (80.0, 40.0, 800.0, 90.0), theme.title, 36, true, vec![ParaStyle::default()], Anchor::Bottom),
+                text(Placeholder::Body, points, (80.0, 150.0, 800.0, 320.0), theme.body, 24, false, vec![bullet()], Anchor::Top),
+            ],
+        ),
+    ];
+    crate::ops::ensure_all_ids(&mut slides, &mut masters);
+    // The title slide is on the first layout, the bulleted one on Title
+    // and Content: stable ids, not the positions above.
+    let master_id = masters[0].id;
+    for (s, j) in slides.iter_mut().zip([0, 1]) {
+        s.master_id = Some(master_id);
+        s.layout_id = masters[0].layouts.get(j).map(|l| l.id);
+    }
+    Some((slides, masters))
 }
 
 #[cfg(test)]

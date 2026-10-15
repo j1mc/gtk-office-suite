@@ -760,11 +760,14 @@
         let mut controller = WorkbookController::new(2, 2).unwrap();
         controller.edit_cell(0, 0, "x");
         assert!(!controller.refuses_edit(0, 0));
+        // Locks must be configured before enabling sheet protection.
+        controller.set_cell_locked(1, 1, false);
         controller.set_sheet_protection(true, None);
         assert!(controller.sheet_is_protected() && controller.refuses_edit(0, 0));
         controller.edit_cell(0, 0, "y");
         assert_eq!(controller.state.borrow().sheet().cell(0, 0), "x");
-        controller.set_cell_locked(1, 1, false);
+        controller.set_cell_locked(0, 0, false);
+        assert!(controller.refuses_edit(0, 0), "protection also prevents unlocking a cell");
         assert!(!controller.refuses_edit(1, 1), "an unlocked cell stays editable");
         assert!(!controller.refuses_edit(99, 99), "out of range is not a refusal");
         controller.set_sheet_protection(false, None);
@@ -1099,4 +1102,112 @@
             controller.is_dirty(),
             "sort is a mutation and must dirty the workbook"
         );
+    }
+
+    /// TBL-003: several columns filter together (a row hides when any
+    /// active criterion hides it), and one undo restores the previous
+    /// definition and visibility — redo brings them back.
+    #[test]
+    fn tbl003_multi_column_filter_undo() {
+        let mut controller = WorkbookController::new(6, 2).unwrap();
+        for (r, (a, b)) in [("x", "1"), ("x", "2"), ("y", "1"), ("y", "2"), ("x", "3")].iter().enumerate() {
+            controller.edit_cell(r, 0, *a);
+            controller.edit_cell(r, 1, *b);
+        }
+        let hide_a: std::collections::HashSet<String> = ["y".to_string()].into_iter().collect();
+        controller.filter_column_values(0, &hide_a);
+        {
+            let state = controller.state.borrow();
+            let hidden: Vec<usize> = (0..5).filter(|&r| state.sheet().is_row_hidden(r)).collect();
+            assert_eq!(hidden, [2, 3], "column A alone hides the y rows");
+        }
+        let hide_b: std::collections::HashSet<String> = ["2".to_string(), "3".to_string()].into_iter().collect();
+        controller.filter_column_values(1, &hide_b);
+        {
+            let state = controller.state.borrow();
+            let sheet = state.sheet();
+            assert_eq!(sheet.filter.as_ref().map(|d| d.columns.len()), Some(2));
+            let hidden: Vec<usize> = (0..5).filter(|&r| sheet.is_row_hidden(r)).collect();
+            assert_eq!(hidden, [1, 2, 3, 4], "both criteria hide together");
+        }
+        // Undo drops column B's criterion and restores column A's
+        // visibility exactly; redo brings the pair back.
+        assert!(controller.undo());
+        {
+            let state = controller.state.borrow();
+            let sheet = state.sheet();
+            assert_eq!(sheet.filter.as_ref().map(|d| d.columns.len()), Some(1));
+            let hidden: Vec<usize> = (0..5).filter(|&r| sheet.is_row_hidden(r)).collect();
+            assert_eq!(hidden, [2, 3]);
+        }
+        assert!(controller.redo());
+        {
+            let state = controller.state.borrow();
+            let hidden: Vec<usize> = (0..5).filter(|&r| state.sheet().is_row_hidden(r)).collect();
+            assert_eq!(hidden, [1, 2, 3, 4]);
+        }
+        // Clearing one column leaves the other's criterion working.
+        controller.clear_column_filter(1);
+        {
+            let state = controller.state.borrow();
+            let sheet = state.sheet();
+            assert_eq!(sheet.filter.as_ref().map(|d| d.columns.len()), Some(1));
+            let hidden: Vec<usize> = (0..5).filter(|&r| sheet.is_row_hidden(r)).collect();
+            assert_eq!(hidden, [2, 3]);
+        }
+        // Clearing the last column removes the definition, not just its rows.
+        controller.clear_column_filter(0);
+        assert!(controller.state.borrow().sheet().filter.is_none());
+        assert!((0..5).all(|r| !controller.state.borrow().sheet().is_row_hidden(r)));
+        // Clearing a column with no criterion pushes no step.
+        controller.clear_column_filter(0);
+        assert!(controller.undo(), "only real filters undo");
+        assert!(controller.state.borrow().sheet().filter.is_some());
+    }
+
+    /// TBL-003: an authorized edit recomputes the active filter in the
+    /// same undo step — a newly matching value shows, a newly
+    /// non-matching one hides — and undo restores both value and
+    /// visibility.
+    #[test]
+    fn an_edit_recomputes_an_active_filter_and_undo_restores_both() {
+        let mut controller = WorkbookController::new(3, 1).unwrap();
+        controller.edit_cell(0, 0, "apple");
+        controller.edit_cell(1, 0, "banana");
+        controller.edit_cell(2, 0, "apple");
+        let hide: std::collections::HashSet<String> = ["banana".to_string()].into_iter().collect();
+        controller.filter_column_values(0, &hide);
+        assert!(controller.state.borrow().sheet().is_row_hidden(1));
+
+        controller.edit_cell(1, 0, "apple");
+        assert!(!controller.state.borrow().sheet().is_row_hidden(1), "a matching edit shows the row");
+        assert!(controller.undo());
+        assert_eq!(controller.state.borrow().sheet().cell(1, 0), "banana");
+        assert!(controller.state.borrow().sheet().is_row_hidden(1), "undo restores value and visibility");
+    }
+
+    /// TBL-003: a ranged filter never hides its header row, even when the
+    /// header's own value is hidden — and rows outside the range are not
+    /// filtered at all.
+    #[test]
+    fn a_ranged_filter_excludes_its_header_and_its_outside() {
+        let mut controller = WorkbookController::new(6, 1).unwrap();
+        for (r, v) in ["hide", "hide", "show", "hide", "hide"].iter().enumerate() {
+            controller.edit_cell(r, 0, *v);
+        }
+        controller.set_filter_range((0, 0, 2, 0));
+        let hide: std::collections::HashSet<String> = ["hide".to_string()].into_iter().collect();
+        controller.filter_column_values(0, &hide);
+        {
+            let state = controller.state.borrow();
+            let sheet = state.sheet();
+            assert!(!sheet.is_row_hidden(0), "the header stays visible");
+            assert!(sheet.is_row_hidden(1), "a matching data row hides");
+            assert!(!sheet.is_row_hidden(2), "a non-matching data row shows");
+            assert!(!sheet.is_row_hidden(3), "rows outside the range are untouched");
+            assert!(!sheet.is_row_hidden(4), "rows outside the range are untouched");
+        }
+        assert!(controller.undo(), "the criterion undoes");
+        assert!(controller.undo(), "the range undoes");
+        assert!(controller.state.borrow().sheet().filter.is_none());
     }

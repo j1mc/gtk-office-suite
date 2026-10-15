@@ -19,8 +19,9 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
 ### 1. IronCalc Engine Strategy & Dynamic Arrays
 
 - **Engine Boundary:** All formula evaluation, dependency tracking, and calculation logic belong strictly to the underlying calculation engine (`ironcalc_base::Model` via `TablesEngine`). `tables-core` and the GTK GUI shell MUST NOT re-implement expression evaluation or array spilling locally.
-- **Capability Check:** `TablesEngine` queries IronCalc capabilities at runtime. For dynamic array formulas (e.g. `FILTER`, `UNIQUE`, `SORT`, `SEQUENCE`) and advanced functions, formula evaluation delegates directly to IronCalc.
-- **Spill & Array Formula Strategy:** When IronCalc introduces array spilling, `TablesEngine` captures spilled output ranges and projects them into `SheetModel`. If an array formula attempts to spill over non-empty cells, a `#SPILL!` error is surfaced.
+- **Engine behavior:** The pinned IronCalc engine supports dynamic array formulas, including `SEQUENCE`.
+- **Observed array behavior:** `TablesEngine` obtains calculated values for spill cells through its normal grid projection, limited to its configured row and column bounds. A non-empty destination blocks the spill and yields `#SPILL!`. Function-by-function compatibility is not implied; confirm engine behavior with a regression test before documenting a function as supported.
+- **Capability accounting:** Track supported formula behavior through executable engine tests and the function catalog; do not claim a runtime capability query unless the engine exposes one.
 
 ### 2. Rich Charts Model & Persistence
 
@@ -31,7 +32,7 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `legend_position`: `None`, `Top`, `Bottom`, `Left`, `Right`.
   - `series`: Vector of `ChartSeries` (`name`, `cat_range`, `val_range`, `color`).
   - `anchor` & dimensions: Position `(row, col)` and sizing `(width_px, height_px)` for flexible canvas placement.
-- **XLSX Persistence:** Extended DrawingML chart XML generation in `tables-core/src/io.rs` for multi-series, axis titles, legends, and chart types.
+- **XLSX Persistence target:** preserve multi-series, axes, legends, worksheet ownership and chart placement through load/edit/save. The writer in `tables-core/src/io/save.rs` supports more fields than the reader in `tables-core/src/io/charts.rs`; this is not yet a complete round trip.
 
 ### 3. Pivot Table Model & Fixture Verification
 
@@ -43,7 +44,7 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `col_fields`: Vector of column indices for column grouping.
   - `data_fields`: Vector of `(col_index, AggregationFunc)` (Sum, Count, Average, Min, Max).
   - `filter_fields`: Vector of column indices for filtering.
-- **Fixtures & Interoperability:** Model proven against golden fixture tests in `tables-core/tests/pivot_tests.rs` prior to full GUI layout builder integration.
+- **Fixtures & Interoperability:** `tables-core/tests/pivot_and_protection_tests.rs` verifies row aggregation, column-field cross-tab output, and placement. This does not establish GUI availability or XLSX pivot-definition round-tripping.
 
 ### 4. Sheet and Cell Protection Model
 
@@ -54,14 +55,24 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `protected: bool`.
   - `password_hash: Option<String>` (SHA-256 or legacy OOXML hash).
   - `allow_select_locked: bool`, `allow_select_unlocked: bool`, `allow_format_cells: bool`, `allow_insert_rows: bool`, `allow_delete_rows: bool`, etc.
-- **Enforcement Policy:** When `sheet.protection.protected` is `true`, `WorkbookController` enforces edit checks: attempts to mutate locked cells return `Err("Sheet is protected")`.
-- **Loss Policy & Warnings:** Full round-trip preservation into XLSX `<sheetProtection>` elements. Unsupported protection features emit explicit user warnings rather than silent data loss.
+- **Current enforcement:** `WorkbookController::edit_cell` refuses edits to locked cells on protected sheets by returning without mutation. The GUI uses `refuses_edit` to explain the refusal; this API does not return `Err("Sheet is protected")`.
+- **Persistence target, not current capability:** preserve supported cell protection and `<sheetProtection>` attributes; explicitly warn about unsupported losses. Currently XLSX persistence retains only the sheet-protected boolean, not the full permissions/password/cell-lock model. Sheet protection is not encryption.
 
 ### 5. Recalculation & Large-Workbook Budget
 
-- Large workbook benchmark targets (< 100ms for 10,000 cells recalculation) are enforced in `tables-core/benches` and integration test gates.
+- The earlier <100ms/10,000-cell statement is not the implemented gate: there is no `tables-core/benches` directory. `tables-core/tests/performance_budgets.rs` enforces a two-second timing budget, with a recalculation fixture containing 256 input cells and 256 formulas. Extend these existing gates with reproducible dense/sparse whole-workbook workloads, identified hardware and memory measurements; measure loading, recalculation, editing and saving separately from viewport rendering.
 
 ## Consequences
 
 - Clean architectural split preserved: calculation stays inside `ironcalc_base`, presentation in `tables` GTK shell.
-- Full structural compatibility for extended charts, pivot tables, and sheet protection in XLSX I/O.
+- Current implementation has scoped but incomplete interoperability: pivot output is written as ordinary cells and does not round-trip as an OOXML pivot definition; chart and protection coverage remains limited to implemented formats and tested cases.
+
+## Delivery priority
+
+The [Tables readiness roadmap](../readiness-2026-09/tables-readiness.md#direction-and-delivery-order)
+orders implementation: safe/fidelity-preserving edits and saves, one calculation
+authority, coherent native interaction, persisted analysis features, then
+exact-revision packaged daily-driver evidence. Reuse IronCalc APIs before
+building parallel logic; assess its XLSX adapter against the existing corpus
+before replacing the current file-I/O stack. REA and Excel/Numbers observations
+are optional research inputs, not implementation dependencies or parity proof.

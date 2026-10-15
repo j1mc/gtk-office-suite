@@ -3,9 +3,10 @@
 // PageView — the Print Layout view (ADR 0010). It draws the pages of a
 // `letters_core::layout::pango::Typeset`: the same render tree and the same
 // `draw_page` that print and PDF use, so what it shows is where the lines
-// and page breaks really are. It edits the tab's GtkTextBuffer (still the
-// document's live state; see page_edit.rs): the caret and selection are the
-// buffer's, mapped onto the laid-out pages.
+// and page breaks really are. Edits go to the tab's live model as ops (see
+// page_edit.rs); the buffer is the model's projection, hosting the caret,
+// the selection, the IME and the text screen readers read, mapped onto the
+// laid-out pages.
 //
 // Zoom is physical: 100% is 96/72 px per point, a Letter page is 816 px
 // wide, as in every other word processor and in the render lab's
@@ -75,8 +76,10 @@ mod imp {
         }
     }
 
-    /// The text screen readers see is the buffer's, the text the page view
-    /// edits; offsets are the buffer's char offsets.
+    /// The text screen readers see is the buffer's — the model's projection,
+    /// which also hosts the caret, the selection and the IME; offsets are
+    /// the buffer's char offsets. The model stays the sole authority: this
+    /// impl only reads (LET-003).
     impl AccessibleTextImpl for PageView {
         fn contents(&self, start: u32, end: u32) -> Option<glib::Bytes> {
             let buf = self.buffer.borrow().clone()?;
@@ -294,15 +297,24 @@ impl PageView {
     }
 
     /// Lay out an edited version of the document, re-using the shaped
-    /// paragraphs the edit did not touch.
-    pub fn update_document(&self, doc: letters_core::Document, opts: letters_core::layout::LayoutOptions, starts: Vec<usize>) {
+    /// paragraphs the edit did not touch. `revision` is the snapshot's: the
+    /// view draws the revision it was given, and reports it back.
+    pub fn update_document(&self, doc: letters_core::Document, opts: letters_core::layout::LayoutOptions, starts: Vec<usize>, revision: u64) {
         if let Some(t) = self.imp().typeset.borrow_mut().as_mut() {
             t.update(doc, opts);
+            t.set_revision(revision);
         }
         self.imp().starts.replace(starts);
         self.queue_resize();
         self.queue_draw();
         self.emit_by_name::<()>("laid-out", &[]);
+    }
+
+    /// The `LiveModel` revision the laid-out pages were drawn from (0 with
+    /// nothing laid out, or unpinned): print, thumbnails, PDF and headless
+    /// export agree with the screen by sharing this revision.
+    pub fn revision(&self) -> u64 {
+        self.imp().typeset.borrow().as_ref().map_or(0, |t| t.revision())
     }
 
     /// Call `f` whenever the pages change.
@@ -669,6 +681,25 @@ mod tests {
             let data = surface.take_data().unwrap();
             assert!(data.iter().any(|b| *b < 200), "the page's text is drawn");
             assert!(data.iter().filter(|b| **b == 255).count() > data.len() / 2, "on white paper");
+        });
+    }
+
+    /// The view reports the revision it drew (LET-004): `set_typeset`
+    /// carries the snapshot's, and `update_document` re-pins it — a
+    /// thumbnail, print or PDF drawn from this view is the same revision
+    /// as the screen.
+    #[test]
+    fn the_view_reports_the_revision_it_drew() {
+        gtk_test(|| {
+            let v = PageView::new();
+            assert_eq!(v.revision(), 0, "nothing laid out yet");
+            let doc = Document::from_plain_text("one\ntwo");
+            let mut first = Typeset::new(doc.clone(), LayoutOptions::default());
+            first.set_revision(7);
+            v.set_typeset(first, vec![0, 4]);
+            assert_eq!(v.revision(), 7);
+            v.update_document(doc, LayoutOptions::default(), vec![0, 4], 8);
+            assert_eq!(v.revision(), 8, "an edited layout re-pins its snapshot's revision");
         });
     }
 }

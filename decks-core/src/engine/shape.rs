@@ -122,7 +122,7 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Color {
 /// outline from `preset_polygon` or BetterOffice's presets (`outline`), or
 /// as its bounding rectangle when neither has one.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ShapeKind {
     Rect,
     /// Corner radius as a fraction of the shorter side (DrawingML `adj`,
@@ -161,7 +161,7 @@ impl ShapeKind {
 
 /// An outline.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Stroke {
     pub color: Color,
     /// In model units, like x/y/w/h (so it scales with the slide as they
@@ -171,7 +171,7 @@ pub struct Stroke {
 
 /// A stop in a gradient: `pos` from 0.0 (start) to 1.0 (end).
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GradientStop {
     pub pos: f64,
     pub color: Color,
@@ -179,7 +179,7 @@ pub struct GradientStop {
 
 /// A linear gradient across a shape's box.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LinearGradient {
     pub stops: Vec<GradientStop>,
     /// Direction the colours run, in degrees clockwise from left-to-right
@@ -204,7 +204,7 @@ impl LinearGradient {
 /// `stroke: None` no outline. When `gradient` is set it is what is drawn,
 /// and `fill` holds its mean colour for consumers that can't draw one.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ShapeStyle {
     pub fill: Option<Color>,
     pub gradient: Option<LinearGradient>,

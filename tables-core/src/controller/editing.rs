@@ -51,9 +51,6 @@ impl WorkbookController {
         let new_input = input.into();
         let state = self.state.borrow();
         let sheet = state.sheet();
-        if sheet.protection.protected && sheet.cell_protections[row][col].locked {
-            return;
-        }
         let old_input = state.cell_input(row, col);
         let active = sheet.sheet_id;
         drop(sheet);
@@ -62,6 +59,30 @@ impl WorkbookController {
             return;
         }
         self.apply_ops("Edit Cell", vec![super::ops::Op::SetCell { sheet: active, row, col, input: new_input }]);
+    }
+
+    /// Clear the entire selection as one atomic user operation and undo step.
+    pub fn clear_selection(&mut self) {
+        let (sheet, top, left, bottom, right) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            let (top, left, bottom, right) = sheet.selection_block();
+            (sheet.sheet_id, top, left, bottom, right)
+        };
+        if !self.authorize_cells(sheet, (top..=bottom).flat_map(|r| (left..=right).map(move |c| (r, c)))) {
+            return;
+        }
+        let cells = {
+            let state = self.state.borrow();
+            (top..=bottom)
+                .flat_map(|r| (left..=right).map(move |c| (r, c)))
+                .filter(|&(r, c)| !state.cell_input(r, c).is_empty())
+                .map(|(r, c)| (r, c, String::new()))
+                .collect::<Vec<_>>()
+        };
+        if !cells.is_empty() {
+            self.apply_ops("Clear Cells", vec![super::ops::Op::SetCells { sheet, cells }]);
+        }
     }
 
     /// Change the active sheet's formatting and properties with a
@@ -117,6 +138,11 @@ impl WorkbookController {
                 }
             }
         }
+        drop(state);
+        if !self.authorize_cells(sheet_id, new_inputs.iter().map(|(r, c, _)| (*r, *c))) {
+            return;
+        }
+        let state = self.state.borrow();
         let cells: Vec<(usize, usize, String)> =
             new_inputs.into_iter().filter(|(r, c, new_input)| state.cell_input(*r, *c) != *new_input).collect();
         drop(state);
@@ -159,6 +185,13 @@ impl WorkbookController {
                 })
                 .collect()
         };
+        drop(sheet);
+        drop(state);
+        if !self.authorize_cells(sheet_id, lines.iter().flat_map(|(_, targets)| targets.iter().copied())) {
+            return;
+        }
+        let state = self.state.borrow();
+        let sheet = state.sheet();
 
         // `formula_source` is the cell a copied formula came from: its
         // references shift in a second pass, with the engine.

@@ -480,10 +480,19 @@ pub fn markdown_macro_at(b: &gtk::TextBuffer, pos: &gtk::TextIter) {
     {
         let offset = pos.offset();
         if offset < 2 { return; }
-
-        let mut line_start = *pos;
-        line_start.set_line_offset(0);
-        let before = b.text(&line_start, pos, false);
+        // The pattern scan reads the model (LET-003): the caret's buffer
+        // offset maps to a sequence offset, and the text before it comes
+        // from the paragraph's sequence text, not the buffer's line (whose
+        // list marker and table pipes are presentation, not content).
+        let Some(live) = crate::live::of(b) else { return };
+        let mut m = live.borrow_mut();
+        let caret = m.sequence_offset(offset.max(0) as usize);
+        let doc = m.document().clone();
+        drop(m);
+        let Some((para, _)) = letters_core::edit::locate(&doc, caret) else { return };
+        let seq: Vec<char> = letters_core::edit::sequence_text(&doc).chars().collect();
+        let pstart = letters_core::edit::paragraph_start(&doc, para);
+        let before: String = seq[pstart..caret.min(seq.len())].iter().collect();
 
         if let Some(inner) = extract_md_pattern(&before, "**", "**") {
             apply_md_pattern(b, pos, "**", inner, "bold");

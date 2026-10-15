@@ -141,9 +141,17 @@ pub enum SheetProp {
     Sorted(Option<(usize, crate::sheet::SortDirection)>),
     /// Rows hidden by a filter.
     Filtered(HashSet<usize>),
+    /// The explicit filter definition (TBL-003), if the sheet has one.
+    /// Always paired with `Filtered` carrying its derived rows in the
+    /// same op group: the swap below touches only the definition, so
+    /// undo restores definition and visibility together whatever order
+    /// the group applies in.
+    Filter(Option<crate::sheet::FilterDef>),
     /// Rows and columns hidden by hand.
     HiddenRows(HashSet<usize>),
     HiddenCols(HashSet<usize>),
+    /// Conditional rules, charts, pivots, protection, print area and page
+    /// setup: each set whole, undo restores the previous list or value.
     CondRules(Vec<crate::sheet::CondRule>),
     Charts(Vec<crate::sheet::ChartSpec>),
     Pivots(Vec<crate::sheet::PivotTableSpec>),
@@ -159,6 +167,7 @@ impl SheetProp {
         match self {
             SheetProp::Sorted(v) => SheetProp::Sorted(replace(&mut sheet.sorted_col, *v)),
             SheetProp::Filtered(v) => SheetProp::Filtered(replace(&mut sheet.hidden_rows, v.clone())),
+            SheetProp::Filter(v) => SheetProp::Filter(replace(&mut sheet.filter, v.clone())),
             SheetProp::HiddenRows(v) => SheetProp::HiddenRows(replace(&mut sheet.hidden_rows_manual, v.clone())),
             SheetProp::HiddenCols(v) => SheetProp::HiddenCols(replace(&mut sheet.hidden_cols, v.clone())),
             SheetProp::CondRules(v) => SheetProp::CondRules(replace(&mut sheet.cond_rules, v.clone())),
@@ -175,6 +184,7 @@ impl SheetProp {
         vec![
             SheetProp::Sorted(sheet.sorted_col),
             SheetProp::Filtered((*sheet.hidden_rows).clone()),
+            SheetProp::Filter(sheet.filter.clone()),
             SheetProp::HiddenRows((*sheet.hidden_rows_manual).clone()),
             SheetProp::HiddenCols((*sheet.hidden_cols).clone()),
             SheetProp::CondRules(sheet.cond_rules.clone()),
@@ -206,6 +216,16 @@ pub(super) fn resync(state: &mut WorkbookState, sheet: usize) {
     state.sync_active_sheet();
     let _ = state.engine.set_active_sheet(previous);
     state.active_sheet = previous;
+}
+
+/// Re-derive a sheet's filter visibility after its cells or rows changed
+/// (TBL-003). Part of the same op application — the edit and its
+/// visibility land (and undo) together, with no extra undo step — and
+/// only when a definition exists; session-only hides are left alone.
+pub(super) fn refilter(state: &mut WorkbookState, sheet: usize) {
+    if let Some(s) = state.sheets.get(sheet) {
+        s.borrow_mut().recompute_filter();
+    }
 }
 
 
@@ -283,11 +303,14 @@ impl Op {
                 check_cell(state, si, *row, *col)?;
                 let old = state.engine.input_at(si, *row, *col);
                 state.set_cell_input_on_sheet(si, *row, *col, input);
+                refilter(state, si);
                 Ok(Op::SetCell { sheet: *sheet, row: *row, col: *col, input: old })
             }
             Op::SetFormat { sheet, row, col, format } => {
                 check_cell(state, si, *row, *col)?;
                 let old = std::mem::replace(&mut state.sheets[si].borrow_mut().formats[*row][*col], format.clone());
+                // A format changes the displayed text criteria match on.
+                refilter(state, si);
                 Ok(Op::SetFormat { sheet: *sheet, row: *row, col: *col, format: old })
             }
             Op::SetStyle { sheet, row, col, style } => {
@@ -353,6 +376,8 @@ impl Op {
                 state.set_cell_inputs_on_sheet(si, inputs.iter().map(|(r, c, i)| (*r, *c, i.as_str())));
                 apply_relinks(state, relinks);
                 resync(state, si);
+                // Inserted lines shift the filter range (model); visibility follows the moved values.
+                refilter(state, si);
                 Ok(Op::Delete { sheet: *sheet, axis: *axis, at: *at, count: n })
             }
             Op::Delete { sheet, axis, at, count } => {
@@ -405,6 +430,7 @@ impl Op {
                     }
                 }
                 resync(state, si);
+                refilter(state, si);
                 Ok(Op::Insert { sheet: *sheet, axis: *axis, at: *at, lines, relinks, merges: Some(merges) })
             }
             Op::Merge { sheet, range } => {
@@ -466,6 +492,7 @@ impl Op {
                 let old: Vec<(usize, usize, String)> =
                     cells.iter().map(|(r, c, _)| (*r, *c, state.engine.input_at(si, *r, *c))).collect();
                 state.set_cell_inputs_on_sheet(si, cells.iter().map(|(r, c, i)| (*r, *c, i.as_str())));
+                refilter(state, si);
                 // Undone in reverse, so a cell set twice in one op gets its
                 // first value back.
                 Ok(Op::SetCells { sheet: *sheet, cells: old.into_iter().rev().collect() })
@@ -616,14 +643,15 @@ impl suite_common_core::ops::Op for Op {
     }
 }
 
-/// Apply `op` and return the ops that undo it.
+/// Trusted replay primitive: apply `op` and return its inverse. Does not
+/// authorize user edits; those must enter through `WorkbookController::apply_ops`.
 pub fn apply(state: &mut WorkbookState, op: &Op) -> Result<Vec<Op>, String> {
     suite_common_core::ops::Op::apply(op, state)
 }
 
-/// Apply `ops` in order, all or nothing: if one fails, the ones before it
-/// are undone and the error returned. On success, the ops that undo the
-/// whole group, in the order to apply them.
+/// Trusted replay/recovery primitive, also used by history: apply `ops` in
+/// order, all or nothing, returning their inverse. Protection is deliberately
+/// checked only at `WorkbookController::apply_ops`, never during restoration.
 pub fn apply_all(state: &mut WorkbookState, ops: &[Op]) -> Result<Vec<Op>, String> {
     suite_common_core::ops::apply_all(state, ops)
 }
@@ -655,10 +683,11 @@ pub(super) fn show_changed_sheet(state: &mut WorkbookState, ops: &[Op]) {
 }
 
 impl super::core::WorkbookController {
-    /// Apply `ops` as one undo step named `description`, all or nothing.
-    /// Returns false (and records nothing) when the group doesn't apply.
+    /// Authorize a user operation against the pre-operation protection state,
+    /// then apply it as one undo step. A rejected group changes neither model,
+    /// engine, active sheet, dirty flag nor history (including redo).
     pub fn apply_ops(&mut self, description: impl Into<String>, ops: Vec<Op>) -> bool {
-        if ops.is_empty() {
+        if ops.is_empty() || !self.authorize_ops(&ops) {
             return false;
         }
         let applied = {
@@ -672,6 +701,18 @@ impl super::core::WorkbookController {
         let Ok(inverses) = applied else { return false };
         self.record(description.into(), inverses);
         true
+    }
+
+    /// Authorize a resize gesture before the view changes any preview size.
+    /// `record_resize` checks again at commit and restores the old size if
+    /// protection changed while dragging.
+    pub fn begin_resize(&mut self) -> bool {
+        if self.sheet_is_protected() {
+            self.protection_rejections = self.protection_rejections.wrapping_add(1);
+            false
+        } else {
+            true
+        }
     }
 
     /// Record a row or column resize the user has already dragged to
