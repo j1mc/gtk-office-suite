@@ -1554,7 +1554,7 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 borders: {
                                     let all = attr_val(&e, "fo:border").as_deref().and_then(parse_para_border);
                                     let side = |name: &str| {
-                                        attr_val(&e, name).as_deref().and_then(parse_para_border).or(all)
+                                        attr_val(&e, name).as_deref().and_then(parse_para_border).or_else(|| all.clone())
                                     };
                                     ParaBorders {
                                         top: side("fo:border-top"),
