@@ -916,7 +916,7 @@ impl Typeset {
             req.right_tab = false;
             let glyph_layout = self.shaper.layout(&req);
             let Some(glyph_line) = glyph_layout.line_readonly(0) else { at = tab + 1; continue };
-            let w = to_pt(glyph_line.index_to_x(1, false)).max(1.0);
+            let w = to_pt(glyph_line.index_to_x(glyph.len() as i32, false)).max(1.0);
             // Dots breathe; rules join up.
             let step = if glyph == "." || glyph == "·" { w * 1.5 } else { w };
             let mut x = to - w - step * 0.5;
