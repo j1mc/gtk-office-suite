@@ -218,11 +218,15 @@ impl WorkbookController {
         use SortDirection::{Ascending, Descending};
         let sorted = self.state.borrow().sheet().sorted_col;
         match sorted {
-            Some((current, Ascending)) if current == col => self.sort_column(col, Descending),
-            Some((current, Descending)) if current == col => {
-                self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None)
+            Some((current, Ascending)) if current == col => {
+                self.sort_column(col, Descending);
             }
-            _ => self.sort_column(col, Ascending),
+            Some((current, Descending)) if current == col => {
+                self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None);
+            }
+            _ => {
+                self.sort_column(col, Ascending);
+            }
         }
     }
 
