@@ -3200,10 +3200,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                 }
                 // Writer's page margin runs to the header; the header's
-                // own height and spacing sit between it and the body, and
-                // Word's top margin (what the model holds) is to the body.
-                // So a header area adds to the top margin, a footer area
-                // to the bottom one.
+                // height (its spacing to the body included, as Writer
+                // counts it) sits between it and the body, and Word's top
+                // margin (what the model holds) is to the body. So a
+                // header area adds to the top margin, a footer area to the
+                // bottom one.
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:header-style" || e.name().as_ref() == "style:footer-style" => {
                     hf_style = Some(e.name().as_ref() == "style:header-style");
                 }
@@ -3213,9 +3214,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     let height = len("fo:min-height").max(len("svg:height"));
                     if let Some(page) = layouts.get_mut(&layout_name) {
                         if hf_style == Some(true) {
-                            page.margin_top_pt += height + len("fo:margin-bottom");
+                            page.margin_top_pt += height;
                         } else {
-                            page.margin_bottom_pt += height + len("fo:margin-top");
+                            page.margin_bottom_pt += height;
                         }
                     }
                 }
