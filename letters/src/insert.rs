@@ -16,6 +16,15 @@ use letters_core::Paragraph;
 /// Replace the selection, or insert at the caret, with `content`. False
 /// when the buffer has no live model or the model refused the edit.
 fn replace_selection(buf: &gtk::TextBuffer, content: Vec<Paragraph>) -> bool {
+    replace_selection_with_breaks(buf, content, &[], letters_core::model::PageGeometry::default())
+}
+
+/// `replace_selection`, putting back the section breaks a copy carried
+/// inside `content` (`letters_core::sections::paste`) in the same edit:
+/// one undo takes out the paste and its breaks. `default_page` is the
+/// first section's page when a document with no page of its own gains
+/// sections.
+fn replace_selection_with_breaks(buf: &gtk::TextBuffer, content: Vec<Paragraph>, breaks: &[letters_core::sections::CarriedBreak], default_page: letters_core::model::PageGeometry) -> bool {
     let Some(live) = crate::live::of(buf) else { return false };
     let (from, to) = selection(buf);
     let mut m = live.borrow_mut();
@@ -27,10 +36,21 @@ fn replace_selection(buf: &gtk::TextBuffer, content: Vec<Paragraph>) -> bool {
     if content.is_empty() {
         return !ops.is_empty() && m.apply_user_ops(buf, &ops, false);
     }
+    let sections = if breaks.is_empty() {
+        None
+    } else {
+        let mut scratch = m.document().clone();
+        if ops.iter().all(|op| letters_core::edit::apply(&mut scratch, op).is_ok()) {
+            letters_core::sections::paste(&scratch, s, &content, breaks, default_page)
+        } else {
+            None
+        }
+    };
     // Where the inserted content ends: the caret goes there, after all of
     // it, not after its first paragraph as the projection would put it.
     let end = s + content.iter().map(|p| letters_core::edit::seq_len(&p.runs)).sum::<usize>() + content.len().saturating_sub(1);
     ops.push(Op::Insert { at: s, content });
+    ops.extend(sections);
     if !m.apply_user_ops(buf, &ops, false) {
         return false;
     }
@@ -93,6 +113,12 @@ fn selection(buf: &gtk::TextBuffer) -> (usize, usize) {
 /// as tab-separated lines (a real table paste needs the buffer table
 /// support tracked in PARITY's bridge gaps).
 pub(crate) fn insert_fragment(buf: &gtk::TextBuffer, frag: &Fragment) {
+    insert_fragment_with_breaks(buf, frag, &[], letters_core::model::PageGeometry::default());
+}
+
+/// `insert_fragment`, with the section breaks a Letters copy carried
+/// beside the fragment (`letters_core::sections::CLIPBOARD_MIME`).
+pub(crate) fn insert_fragment_with_breaks(buf: &gtk::TextBuffer, frag: &Fragment, breaks: &[letters_core::sections::CarriedBreak], default_page: letters_core::model::PageGeometry) {
     let paras = match frag {
         Fragment::Text(paras) => paras.clone(),
         Fragment::Grid(_) => frag
@@ -101,7 +127,8 @@ pub(crate) fn insert_fragment(buf: &gtk::TextBuffer, frag: &Fragment) {
             .map(|line| Paragraph { style: Default::default(), runs: vec![Run::plain(line)] })
             .collect(),
     };
-    replace_selection(buf, paras);
+    let breaks = if matches!(frag, Fragment::Text(_)) { breaks } else { &[] };
+    replace_selection_with_breaks(buf, paras, breaks, default_page);
 }
 
 /// Insert the image at `path` at the cursor, replacing the selection. The
@@ -190,6 +217,30 @@ mod tests {
 
             crate::live::undo(&buf, false);
             assert_eq!(doc(&buf).paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>(), vec!["keep this out".to_string()]);
+        });
+    }
+
+    /// A Letters fragment pasted with the section breaks its copy carried
+    /// puts them back in the same model edit; one undo takes out both.
+    #[test]
+    fn a_paste_puts_back_the_section_breaks_its_copy_carried() {
+        gtk_test(|| {
+            let buf = live_buffer("end");
+            let para = |t: &str| Paragraph { style: Default::default(), runs: vec![Run::plain(t)] };
+            let frag = Fragment::Text(vec![para("one"), para("two")]);
+            let page = letters_core::model::PageGeometry { width_pt: 612.0, height_pt: 792.0, ..Default::default() };
+            let breaks = [letters_core::sections::CarriedBreak { at: 1, geometry: page, header: None, footer: None }];
+            buf.place_cursor(&buf.start_iter());
+
+            insert_fragment_with_breaks(&buf, &frag, &breaks, letters_core::model::PageGeometry::default());
+            let d = doc(&buf);
+            assert_eq!(d.paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>(), vec!["one", "twoend"]);
+            assert_eq!(d.sections.iter().map(|s| (s.range.start, s.range.end, s.geometry)).collect::<Vec<_>>(), vec![(0, 1, page), (1, 2, letters_core::model::PageGeometry::default())]);
+
+            crate::live::undo(&buf, false);
+            let d = doc(&buf);
+            assert!(d.sections.is_empty(), "{:?}", d.sections);
+            assert_eq!(d.to_plain_text(), "end");
         });
     }
 

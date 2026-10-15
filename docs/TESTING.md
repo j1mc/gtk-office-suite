@@ -132,26 +132,35 @@ required contexts, and why each other job is optional, is in
 | `gui-tests.yml` → `smoke` | push/PR to main | yes | tier 2 under Xvfb |
 | `gui-tests.yml` → `vlm-audit` | daily 06:00 UTC, manual | no | tier 3 + screenshot artifacts |
 | `gui-container.yml` | container file changes, weekly, manual | yes (for itself) | builds/verifies/publishes the GUI test image |
-| `feature-verification.yml` | `verify-video` label, manual | yes | records journeys in the container, posts the clips on the PR |
+| `feature-verification.yml` | `verify-video` label, manual | yes | records journeys in the container, posts the clips on the PR; without the label no job starts |
 
 On a pull request, `ci.yml` (check, clippy, the Rust and Python tests, the
 interop corpus, the Flatpak builds) and `gui-tests.yml`'s `smoke` journeys run
 unconditionally, and so does everything that compares what a document looks
-like against LibreOffice: `render-parity.yml` renders the single-feature
-fixtures per app (`Render lab (<app>)`, combined by `Tiers A+B vs
-LibreOffice`) and exports them to PDF (`Export lab (<app>)`, `Export PDF vs
-LibreOffice PDF`), and `render-real.yml` renders about 30 published real
-documents per app (`Real documents (<app>)`). Each ratchets against its
-committed baseline (`baseline.json`, `baseline-export.json`,
-`baseline-real.json`): a document whose verdict gets worse fails the job, and
-so does one that gets better without the PR committing the new baseline. The
-real-document job first asks `tools/render-lab/real_scope.py` whether the
-change reaches that app — its crate and every workspace crate it links, read
-from the Cargo manifests, plus `Cargo.lock`, `Cargo.toml`, `tools/render-lab/`
-and the workflow — and passes in seconds when it does not, so all three checks
-report on every PR and can be required. Path-filtered workflows
-(`file-corpus.yml`, `gui-container.yml`, `release-gate.yml`, `nightly.yml`'s
-oracle) run only when their inputs change.
+like against LibreOffice, for the apps the change can reach:
+`render-parity.yml` renders the single-feature fixtures per app
+(`Render lab (<app>)`, combined by `Tiers A+B vs LibreOffice`) and exports
+them to PDF (`Export lab (<app>)`, `Export PDF vs LibreOffice PDF`), and
+`render-real.yml` renders about 30 published real documents per app
+(`Real documents (<app>)`). Each ratchets against its committed baseline
+(`baseline.json`, `baseline-export.json`, `baseline-real.json`): a document
+whose verdict gets worse fails the job, and so does one that gets better
+without the PR committing the new baseline. Which apps a change reaches comes
+from `tools/render-lab/real_scope.py` — the app's crate and every workspace
+crate it links, read from the Cargo manifests, plus `Cargo.lock`,
+`Cargo.toml`, `tools/render-lab/` and the workflow itself. The real-document
+job asks it per app and passes in seconds when the app is out of reach, so all
+three checks report on every PR and can be required. `render-parity.yml`
+asks once (`Render scope`) and starts lab jobs only for the apps reached; its
+two report jobs run on every PR and fail when the scope or a lab in scope did
+not succeed, so they are its verdict. A docs-only PR starts no lab; push to
+`main`, the nightly schedule and a dispatch render every app.
+Path-filtered workflows (`file-corpus.yml`, `gui-container.yml`,
+`release-gate.yml`, `nightly.yml`'s oracle) run only when their inputs
+change. `release-gate.yml` triggers on the module-ceiling files as well, but
+runs its release builds (two reproducible builds, the source archive, the
+offline Flatpaks, the aarch64 tests) only when a release input changed; it
+runs everything nightly on `main`.
 
 The capability ledger is checked in each lane against that lane's own
 collected tests and recorded outcomes, at the lane's revision: structure and

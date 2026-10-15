@@ -61,6 +61,20 @@ fn box_text(xml: &str) -> String {
 /// results dropped. `None` when the part holds no such field (rdocx's own
 /// reading is then used as it is).
 pub fn template(part_xml: &str) -> Option<String> {
+    let (text, found) = walk(part_xml);
+    found.then_some(text)
+}
+
+/// A header or footer part's text as `template` reads it, whether or not
+/// it holds a page field: a section's own header or footer, which rdocx
+/// reads only for the document's last section.
+pub(crate) fn story_text(part_xml: &str) -> String {
+    walk(part_xml).0
+}
+
+/// The walk behind `template` and `story_text`: the part's text, and
+/// whether it held a PAGE or NUMPAGES field.
+fn walk(part_xml: &str) -> (String, bool) {
     let mut out = String::new();
     let mut found = false;
     let mut paragraphs = 0;
@@ -152,7 +166,7 @@ pub fn template(part_xml: &str) -> Option<String> {
         }
         i = tag_end;
     }
-    found.then_some(out)
+    (out, found)
 }
 
 /// Turn "{page}" and "{total}" in a written header or footer part's text
@@ -170,35 +184,84 @@ pub fn fields(part_xml: &str) -> String {
 }
 
 /// The package paths of the default header and footer parts
-/// ("word/header1.xml"): the last section's references, resolved through
-/// the document's relationships.
+/// ("word/header1.xml"): the first section's references, resolved
+/// through the document's relationships. A document of one section has
+/// one set of section properties, so this is its header and footer; in a
+/// document of several the first section's are the document's own
+/// (`Document::header`, its pictures and alignment).
 pub fn default_parts(document_xml: &str, rels_xml: &str) -> (Option<String>, Option<String>) {
-    let reference = |element: &str| -> Option<String> {
-        let mut id = None;
-        let mut from = 0;
-        while let Some(off) = document_xml[from..].find(&format!("<{element} ")) {
-            let at = from + off;
-            if attr(document_xml, at, "w:type").as_deref() == Some("default") {
-                id = attr(document_xml, at, "r:id");
-            }
-            from = at + 1;
+    let Some(first) = section_properties(document_xml).into_iter().next() else { return (None, None) };
+    let sect = &document_xml[first];
+    let part = |element: &str| default_reference(sect, element).and_then(|id| relationship_target(rels_xml, &id));
+    (part("w:headerReference"), part("w:footerReference"))
+}
+
+/// Where each `w:sectPr` element of `document_xml` is, in document order
+/// (the sections' own: paragraph-level ones, then the body's last). The
+/// old value a `w:sectPrChange` holds is inside its section's element and
+/// is not one of them.
+pub(crate) fn section_properties(document_xml: &str) -> Vec<std::ops::Range<usize>> {
+    const CLOSE: &str = "</w:sectPr>";
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(off) = document_xml[from..].find("<w:sectPr") {
+        let at = from + off;
+        // `<w:sectPrChange` is not a section's element.
+        if !matches!(document_xml.as_bytes().get(at + 9), Some(b' ' | b'>' | b'/')) {
+            from = at + 9;
+            continue;
         }
-        let id = id?;
-        let mut from = 0;
-        while let Some(off) = rels_xml[from..].find("<Relationship ") {
-            let at = from + off;
-            if attr(rels_xml, at, "Id").as_deref() == Some(id.as_str()) {
-                let target = attr(rels_xml, at, "Target")?;
-                return Some(match target.strip_prefix('/') {
-                    Some(abs) => abs.to_string(),
-                    None => format!("word/{target}"),
-                });
-            }
-            from = at + 1;
+        let Some(open_end) = document_xml[at..].find('>').map(|e| at + e + 1) else { break };
+        if document_xml[..open_end].ends_with("/>") {
+            found.push(at..open_end);
+            from = open_end;
+            continue;
         }
-        None
-    };
-    (reference("w:headerReference"), reference("w:footerReference"))
+        // A change's own `w:sectPr` closes first: the section's element
+        // closes after the change does.
+        let first_close = document_xml[open_end..].find(CLOSE).map(|c| open_end + c);
+        let change = document_xml[open_end..]
+            .find("<w:sectPrChange")
+            .map(|c| open_end + c)
+            .filter(|&c| first_close.is_some_and(|close| c < close));
+        let search = change.and_then(|c| document_xml[c..].find("</w:sectPrChange>").map(|e| c + e)).unwrap_or(open_end);
+        let Some(close) = document_xml[search..].find(CLOSE).map(|c| search + c + CLOSE.len()) else { break };
+        found.push(at..close);
+        from = close;
+    }
+    found
+}
+
+/// The relationship id of the `default` reference `element`
+/// (`w:headerReference`, `w:footerReference`) in a section's properties.
+pub(crate) fn default_reference(sect_xml: &str, element: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(off) = sect_xml[from..].find(&format!("<{element} ")) {
+        let at = from + off;
+        if attr(sect_xml, at, "w:type").as_deref() == Some("default") {
+            return attr(sect_xml, at, "r:id");
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// The package path of the part relationship `id` of
+/// `word/document.xml` names ("word/header1.xml").
+pub(crate) fn relationship_target(rels_xml: &str, id: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(off) = rels_xml[from..].find("<Relationship ") {
+        let at = from + off;
+        if attr(rels_xml, at, "Id").as_deref() == Some(id) {
+            let target = attr(rels_xml, at, "Target")?;
+            return Some(match target.strip_prefix('/') {
+                Some(abs) => abs.to_string(),
+                None => format!("word/{target}"),
+            });
+        }
+        from = at + 1;
+    }
+    None
 }
 
 /// How a header or footer part's text is aligned: its first paragraph
@@ -317,5 +380,32 @@ mod tests {
         assert!(written.contains("<w:fldSimple w:instr=\" PAGE \">"), "{written}");
         assert!(!written.contains("{page}"));
         assert_eq!(template(&written).as_deref(), Some("Page {page} of {total}"));
+    }
+
+    /// A part without page fields is no template, but still a section's
+    /// text: an empty paragraph is an explicitly empty header.
+    #[test]
+    fn story_text_reads_a_part_with_or_without_fields() {
+        assert_eq!(story_text("<w:hdr><w:p><w:r><w:t>Appendix</w:t></w:r></w:p><w:p><w:r><w:t>Draft</w:t></w:r></w:p></w:hdr>"), "Appendix\nDraft");
+        assert_eq!(story_text("<w:ftr><w:p></w:p></w:ftr>"), "");
+        let fielded = fields("<w:hdr><w:p><w:r><w:t>Appendix {page}</w:t></w:r></w:p></w:hdr>");
+        assert_eq!(story_text(&fielded), "Appendix {page}");
+    }
+
+    /// Each section's properties, in order, a change's old value inside
+    /// its own; the default parts are the first section's.
+    #[test]
+    fn default_parts_are_the_first_sections() {
+        let document = r#"<w:body><w:p><w:pPr><w:sectPr><w:headerReference w:type="even" r:id="rId9"/><w:headerReference w:type="default" r:id="rId1"/><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:pPr></w:p>
+            <w:p><w:pPr><w:sectPr/></w:pPr></w:p>
+            <w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId2"/><w:footerReference w:type="default" r:id="rId3"/><w:sectPrChange w:id="1"><w:sectPr><w:pgSz w:w="1"/></w:sectPr></w:sectPrChange></w:sectPr></w:body>"#;
+        let spans = section_properties(document);
+        assert_eq!(spans.len(), 3);
+        assert!(document[spans[1].clone()].starts_with("<w:sectPr/>"));
+        assert!(document[spans[2].clone()].ends_with("</w:sectPrChange></w:sectPr>"));
+        assert_eq!(default_reference(&document[spans[0].clone()], "w:headerReference").as_deref(), Some("rId1"));
+        let rels = r#"<Relationships><Relationship Id="rId1" Type="h" Target="header1.xml"/><Relationship Id="rId2" Type="h" Target="/word/header2.xml"/><Relationship Id="rId3" Type="f" Target="footer1.xml"/></Relationships>"#;
+        assert_eq!(default_parts(document, rels), (Some("word/header1.xml".to_string()), None));
+        assert_eq!(relationship_target(rels, "rId2").as_deref(), Some("word/header2.xml"));
     }
 }

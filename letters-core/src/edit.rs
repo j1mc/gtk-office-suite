@@ -184,6 +184,11 @@ pub enum Op {
     /// Set the document's page size, margins and columns (`None`: the
     /// application's default page).
     SetPage { page: Option<crate::model::PageGeometry> },
+    /// Replace the document's sections (`crate::sections`, LET-005S): a
+    /// section break inserted or taken out, or a section's page set. The
+    /// vector must be valid for the paragraphs (`sections::is_valid`);
+    /// `Document::page` follows the first section's geometry.
+    SetSections { sections: Vec<crate::model::DocSection> },
 }
 
 /// Why an op could not be applied. The document is unchanged.
@@ -196,6 +201,9 @@ pub enum EditError {
     TableStructure,
     /// Nothing to insert.
     Empty,
+    /// Sections that do not cover the paragraphs in order, or break a
+    /// table (`sections::is_valid`).
+    Sections,
 }
 
 /// Length of runs in sequence chars (an object is one).
@@ -317,7 +325,30 @@ pub fn slice(doc: &Document, start: usize, end: usize) -> Option<Vec<Paragraph>>
 }
 
 /// Apply `op` to `doc`. Returns the ops that undo it, in order.
+///
+/// An op that adds or removes paragraphs keeps the document's sections
+/// following it (`sections::splice`); when that changed them (or the page
+/// mirroring the first), the undo ends by putting them back verbatim, ids
+/// and all.
 pub fn apply(doc: &mut Document, op: &Op) -> Result<Vec<Op>, EditError> {
+    let before = (!doc.sections.is_empty() && matches!(op, Op::Insert { .. } | Op::Delete { .. } | Op::SetParagraphs { .. }))
+        .then(|| (doc.sections.clone(), doc.page));
+    let mut inverse = apply_op(doc, op)?;
+    if let Some((sections, page)) = before {
+        if let Some(first) = doc.sections.first() {
+            doc.page = Some(first.geometry);
+        }
+        if doc.sections != sections || doc.page != page {
+            inverse.push(Op::SetSections { sections });
+            if doc.page != page {
+                inverse.push(Op::SetPage { page });
+            }
+        }
+    }
+    Ok(inverse)
+}
+
+fn apply_op(doc: &mut Document, op: &Op) -> Result<Vec<Op>, EditError> {
     match op {
         Op::Insert { at, content } => insert(doc, *at, content),
         Op::Delete { at, len } => delete(doc, *at, *len),
@@ -331,6 +362,7 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Vec<Op>, EditError> {
                 return Err(EditError::Empty);
             }
             let removed: Vec<Paragraph> = doc.paragraphs.splice(para..para + remove, insert.iter().cloned()).collect();
+            crate::sections::splice(doc, para, remove, insert.len());
             Ok(vec![Op::SetParagraphs { para, remove: insert.len(), insert: removed }])
         }
         Op::SetComment { id, comment } => Ok(vec![Op::SetComment { id: *id, comment: set_comment(doc, *id, comment.clone()) }]),
@@ -340,6 +372,24 @@ pub fn apply(doc: &mut Document, op: &Op) -> Result<Vec<Op>, EditError> {
         }]),
         Op::SetFootnotes { notes } => Ok(vec![Op::SetFootnotes { notes: std::mem::replace(&mut doc.footnotes, notes.clone()) }]),
         Op::SetPage { page } => Ok(vec![Op::SetPage { page: std::mem::replace(&mut doc.page, *page) }]),
+        Op::SetSections { sections } => {
+            if !crate::sections::is_valid(doc, sections) {
+                return Err(EditError::Sections);
+            }
+            let old = std::mem::replace(&mut doc.sections, sections.clone());
+            let page = doc.page;
+            if let Some(first) = doc.sections.first() {
+                doc.page = Some(first.geometry);
+            }
+            if let Some(top) = doc.sections.iter().map(|s| s.id + 1).max() {
+                doc.next_section_id = doc.next_section_id.max(top);
+            }
+            let mut inverse = vec![Op::SetSections { sections: old }];
+            if doc.page != page {
+                inverse.push(Op::SetPage { page });
+            }
+            Ok(inverse)
+        }
         Op::SetParaStyle { at, style } => {
             let (pi, _) = locate(doc, *at).ok_or(EditError::OutOfRange)?;
             let para = &mut doc.paragraphs[pi];
@@ -394,6 +444,7 @@ fn insert(doc: &mut Document, at: usize, content: &[Paragraph]) -> Result<Vec<Op
             normalize(&mut p.runs);
         }
         doc.paragraphs.splice(pi + 1..pi + 1, new);
+        crate::sections::splice(doc, pi, 1, 1 + rest.len());
     }
     Ok(vec![Op::Delete { at, len }])
 }
@@ -415,6 +466,9 @@ fn delete(doc: &mut Document, at: usize, len: usize) -> Result<Vec<Op>, EditErro
     normalize(&mut head);
     doc.paragraphs[sp].runs = head;
     doc.paragraphs.drain(sp + 1..=ep);
+    if ep > sp {
+        crate::sections::splice(doc, sp, ep - sp + 1, 1);
+    }
     // Undo: insert what was removed. Its first paragraph's style is the
     // joined paragraph's own (unchanged), so only later ones matter.
     Ok(vec![Op::Insert { at, content: removed }])
@@ -493,7 +547,19 @@ pub fn typing(doc: &Document, at: usize, text: &str) -> Option<Op> {
 /// This is how an edit made anywhere — a formatting command, a structured
 /// edit that rebuilds the document — reaches the live model as ops, so it
 /// has an undo and could be replicated.
+///
+/// When `b`'s sections differ from `a`'s, a final `SetSections` makes them
+/// `b`'s; when they are the same, the paragraph ops move them as any edit
+/// does (`sections::splice`).
 pub fn diff(a: &Document, b: &Document) -> Vec<Op> {
+    let mut ops = diff_paragraphs(a, b);
+    if a.sections != b.sections {
+        ops.push(Op::SetSections { sections: b.sections.clone() });
+    }
+    ops
+}
+
+fn diff_paragraphs(a: &Document, b: &Document) -> Vec<Op> {
     let (pa, pb) = (&a.paragraphs, &b.paragraphs);
     let head = pa.iter().zip(pb).take_while(|(x, y)| x == y).count();
     if head == pa.len() && head == pb.len() {

@@ -617,7 +617,10 @@ def verdict(m):
     if m["words"] is not None and (m["ref_words"] or 0) >= 3 and m["words"] < RED_WORDS:
         return "red"
     ok = [m["ssim"] >= GREEN_SSIM]
-    if m["words"] is not None:
+    # As for red: a reference with under three words has no text to recall,
+    # only what OCR makes of shapes (a star read as "006"), so it does not
+    # decide green either.
+    if m["words"] is not None and (m.get("ref_words") or 0) >= 3:
         ok.append(m["words"] >= GREEN_WORDS)
     if m.get("lost_lines") is not None:
         ok.append(m["lost_lines"] == 0)
@@ -888,12 +891,14 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--baseline")
     ap.add_argument("--update-baseline", action="store_true")
-    ap.add_argument("--app")
+    # Repeatable: the combine job in render-parity.yml compares only the apps
+    # a pull request reaches (`--app letters --app decks`).
+    ap.add_argument("--app", action="append")
     args = ap.parse_args()
 
     manifest = json.load(open(os.path.join(args.fixtures, "manifest.json")))
     if args.app:
-        manifest = [fx for fx in manifest if fx["app"] == args.app]
+        manifest = [fx for fx in manifest if fx["app"] in args.app]
     results, cache, agreement, printed = {}, {}, {}, {}
     for fx in manifest:
         key = f"{fx['app']}/{fx['feature']}"
