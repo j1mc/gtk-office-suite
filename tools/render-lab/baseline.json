@@ -28,6 +28,14 @@
     "B": "green",
     "C": "green"
   },
+  "decks/pay-centre-reduced-line-breaks": {
+    "A": "amber",
+    "B": "amber"
+  },
+  "decks/pay-centre-reduced-picture-background": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/rotation": {
     "A": "green",
     "B": "green",

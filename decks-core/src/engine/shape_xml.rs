@@ -288,7 +288,7 @@ pub(crate) fn theme(theme_xml: &str) -> Theme {
         for slot in &scheme.children {
             let value = slot.children.first().and_then(|c| match c.name.as_str() {
                 "a:srgbClr" => c.attr("val").and_then(Color::from_hex),
-                "a:sysClr" => c.attr("lastClr").and_then(Color::from_hex),
+                "a:sysClr" => system_color(c),
                 _ => None,
             });
             if let Some(c) = value {
@@ -357,12 +357,28 @@ fn clone_node(n: &Node) -> Node {
 
 const COLOR_ELEMENTS: [&str; 4] = ["a:srgbClr", "a:schemeClr", "a:sysClr", "a:prstClr"];
 
+/// A system colour (`a:sysClr`): the colour the system answers for it,
+/// not the one the author's machine last had (`lastClr`). The window and
+/// its text are the ones a theme names (lt1/dk1); LibreOffice and a stock
+/// PowerPoint draw them white and black. A theme saved on a machine in a
+/// dark mode records `window` with `lastClr="202020"`, and taking that
+/// turned every bg1 background near-black (the 2024-2025 delegated
+/// authorities report, DCK-004). Any other system colour falls back to
+/// its recorded `lastClr`.
+pub(crate) fn system_color(node: &Node) -> Option<Color> {
+    match node.attr("val") {
+        Some("window") => Some(Color(0xFF, 0xFF, 0xFF)),
+        Some("windowText") => Some(Color(0, 0, 0)),
+        _ => node.attr("lastClr").and_then(Color::from_hex),
+    }
+}
+
 /// A colour element with its modifiers applied, `phClr` standing for
 /// `placeholder` (the `p:style` reference's own colour).
 fn color_of(node: &Node, theme: &Theme, placeholder: Option<Color>) -> Option<Color> {
     let base = match node.name.as_str() {
         "a:srgbClr" => node.attr("val").and_then(Color::from_hex),
-        "a:sysClr" => node.attr("lastClr").and_then(Color::from_hex),
+        "a:sysClr" => system_color(node),
         "a:schemeClr" => match node.attr("val") {
             Some("phClr") => placeholder,
             Some(name) => theme.slot(name),
@@ -454,7 +470,7 @@ fn direct_color_ref(node: &Node) -> Option<super::theme::ColorRef> {
     let c = node.children.iter().find(|c| COLOR_ELEMENTS.contains(&c.name.as_str()))?;
     match c.name.as_str() {
         "a:srgbClr" => c.attr("val").and_then(Color::from_hex).map(|c| ColorRef::Rgb(c.to_hex())),
-        "a:sysClr" => c.attr("lastClr").and_then(Color::from_hex).map(|c| ColorRef::Rgb(c.to_hex())),
+        "a:sysClr" => system_color(c).map(|c| ColorRef::Rgb(c.to_hex())),
         "a:prstClr" => match c.attr("val") {
             Some("black") => Some(ColorRef::Rgb("000000".to_string())),
             Some("white") => Some(ColorRef::Rgb("FFFFFF".to_string())),
@@ -830,6 +846,23 @@ mod tests {
         assert_eq!(t.slot("accent1"), Some(Color(0x4F, 0x81, 0xBD)));
         assert_eq!(t.slot("tx1"), Some(Color(0, 0, 0)));
         assert_eq!(t.slot("accent2"), Some(Color(0xED, 0x7D, 0x31)), "unstated slots keep the default");
+    }
+
+    /// DCK-004: the 2024-2025 delegated authorities report's theme was
+    /// saved in a dark mode, `lt1` recorded as `window` with
+    /// `lastClr="202020"`. The window is white (as LibreOffice draws it),
+    /// so a master's `bg1` background stays white rather than near-black.
+    #[test]
+    fn a_dark_mode_last_colour_does_not_become_the_window_colour() {
+        let xml = r#"<a:theme name="t"><a:themeElements><a:clrScheme name="s">
+            <a:dk1><a:sysClr val="windowText" lastClr="FFFFFF"/></a:dk1>
+            <a:lt1><a:sysClr val="window" lastClr="202020"/></a:lt1>
+            <a:dk2><a:sysClr val="highlight" lastClr="0078D7"/></a:dk2>
+            </a:clrScheme></a:themeElements></a:theme>"#;
+        let t = theme(xml);
+        assert_eq!(t.slot("bg1"), Some(Color(0xFF, 0xFF, 0xFF)));
+        assert_eq!(t.slot("tx1"), Some(Color(0, 0, 0)));
+        assert_eq!(t.slot("dk2"), Some(Color(0x00, 0x78, 0xD7)), "other system colours keep their last colour");
     }
 
     #[test]

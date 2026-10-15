@@ -1018,7 +1018,10 @@ def decks(img):
 
     # DCK-004, reduced from the same title (#1397): one paragraph broken
     # over three lines with a:br. Dropping the breaks welds "and" to the
-    # next line's first word and rewraps the paragraph.
+    # next line's first word and rewraps the paragraph. Measured amber
+    # (run 38699284598): words 1.0, lost_lines 0, SSIM 0.86, but disp
+    # 7.1pt > 6pt because our 100% line pitch for 36pt Arial is ~7% tighter
+    # than Impress's — a line-height defect of its own, not the breaks.
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])
     tb = s.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(11), Inches(3)).text_frame
@@ -1032,6 +1035,28 @@ def decks(img):
         run.font.size, run.font.name = Pt(36), "Arial"
     save(p, "pay-centre-reduced-line-breaks",
          "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
+
+    # DCK-004, reduced from the 2024-2025 delegated authorities report: its
+    # theme was saved on a machine in a dark mode, so lt1 is the system
+    # "window" colour with lastClr="202020". The master's background is
+    # bg1 (lt1), and the window is white: the slide must stay white.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1.5)).text_frame
+    fixed_box(tb)
+    tb.text = "Dark text on the theme's white window background"
+    tb.paragraphs[0].runs[0].font.size = Pt(32)
+    tb.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x54, 0x57, 0x5A)
+    themes = [part for part in p.part.package.iter_parts() if str(part.partname).startswith("/ppt/theme/")]
+    assert themes, "python-pptx's template has a theme part"
+    import re
+    for part in themes:
+        xml = part.blob.decode("utf-8")
+        dark = re.sub(r"<a:lt1>.*?</a:lt1>", '<a:lt1><a:sysClr val="window" lastClr="202020"/></a:lt1>', xml, count=1, flags=re.S)
+        assert dark != xml, "the template's theme names lt1"
+        part._blob = dark.encode("utf-8")
+    save(p, "delegated-authorities-reduced-dark-mode-window",
+         "A white slide (theme lt1 = system window, saved with lastClr 202020) with grey 32pt text")
 
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])
