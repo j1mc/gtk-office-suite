@@ -125,7 +125,13 @@ jobs:
       # left behind, so they are about the harness rather than about any
       # one app. A per-app -k filter would skip them on exactly the
       # changes most likely to break artifact capture.
+      #
+      # !cancelled(): independent of the app journeys, so one failing app
+      # journey must not leave the harness evidence unrun — the ledger step
+      # below would otherwise find no harness report and could judge none
+      # of the other cited journeys either.
       - name: Harness retains evidence when a journey fails before its body
+        if: ${{ !cancelled() }}
         env:
           GUI_TEST_VIDEO: failures
           GUI_TEST_VIDEO_DIR: ${{ github.workspace }}/tests/gui/videos
