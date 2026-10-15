@@ -875,6 +875,7 @@ def decks(img):
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
     from pptx.util import Inches, Pt
 
     d = os.path.join(OUT, "decks")
@@ -927,7 +928,6 @@ def decks(img):
     # What PowerPoint records after shrinking an overflowing body: 62.5%
     # text, 20% less line spacing. Stated, not computed by the renderer.
     from lxml import etree
-    from pptx.oxml.ns import qn
     fit = etree.SubElement(body._bodyPr, qn("a:normAutofit"))
     fit.set("fontScale", "62500")
     fit.set("lnSpcReduction", "20000")
@@ -952,6 +952,22 @@ def decks(img):
         sh.fill.solid()
         sh.fill.fore_color.rgb = RGBColor(*color)
     save(p, "shapes", "Red rectangle, green ellipse, blue rounded rectangle in a row")
+
+    # The presets drawn with BetterOffice's DrawingML outlines
+    # (decks-core shape.rs, borrowed_outline): stars, polygons, arrows,
+    # a donut's hole, a cube's faces, callouts. Without them each was its box.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    presets = ["star4", "star6", "star8", "star10", "star12",
+               "heptagon", "decagon", "dodecagon", "leftRightArrow", "bentArrow",
+               "corner", "foldedCorner", "noSmoking", "donut", "cube",
+               "flowChartTerminator", "wedgeRoundRectCallout", "wedgeEllipseCallout", "cloudCallout", "mathMultiply"]
+    for i, prst in enumerate(presets):
+        sh = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.4 + (i % 5) * 2.6), Inches(0.4 + (i // 5) * 1.8), Inches(2.0), Inches(1.2))
+        sh._element.spPr.find(qn("a:prstGeom")).set("prst", prst)
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = RGBColor(40, 80, 220)
+    save(p, "preset-shapes", "Twenty preset shapes in four rows: stars, polygons, arrows, a donut, a cube, callouts; none a plain box")
 
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])

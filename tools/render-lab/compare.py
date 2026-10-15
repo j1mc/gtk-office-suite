@@ -611,7 +611,10 @@ def verdict(m):
     if m["words"] is not None and (m["ref_words"] or 0) >= 3 and m["words"] < RED_WORDS:
         return "red"
     ok = [m["ssim"] >= GREEN_SSIM]
-    if m["words"] is not None:
+    # As for red: a reference with under three words has no text to recall,
+    # only what OCR makes of shapes (a star read as "006"), so it does not
+    # decide green either.
+    if m["words"] is not None and (m.get("ref_words") or 0) >= 3:
         ok.append(m["words"] >= GREEN_WORDS)
     if m.get("lost_lines") is not None:
         ok.append(m["lost_lines"] == 0)
