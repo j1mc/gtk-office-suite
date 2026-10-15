@@ -35,6 +35,13 @@ pub struct Deck {
 /// inch — the same 9525 EMU per unit `SlideScale` assumes.
 pub const MODEL_UNITS_PER_INCH: f64 = 96.0;
 
+/// A line break inside a paragraph, as run text holds it: U+2028 (LINE
+/// SEPARATOR), which Pango breaks the line at without starting a
+/// paragraph. pptx writes it `a:br`, ODF `text:line-break`. A `'\n'` in run
+/// text is a paragraph break; this is not one, so paragraph metadata
+/// (`TextBody` paragraphs, bullets, spacing) is unaffected by it.
+pub const LINE_BREAK: char = '\u{2028}';
+
 /// The model slide on a PDF page, in points (10in x 5.625in at 72pt/in).
 /// This is the "real slide size" the Cairo PDF export uses: the readers scale
 /// every source onto the 960x540 model slide, so drawing that slide is what

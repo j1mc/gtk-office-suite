@@ -1016,6 +1016,23 @@ def decks(img):
     save(p, "pay-centre-reduced-picture-background",
          "A navy picture fills the slide (light blue box, white footer band) under a white 40pt title")
 
+    # DCK-004, reduced from the same title (#1397): one paragraph broken
+    # over three lines with a:br. Dropping the breaks welds "and" to the
+    # next line's first word and rewraps the paragraph.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(11), Inches(3)).text_frame
+    fixed_box(tb)
+    para = tb.paragraphs[0]
+    for i, line in enumerate(("Line breaks inside one paragraph –", "the second line ends here and", "Departmental Surcharge starts the third")):
+        if i:
+            para.add_line_break()
+        run = para.add_run()
+        run.text = line
+        run.font.size, run.font.name = Pt(36), "Arial"
+    save(p, "pay-centre-reduced-line-breaks",
+         "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
+
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])
     rows, cols = 3, 3

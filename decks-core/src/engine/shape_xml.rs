@@ -610,7 +610,15 @@ fn runs_of(tx_body: &Node) -> Vec<letters_core::model::Run> {
         if pi > 0 {
             runs.push(Run { text: "\n".into(), style: RunStyle::default() });
         }
-        for r in p.children_named("a:r") {
+        for r in p.children.iter().filter(|c| c.name == "a:r" || c.name == "a:br") {
+            // A line break inside the paragraph, on the run before it.
+            if r.name == "a:br" {
+                match runs.last_mut().filter(|last: &&mut Run| !last.text.ends_with('\n')) {
+                    Some(last) => last.text.push(super::LINE_BREAK),
+                    None => runs.push(Run { text: super::LINE_BREAK.to_string(), style: RunStyle::default() }),
+                }
+                continue;
+            }
             let mut style = RunStyle::default();
             if let Some(rpr) = r.child("a:rPr") {
                 let on = |k: &str| matches!(rpr.attr(k), Some("1") | Some("true"));

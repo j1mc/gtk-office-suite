@@ -217,14 +217,18 @@ fn master_style_prefix(master_idx: usize) -> String {
     format!("MT{}_", master_idx + 1)
 }
 
+/// Escaped paragraph text, a line break inside it (`LINE_BREAK`) written
+/// as ODF's `text:line-break`.
+fn esc_breaks(text: &str) -> String {
+    esc(text).replace(crate::engine::LINE_BREAK, "<text:line-break/>")
+}
+
 fn run_span(run: &Run, style_idx: usize, prefix: &str) -> String {
+    let text = esc_breaks(&run.text);
     if run.style == RunStyle::default() {
-        esc(&run.text)
+        text
     } else {
-        format!(
-            "<text:span text:style-name=\"{prefix}{style_idx}\">{}</text:span>",
-            esc(&run.text)
-        )
+        format!("<text:span text:style-name=\"{prefix}{style_idx}\">{text}</text:span>")
     }
 }
 
@@ -563,7 +567,7 @@ fn shapes_xml(
                     use crate::engine::shape::ShapeKind;
                     let frame = body.frame.as_ref().expect("matched on it");
                     let inner: Vec<String> = if runs.is_empty() {
-                        text.split('\n').map(esc).collect()
+                        text.split('\n').map(esc_breaks).collect()
                     } else {
                         crate::engine::text_body::paragraphs(runs)
                             .iter()
@@ -612,7 +616,7 @@ fn shapes_xml(
                 SlideObject::TextBox { text, x, y, w, h, rotation, runs, body } => {
                     let inner: String = if runs.is_empty() {
                         text.split('\n')
-                            .map(|l| format!("<text:p>{}</text:p>", esc(l)))
+                            .map(|l| format!("<text:p>{}</text:p>", esc_breaks(l)))
                             .collect()
                     } else {
                         styled_paragraphs(runs, style_of, prefix)
@@ -1772,6 +1776,16 @@ fn parse_pages(
                 _ => {}
             },
             Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                // A line break inside the paragraph: a run of its own, in
+                // the span's look, so text and runs stay one string.
+                "text:line-break" if in_text => {
+                    if let Some((lines, runs)) = textbox.as_mut() {
+                        if let Some(last) = lines.last_mut() {
+                            last.push(crate::engine::LINE_BREAK);
+                        }
+                        runs.push(Run { text: crate::engine::LINE_BREAK.to_string(), style: span_style.clone().unwrap_or_default() });
+                    }
+                }
                 // An empty paragraph, `<text:p/>`: how Impress writes a
                 // blank line. It is a paragraph all the same.
                 "text:p" => {

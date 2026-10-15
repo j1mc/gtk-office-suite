@@ -279,6 +279,18 @@ struct PendingShape {
 }
 
 impl PendingShape {
+    /// A line break inside the paragraph (`a:br`): on the run before it,
+    /// or a run of its own when the paragraph has none yet.
+    fn line_break(&mut self) {
+        if self.pending_breaks == 0 && !self.runs.is_empty() {
+            if let Some(r) = self.runs.last_mut() {
+                r.text.push(super::LINE_BREAK);
+            }
+        } else {
+            self.push_run(super::LINE_BREAK.to_string());
+        }
+    }
+
     /// Record one `a:t`'s text as a run, breaking the line first if a
     /// paragraph closed since the last one.
     fn push_run(&mut self, text: String) {
@@ -833,6 +845,13 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                         let name = e.name();
                         match name.as_ref() {
                             "p:bg" => in_bg = true,
+                            // A break with properties of its own (`a:rPr`
+                            // inside) is an element, not an empty one.
+                            "a:br" => {
+                                if let Some(shape) = current_shape.as_mut() {
+                                    shape.line_break();
+                                }
+                            }
                             "a:blipFill" if in_bg && current_shape.is_none() && current_picture.is_none() => in_bg_blip = true,
                             "a:fillRect" if in_bg_blip => background_fill = parse_fill_rect(e),
                             "p:grpSp" => groups.push(GroupFrame::default()),
@@ -976,6 +995,11 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                             "a:chOff" | "a:chExt" if in_grp_pr => {
                                 if let Some(g) = groups.last_mut() {
                                     g.note(e);
+                                }
+                            }
+                            "a:br" => {
+                                if let Some(shape) = current_shape.as_mut() {
+                                    shape.line_break();
                                 }
                             }
                             // See the master walker: `<a:p/>` is a blank line.
@@ -1729,6 +1753,18 @@ fn master_shapes(
             }
             Event::Start(ref e) | Event::Empty(ref e) => match e.name().as_ref() {
                 "p:bg" => in_bg = true,
+                // A line break inside the paragraph, as on a slide.
+                "a:br" => {
+                    if let Some(p) = cur.as_mut() {
+                        if p.pending_breaks == 0 && !p.runs.is_empty() {
+                            if let Some(r) = p.runs.last_mut() {
+                                r.text.push(super::LINE_BREAK);
+                            }
+                        } else {
+                            p.push_run(super::LINE_BREAK.to_string());
+                        }
+                    }
+                }
                 "p:sp" => {
                     cur = Some(Pending {
                         x: 0.0,
