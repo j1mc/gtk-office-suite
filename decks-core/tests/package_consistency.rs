@@ -128,6 +128,7 @@ fn opaque_dependency_survives_unrelated_edit() {
         decks_core::engine::Slide {
             title: "added".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id: None,

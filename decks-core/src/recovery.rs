@@ -120,6 +120,10 @@ struct RecoveryContext {
 enum AssetOwner {
     Slide(u64),
     Master(u64),
+    /// A slide's background picture, by stable slide id (`object` is 0).
+    /// Snapshots written before it existed never name it, so they decode
+    /// unchanged.
+    SlideBackground(u64),
 }
 
 /// One picture's bytes, captured at snapshot time so recovery does not
@@ -387,6 +391,9 @@ fn capture_assets(deck: &Deck, unresolved: &mut Vec<String>) -> Vec<RecoveryAsse
         }
     };
     for slide in &deck.slides {
+        if let Some(picture) = &slide.background_picture {
+            capture(AssetOwner::SlideBackground(slide.ids.slide), 0, &picture.path);
+        }
         for (index, object) in slide.objects.iter().enumerate() {
             if let crate::engine::SlideObject::Image { path, .. } = object {
                 let id = slide.ids.objects.get(index).copied().unwrap_or(0);
@@ -432,6 +439,12 @@ fn restage_assets(deck: &mut Deck, assets: &[RecoveryAsset], unresolved: &mut Ve
                     crate::engine::SlideObject::Image { path, .. } => Some(path),
                     _ => None,
                 }),
+            AssetOwner::SlideBackground(slide_id) => deck
+                .slides
+                .iter_mut()
+                .find(|s| s.ids.slide == slide_id)
+                .and_then(|s| s.background_picture.as_mut())
+                .map(|p| &mut p.path),
             AssetOwner::Master(master_id) => deck
                 .masters
                 .iter_mut()
@@ -469,6 +482,7 @@ mod tests {
             slides: vec![crate::engine::Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![crate::engine::SlideObject::TextBox {
                     text: text.into(),
                     x: 10.0, y: 10.0, w: 200.0, h: 50.0,
@@ -530,5 +544,29 @@ mod tests {
             panic!("a newer version must fall back to its package");
         };
         assert_eq!(back, package);
+    }
+
+    /// A slide's background picture is held in the snapshot, so a crash
+    /// after its file is gone still recovers it (DCK-004).
+    #[test]
+    fn a_background_picture_is_captured_and_restaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("bg.png");
+        let bytes = b"background picture bytes".to_vec();
+        std::fs::write(&src, &bytes).unwrap();
+        let mut deck = text_deck("over a picture");
+        let fill = crate::engine::FillRect { left: -0.01, right: -0.01, ..Default::default() };
+        deck.slides[0].background_picture = Some(crate::engine::BackgroundPicture { path: src.to_string_lossy().into_owned(), fill });
+        let controller = DecksController::new(vec![], vec![]);
+        controller.install_opened_deck(deck, DeckSourceContext::capture(std::path::Path::new("/nonexistent/deck.pptx")));
+        let encoded = encode_snapshot(&controller, "pptx").expect("encode");
+        std::fs::remove_file(&src).unwrap();
+        let SnapshotKind::Versioned(back) = decode_snapshot(&encoded) else {
+            panic!("a snapshot this build wrote must decode as versioned");
+        };
+        assert!(back.unresolved_assets.is_empty(), "{:?}", back.unresolved_assets);
+        let picture = back.deck.slides[0].background_picture.as_ref().expect("the background picture");
+        assert_eq!(picture.fill, fill);
+        assert_eq!(std::fs::read(&picture.path).unwrap(), bytes);
     }
 }

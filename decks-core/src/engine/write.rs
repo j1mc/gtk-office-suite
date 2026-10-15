@@ -293,42 +293,57 @@ fn write_paragraphs<W: std::io::Write>(
         if piece.is_empty() {
             continue;
         }
-        writer.write_event(Event::Start(BytesStart::new("a:r")))?;
-        let mut r_pr = BytesStart::new("a:rPr");
-        r_pr.push_attribute(("lang", "en-US"));
-        let sz = (file_size(run.style.font_size_hp.unwrap_or(36) as f64) * 50.0).round() as u32;
-        r_pr.push_attribute(("sz", sz.to_string().as_str()));
-        if run.style.bold { r_pr.push_attribute(("b", "1")); }
-        if run.style.italic { r_pr.push_attribute(("i", "1")); }
-        if run.style.underline { r_pr.push_attribute(("u", "sng")); }
-        if run.style.strikethrough { r_pr.push_attribute(("strike", "sngStrike")); }
-        let family = run.style.font_family.as_deref().map(str::trim).filter(|f| !f.is_empty());
-        if run.style.color.is_some() || family.is_some() {
-            writer.write_event(Event::Start(r_pr))?;
-            // CT_TextCharacterProperties order: the fill, then a:latin.
-            if let Some(color) = &run.style.color {
-                writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
-                let mut clr = BytesStart::new("a:srgbClr");
-                clr.push_attribute(("val", color.to_uppercase().as_str()));
-                writer.write_event(Event::Empty(clr))?;
-                writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
+        // A line break inside the paragraph (`LINE_BREAK`) is an `a:br`
+        // between runs of the same look, not a character in `a:t`.
+        for (k, line) in piece.split(crate::engine::LINE_BREAK).enumerate() {
+            if k > 0 {
+                writer.write_event(Event::Empty(BytesStart::new("a:br")))?;
             }
-            if let Some(family) = family {
-                let mut latin = BytesStart::new("a:latin");
-                latin.push_attribute(("typeface", family));
-                writer.write_event(Event::Empty(latin))?;
+            if !line.is_empty() {
+                write_run(writer, &run.style, line)?;
             }
-            writer.write_event(Event::End(BytesEnd::new("a:rPr")))?;
-        } else {
-            writer.write_event(Event::Empty(r_pr))?;
         }
-        writer.write_event(Event::Start(BytesStart::new("a:t")))?;
-        let escaped = quick_xml::escape::escape(piece.as_str());
-        writer.write_event(Event::Text(BytesText::new(&escaped)))?;
-        writer.write_event(Event::End(BytesEnd::new("a:t")))?;
-        writer.write_event(Event::End(BytesEnd::new("a:r")))?;
     }
     writer.write_event(Event::End(BytesEnd::new("a:p")))?;
+    Ok(())
+}
+
+/// One `a:r`: `text` in the look `style` gives it.
+fn write_run<W: std::io::Write>(writer: &mut Writer<W>, style: &RunStyle, text: &str) -> Result<(), quick_xml::Error> {
+    writer.write_event(Event::Start(BytesStart::new("a:r")))?;
+    let mut r_pr = BytesStart::new("a:rPr");
+    r_pr.push_attribute(("lang", "en-US"));
+    let sz = (file_size(style.font_size_hp.unwrap_or(36) as f64) * 50.0).round() as u32;
+    r_pr.push_attribute(("sz", sz.to_string().as_str()));
+    if style.bold { r_pr.push_attribute(("b", "1")); }
+    if style.italic { r_pr.push_attribute(("i", "1")); }
+    if style.underline { r_pr.push_attribute(("u", "sng")); }
+    if style.strikethrough { r_pr.push_attribute(("strike", "sngStrike")); }
+    let family = style.font_family.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    if style.color.is_some() || family.is_some() {
+        writer.write_event(Event::Start(r_pr))?;
+        // CT_TextCharacterProperties order: the fill, then a:latin.
+        if let Some(color) = &style.color {
+            writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
+            let mut clr = BytesStart::new("a:srgbClr");
+            clr.push_attribute(("val", color.to_uppercase().as_str()));
+            writer.write_event(Event::Empty(clr))?;
+            writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
+        }
+        if let Some(family) = family {
+            let mut latin = BytesStart::new("a:latin");
+            latin.push_attribute(("typeface", family));
+            writer.write_event(Event::Empty(latin))?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("a:rPr")))?;
+    } else {
+        writer.write_event(Event::Empty(r_pr))?;
+    }
+    writer.write_event(Event::Start(BytesStart::new("a:t")))?;
+    let escaped = quick_xml::escape::escape(text);
+    writer.write_event(Event::Text(BytesText::new(&escaped)))?;
+    writer.write_event(Event::End(BytesEnd::new("a:t")))?;
+    writer.write_event(Event::End(BytesEnd::new("a:r")))?;
     Ok(())
 }
 
@@ -951,6 +966,24 @@ fn write_background<W: std::io::Write>(
     Ok(())
 }
 
+/// `p:bg` for a picture stretched over the slide (relationship `rel_id`),
+/// its `a:fillRect` insets in thousandths of a percent and omitted when
+/// the picture fills the slide exactly, as PowerPoint writes it.
+fn background_picture_xml(rel_id: &str, fill: &crate::engine::FillRect) -> String {
+    let inset = |name: &str, v: f64| {
+        let v = (v * 100_000.0).round() as i64;
+        if v == 0 { String::new() } else { format!(" {name}=\"{v}\"") }
+    };
+    format!(
+        "<p:bg><p:bgPr><a:blipFill dpi=\"0\" rotWithShape=\"1\"><a:blip r:embed=\"{rel_id}\"/><a:srcRect/>\
+         <a:stretch><a:fillRect{}{}{}{}/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>",
+        inset("l", fill.left),
+        inset("t", fill.top),
+        inset("r", fill.right),
+        inset("b", fill.bottom),
+    )
+}
+
 /// Write a master's decoration shapes.
 ///
 /// Images are skipped: they would need a media part and a relationship per
@@ -1545,9 +1578,17 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
 
             // Slide background when the slide states one, white included:
             // an explicit white slide on a coloured master stays white
-            // (DCK-006), and Impress preserves an explicit p:bg.
+            // (DCK-006), and Impress preserves an explicit p:bg. A picture
+            // is written as PowerPoint writes one: a stretched blip fill
+            // with its `a:fillRect`, the picture a media part of its own.
             let bg = slide.background.trim_start_matches('#');
-            if bg.len() == 6 {
+            if let Some(pic) = &slide.background_picture {
+                let img_idx = images_to_add.len() + 1;
+                images_to_add.push(pic.path.clone());
+                let rel_id = format!("rId{}", slide_rels.len() + 1);
+                slide_rels.push((rel_id.clone(), IMAGE_REL, format!("../media/image{img_idx}.png")));
+                writer.get_mut().write_all(background_picture_xml(&rel_id, &pic.fill).as_bytes()).map_err(|e| e.to_string())?;
+            } else if bg.len() == 6 {
                 writer.write_event(Event::Start(BytesStart::new("p:bg"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("p:bgPr"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("a:solidFill"))).map_err(|e| e.to_string())?;
@@ -1794,6 +1835,7 @@ mod emu_rounding_tests {
             slides: vec![Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 notes: String::new(),
                 master_id: None,
                 objects: vec![SlideObject::TextBox {

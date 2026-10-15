@@ -134,6 +134,25 @@ required contexts, and why each other job is optional, is in
 | `gui-container.yml` | container file changes, weekly, manual | yes (for itself) | builds/verifies/publishes the GUI test image |
 | `feature-verification.yml` | `verify-video` label, manual | yes | records journeys in the container, posts the clips on the PR |
 
+On a pull request, `ci.yml` (check, clippy, the Rust and Python tests, the
+interop corpus, the Flatpak builds) and `gui-tests.yml`'s `smoke` journeys run
+unconditionally, and so does everything that compares what a document looks
+like against LibreOffice: `render-parity.yml` renders the single-feature
+fixtures per app (`Render lab (<app>)`, combined by `Tiers A+B vs
+LibreOffice`) and exports them to PDF (`Export lab (<app>)`, `Export PDF vs
+LibreOffice PDF`), and `render-real.yml` renders about 30 published real
+documents per app (`Real documents (<app>)`). Each ratchets against its
+committed baseline (`baseline.json`, `baseline-export.json`,
+`baseline-real.json`): a document whose verdict gets worse fails the job, and
+so does one that gets better without the PR committing the new baseline. The
+real-document job first asks `tools/render-lab/real_scope.py` whether the
+change reaches that app — its crate and every workspace crate it links, read
+from the Cargo manifests, plus `Cargo.lock`, `Cargo.toml`, `tools/render-lab/`
+and the workflow — and passes in seconds when it does not, so all three checks
+report on every PR and can be required. Path-filtered workflows
+(`file-corpus.yml`, `gui-container.yml`, `release-gate.yml`, `nightly.yml`'s
+oracle) run only when their inputs change.
+
 The capability ledger is checked in each lane against that lane's own
 collected tests and recorded outcomes, at the lane's revision: structure and
 the lane/layer maps in the fast PR lane, the Rust tests in `ci.yml`'s `test`
