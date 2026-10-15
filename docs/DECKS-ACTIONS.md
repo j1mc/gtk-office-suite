@@ -71,7 +71,7 @@ action of their own; each is one undo step:
 | Editor ▸ alignment, list, indent, paragraph spacing | the paragraphs the selection touches | `DecksRichTextEditRenderJourney`, `range_format_splits_only_the_selection_and_never_the_whole_box` |
 | Editor ▸ Ctrl+Z / Ctrl+Shift+Z | the session's own undo and redo; the deck's undo is refused while editing | `DecksRichTextRangeSmoke`, `a_text_session_commits_one_step_and_cancels_without_trace` |
 | Editor ▸ Ctrl+C / Ctrl+X / Ctrl+V | styled copy of the selection; paste keeps supported styles and paragraphs and names what it flattened | `a_copied_range_keeps_its_paragraphs_styles_and_pastes_back_into_a_session`, `pasting_flattens_what_a_slide_cannot_hold_and_never_parses_html` |
-| Editor ▸ Ctrl+Enter / Apply, Escape / Cancel | commits the session as one undo step, or drops it without trace | `DecksRichTextRangeSmoke`, `DecksImeBidiSmoke` |
+| Editor ▸ Ctrl+Enter / Apply, Escape / Cancel | commits the session as one undo step, or drops it without trace | `DecksRichTextRangeSmoke`, `DecksInlineTextSmoke` |
 | Arrange ▸ position, size, rotation fields | the object's geometry | `arrange_edits_move_resize_and_rotate` |
 | Arrange ▸ Send to Back, Bring to Front, … | the object order | `DecksFormatInspectorSmoke` |
 | Tab / Shift+Tab on the canvas | the selection, object by object | `DecksPictureCropSmoke` |

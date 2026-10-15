@@ -90,6 +90,9 @@ struct Editor {
     preedit: Cell<bool>,
     /// Give the canvas the keyboard back when the editor closes.
     restore_focus: Cell<bool>,
+    /// The last key event handled (time, key), so the window's and the
+    /// popover's controllers never both act on one press.
+    last_key: Cell<Option<(u32, gdk::Key)>>,
 }
 
 fn toggle(icon: &str, label: &str) -> gtk::ToggleButton {
@@ -400,18 +403,23 @@ impl Editor {
         true
     }
 
-    /// Whether the keyboard is in the editor itself, not in a menu it
-    /// opened (the colour palette, a list).
-    fn focus_in_editor(&self) -> bool {
-        let Some(window) = self.window.upgrade() else { return false };
-        gtk::prelude::GtkWindowExt::focus(&window)
-            .and_then(|w| w.native())
-            .is_some_and(|n| n.upcast::<gtk::Widget>() == *self.popover.upcast_ref::<gtk::Widget>())
+    /// Whether a key event comes from the editor's own surface, not from
+    /// a menu it opened (the colour palette, a list), whose keys are its
+    /// own.
+    fn from_editor(&self, controller: &gtk::EventControllerKey) -> bool {
+        let source = controller.current_event().and_then(|e| e.surface());
+        source.is_some() && source == self.popover.surface()
     }
 
-    /// The session's keys, ahead of the window's shortcuts.
-    fn key(self: &Rc<Self>, keyval: gdk::Key, mods: gdk::ModifierType) -> glib::Propagation {
+    /// The session's keys. Both the window's capture controller (ahead of
+    /// the application's shortcuts, which GTK runs from the window) and
+    /// the popover's call this; an event is handled once.
+    fn key(self: &Rc<Self>, controller: &gtk::EventControllerKey, keyval: gdk::Key, mods: gdk::ModifierType, on_window: bool) -> glib::Propagation {
         use glib::Propagation::{Proceed, Stop};
+        let stamp = (controller.current_event_time(), keyval);
+        if self.last_key.replace(Some(stamp)) == Some(stamp) {
+            return Proceed;
+        }
         if self.preedit.get() {
             return Proceed;
         }
@@ -419,7 +427,7 @@ impl Editor {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
         let alt = mods.contains(gdk::ModifierType::ALT_MASK);
-        if self.focus_in_editor() {
+        if self.from_editor(controller) {
             match keyval {
                 gdk::Key::Escape if mods.is_empty() => {
                     self.finish(false);
@@ -461,8 +469,24 @@ impl Editor {
         let app = self.window.upgrade().and_then(|w| w.application());
         if let Some(app) = app {
             let accel = gtk::accelerator_name(keyval.to_lower(), mods);
-            if !app.actions_for_accel(&accel).is_empty() {
-                return if self.finish(true) { Proceed } else { Stop };
+            let actions = app.actions_for_accel(&accel);
+            if !actions.is_empty() {
+                if !self.finish(true) {
+                    return Stop;
+                }
+                // From the window, the shortcut runs next by itself; from
+                // the popover, the window never saw it: run it here.
+                if !on_window {
+                    if let Some(window) = self.window.upgrade() {
+                        for detailed in &actions {
+                            if let Ok((name, target)) = gtk::gio::Action::parse_detailed_name(detailed) {
+                                let _ = window.activate_action(&name, target.as_ref());
+                            }
+                        }
+                    }
+                    return Stop;
+                }
+                return Proceed;
             }
         }
         Proceed
@@ -595,6 +619,7 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
         syncing: Cell::new(false),
         preedit: Cell::new(false),
         restore_focus: Cell::new(false),
+        last_key: Cell::new(None),
     });
     // The second row gets the indent, colour and spacing controls.
     if let Some(row2) = bar.last_child().and_downcast::<gtk::Box>() {
@@ -624,18 +649,22 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
     // Ahead of the application's shortcuts: GTK runs a window's capture
     // controllers newest first, and the shortcuts were added with the
     // window.
-    {
+    for on_window in [true, false] {
         let weak = weak.clone();
         let key = gtk::EventControllerKey::new();
         key.set_propagation_phase(gtk::PropagationPhase::Capture);
-        key.connect_key_pressed(move |_, keyval, _, mods| {
+        key.connect_key_pressed(move |controller, keyval, _, mods| {
             let Some(ed) = weak.upgrade() else { return glib::Propagation::Proceed };
             if !ed.ctl.has_text_session() {
                 return glib::Propagation::Proceed;
             }
-            ed.key(keyval, mods)
+            ed.key(controller, keyval, mods, on_window)
         });
-        h.window.add_controller(key);
+        if on_window {
+            h.window.add_controller(key);
+        } else {
+            popover.add_controller(key);
+        }
     }
     {
         let weak = weak.clone();
