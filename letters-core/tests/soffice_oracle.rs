@@ -2080,8 +2080,32 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let odt_path = dir.path().join("keep.odt");
     assert!(odt_path.exists(), "soffice did not convert docx to odt");
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
-    let Some(rt) = through_lo_to_docx(&d, "keep") else { return };
+    // odt -> Writer -> docx, dumping the converted properties: a
+    // temporary diagnostic for where Writer drops widow control off.
+    let sub = dir.path().join("odt2docx");
+    std::fs::create_dir_all(&sub).unwrap();
+    let op = sub.join("keep.odt");
+    letters_core::odt::write(&d, op.to_str().unwrap()).expect("write odt");
+    let _ = soffice_convert(bin, &op, "docx").ok();
+    let dp = sub.join("keep.docx");
+    assert!(dp.exists(), "soffice did not convert keep.odt to docx");
+    eprintln!("DIAG converted pPr: {}", ppr_of(&dp, "may strand"));
+    let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
     close(&rt, "odt → Writer → docx");
+}
+
+/// DIAGNOSTIC (temporary): the raw XML of the converted paragraph
+/// holding `text`, from a docx on disk.
+fn ppr_of(path: &std::path::Path, text: &str) -> String {
+    let f = std::fs::File::open(path).unwrap();
+    let mut zip = zip::ZipArchive::new(f).unwrap();
+    let mut xml = String::new();
+    use std::io::Read;
+    zip.by_name("word/document.xml").unwrap().read_to_string(&mut xml).unwrap();
+    let Some(at) = xml.find(text) else { return "text not found".into() };
+    let start = xml[..at].rfind("<w:p ").map(|i| i).or_else(|| xml[..at].rfind("<w:p>")).unwrap_or(0);
+    let end = xml[at..].find("</w:p>").map(|e| at + e).unwrap_or(xml.len());
+    xml[start..end].chars().take(1500).collect()
 }
 
 /// Fixed and minimum line heights across the format boundary, both
