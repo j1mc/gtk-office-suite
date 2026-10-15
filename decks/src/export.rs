@@ -7,7 +7,7 @@
 //! master as the editor, with none of its marks. The PDF is vector: cairo's
 //! PDF surface keeps text as text.
 //!
-//! Slides are exported on the deck's own page (`MasterSlide::page_emu`):
+//! Slides are exported on the deck's own page (`Deck.page_size`):
 //! 10in x 5.625in for a deck with none, 4:3 or any custom size as the
 //! file declared it, the way PowerPoint and Impress print it. The model's
 //! 960 x 540 maps onto that page as the importers mapped the page onto it:
@@ -23,12 +23,11 @@ use gtk4::cairo;
 /// points.
 pub const SLIDE_PT: (f64, f64) = (720.0, 405.0);
 
-/// The page `deck` is exported on, in points.
+/// The page `deck` is exported on, in points: the deck's own size
+/// (DCK-006), never a first-master fallback.
 pub fn page_pt(deck: &Deck) -> (f64, f64) {
-    match deck.masters.first().and_then(|m| m.page_emu) {
-        Some((cx, cy)) if cx > 0.0 && cy > 0.0 => (cx / 12700.0, cy / 12700.0),
-        _ => SLIDE_PT,
-    }
+    let (cx, cy) = deck.page_emu();
+    (cx / 12700.0, cy / 12700.0)
 }
 /// A handout page: A4 portrait, in points.
 pub const HANDOUT_PT: (f64, f64) = (595.276, 841.89);
@@ -177,6 +176,8 @@ mod tests {
                             fill: Some(decks_core::engine::shape::Color(0xE0, 0x1B, 0x24)),
                             gradient: None,
                             stroke: None,
+                            fill_src: None,
+                            stroke_src: None,
                         },
                     },
                 ];
@@ -299,9 +300,7 @@ mod tests {
     #[test]
     fn a_4_3_deck_exports_on_its_own_page() {
         let mut d = deck(2);
-        for m in &mut d.masters {
-            m.page_emu = Some((9_144_000.0, 6_858_000.0));
-        }
+        d.page_size = Some((9_144_000.0, 6_858_000.0));
         for s in &mut d.slides {
             s.objects.push(SlideObject::Shape {
                 kind: decks_core::engine::shape::ShapeKind::Rect,
@@ -314,6 +313,8 @@ mod tests {
                     fill: Some(decks_core::engine::shape::Color(0x1C, 0x71, 0xD8)),
                     gradient: None,
                     stroke: None,
+                    fill_src: None,
+                    stroke_src: None,
                 },
             });
         }
@@ -367,6 +368,8 @@ mod tests {
                 fill: Some(decks_core::engine::shape::Color(0x26, 0xA2, 0x69)),
                 gradient: None,
                 stroke: None,
+                fill_src: None,
+                stroke_src: None,
             },
         }];
         let dir = tempfile::tempdir().unwrap();
