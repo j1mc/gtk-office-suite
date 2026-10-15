@@ -93,6 +93,8 @@ struct Editor {
     /// The last key event handled (time, key), so the window's and the
     /// popover's controllers never both act on one press.
     last_key: Cell<Option<(u32, gdk::Key)>>,
+    /// The editor's own menus, whose keys are theirs.
+    menus: std::cell::RefCell<Vec<gtk::Popover>>,
 }
 
 fn toggle(icon: &str, label: &str) -> gtk::ToggleButton {
@@ -403,12 +405,20 @@ impl Editor {
         true
     }
 
-    /// Whether a key event comes from the editor's own surface, not from
-    /// a menu it opened (the colour palette, a list), whose keys are its
-    /// own.
-    fn from_editor(&self, controller: &gtk::EventControllerKey) -> bool {
-        let source = controller.current_event().and_then(|e| e.surface());
-        source.is_some() && source == self.popover.surface()
+    /// Whether the keyboard is in the editor itself, not in a menu it
+    /// opened (the colour palette, paragraph spacing). On X11 a popover's
+    /// keys arrive on the window's surface and the window's focus is not
+    /// the popover's, so this asks the widgets: the focus is within the
+    /// editor and none of its menus is open.
+    fn from_editor(&self) -> bool {
+        let focus_native = self
+            .window
+            .upgrade()
+            .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
+            .and_then(|w| w.native())
+            .is_some_and(|n| n.upcast::<gtk::Widget>() == *self.popover.upcast_ref::<gtk::Widget>());
+        (focus_native || self.popover.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) || self.view.has_focus())
+            && !self.menus.borrow().iter().any(|m| m.is_visible())
     }
 
     /// The session's keys. Both the window's capture controller (ahead of
@@ -427,7 +437,7 @@ impl Editor {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
         let alt = mods.contains(gdk::ModifierType::ALT_MASK);
-        if self.from_editor(controller) {
+        if self.from_editor() {
             match keyval {
                 gdk::Key::Escape if mods.is_empty() => {
                     self.finish(false);
@@ -620,6 +630,7 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
         preedit: Cell::new(false),
         restore_focus: Cell::new(false),
         last_key: Cell::new(None),
+        menus: Default::default(),
     });
     // The second row gets the indent, colour and spacing controls.
     if let Some(row2) = bar.last_child().and_downcast::<gtk::Box>() {
@@ -855,6 +866,7 @@ fn connect_controls(ed: &Rc<Editor>, weak: &Weak<Editor>, colour: &gtk::Button, 
     }
     grid.attach(&auto, 0, 2, 5, 1);
     palette.set_child(Some(&grid));
+    ed.menus.borrow_mut().push(palette.clone());
     {
         let palette = palette.downgrade();
         colour.connect_clicked(move |_| {
@@ -881,6 +893,7 @@ fn connect_controls(ed: &Rc<Editor>, weak: &Weak<Editor>, colour: &gtk::Button, 
     }
     let sp_popover = suite_common::popover::reused(spacing, "paragraph-spacing");
     sp_popover.set_child(Some(&sp));
+    ed.menus.borrow_mut().push(sp_popover.clone());
     {
         let sp_popover = sp_popover.downgrade();
         spacing.connect_clicked(move |_| {
