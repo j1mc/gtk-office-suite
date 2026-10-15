@@ -442,7 +442,7 @@ fn parse_color_map(xml: &str) -> std::collections::BTreeMap<String, String> {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if e.name().as_ref() == "p:clrMap" => {
                 let mut map = std::collections::BTreeMap::new();
                 for attr in e.attributes().flatten() {
-                    let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+                    let key: String = attr.key.as_ref().to_string();
                     if key.contains(':') || key.eq_ignore_ascii_case("xmlns") {
                         continue;
                     }
@@ -759,6 +759,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                 placeholder_cache.insert(lp.clone(), found);
             }
         }
+        let no_inheritance = Inherited::default();
         let (layout_phs, master_phs, inherited): (&[Placeholder], &[Placeholder], &Inherited) = layout_path
             .as_ref()
             .and_then(|lp| placeholder_cache.get(lp))

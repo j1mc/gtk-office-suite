@@ -249,6 +249,18 @@ pub fn ensure_theme_ids(slides: &[Slide], masters: &[MasterSlide], themes: &mut 
     }
 }
 
+/// A fresh id, after [`ensure_ids`].
+pub fn next_id(slides: &[Slide]) -> u64 {
+    max_id(slides) + 1
+}
+
+/// One more than every slide, object, tombstone, master, layout and
+/// placeholder id in the session: what a fresh stable id for any of
+/// those spaces must clear.
+pub fn next_session_id(slides: &[Slide], masters: &[MasterSlide]) -> u64 {
+    max_id(slides).max(max_master_id(masters)) + 1
+}
+
 fn slide_pos(slides: &[Slide], id: u64) -> Option<usize> {
     slides.iter().position(|s| s.ids.slide == id)
 }

@@ -104,6 +104,7 @@ pub struct DecksController {
     /// stable id; edits to masters (SetMaster) carry their `theme_id`
     /// through history, but no edit path retargets themes yet.
     pub themes: Rc<RefCell<Vec<crate::engine::theme::Theme>>>,
+    pub dirty: Rc<Cell<bool>>,
     /// The deck's on-disk path, or `None` for an unsaved new document.
     /// Canonical document identity (#103) — window.rs reads/writes this
     /// shared cell rather than tracking its own copy (mirrors

@@ -20,6 +20,7 @@ mod notes;
 mod parse;
 mod placeholders;
 pub mod shape;
+pub mod table;
 pub mod theme;
 pub mod chart;
 mod shape_xml;

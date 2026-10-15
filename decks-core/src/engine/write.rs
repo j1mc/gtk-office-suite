@@ -1037,6 +1037,12 @@ const CLR_MAP: &str = "<p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\"
      accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" \
      accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/>";
 
+const PART_NS: [(&str, &str); 3] = [
+    ("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main"),
+    ("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships"),
+    ("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main"),
+];
+
 /// The `p:clrMap` for `master`: its own colour map when it states one,
 /// else the identity mapping above, byte-identical to what the writer
 /// has always emitted.

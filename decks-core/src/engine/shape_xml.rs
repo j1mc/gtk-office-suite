@@ -449,7 +449,7 @@ fn fill_among(node: &Node, theme: &Theme, placeholder: Option<Color>) -> Option<
 /// `color_of` draws); `phClr` — the style reference's own colour — is
 /// not a token of this statement, so `None`, resolved by the caller.
 /// The caller passes the `a:solidFill` node itself.
-fn direct_color_ref(node: &Node, theme: &Theme) -> Option<super::theme::ColorRef> {
+fn direct_color_ref(node: &Node) -> Option<super::theme::ColorRef> {
     use super::theme::{ColorMod, ColorRef, ThemeColor};
     let c = node.children.iter().find(|c| COLOR_ELEMENTS.contains(&c.name.as_str()))?;
     match c.name.as_str() {
@@ -527,7 +527,7 @@ fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -
         Some(p) if p.child("a:grpFill").is_some() => None,
         Some(p) => match p.children.iter().find(|c| matches!(c.name.as_str(), "a:noFill" | "a:solidFill")) {
             Some(n) if n.name == "a:noFill" => Some(FillSrc::NoFill),
-            Some(n) => direct_color_ref(n, theme).map(FillSrc::Color),
+            Some(n) => direct_color_ref(n).map(FillSrc::Color),
             None => None,
         },
         None => None,
@@ -559,7 +559,7 @@ fn resolve_sp(sp: &Node, theme: &Theme, scale: f64, group_fill: Option<&Fill>) -
     let stroke_src = match sppr.and_then(|p| p.child("a:ln")) {
         Some(ln) => match ln.children.iter().find(|c| matches!(c.name.as_str(), "a:noFill" | "a:solidFill")) {
             Some(n) if n.name == "a:noFill" => Some(StrokeSrc::NoLine),
-            Some(n) => direct_color_ref(n, theme).map(StrokeSrc::Color),
+            Some(n) => direct_color_ref(n).map(StrokeSrc::Color),
             None => None,
         },
         None => None,
