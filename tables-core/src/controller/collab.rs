@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use loro::{ExportMode, LoroDoc, LoroList, LoroMap, LoroMovableList, LoroValue, ValueOrContainer};
 use serde::{de::DeserializeOwned, Serialize};
 
-use super::ops::{cell_content, resync, Axis, CellContent, Op};
+use super::ops::{cell_content, Axis, CellContent, Op};
 use super::state::WorkbookState;
 use crate::sheet::SheetModel;
 
@@ -133,6 +133,7 @@ fn encode_props(s: &SheetModel) -> Vec<(&'static str, String)> {
     vec![
         ("p.sorted", json(&s.sorted_col)),
         ("p.filtered", json(&sorted(&s.hidden_rows))),
+        ("p.filter", json(&s.filter)),
         ("p.hidden_rows", json(&sorted(&s.hidden_rows_manual))),
         ("p.hidden_cols", json(&sorted(&s.hidden_cols))),
         ("p.cond_rules", json(&s.cond_rules)),
@@ -158,6 +159,12 @@ fn decode_prop(s: &mut SheetModel, key: &str, text: &str) {
     match key {
         "p.sorted" => set(&mut s.sorted_col, text),
         "p.filtered" => set_of(&mut s.hidden_rows, text),
+        "p.filter" => {
+            // The definition arrives separately from its derived rows;
+            // recompute so the two agree whatever order they land in.
+            set(&mut s.filter, text);
+            s.recompute_filter();
+        }
         "p.hidden_rows" => set_of(&mut s.hidden_rows_manual, text),
         "p.hidden_cols" => set_of(&mut s.hidden_cols, text),
         "p.cond_rules" => set(&mut s.cond_rules, text),
@@ -695,7 +702,7 @@ fn build(view: &DocView) -> Result<WorkbookState, String> {
         state.set_cell_inputs_on_sheet(
             index,
             placed.iter().filter(|(_, _, cell)| !cell.input.is_empty()).map(|(r, c, cell)| (*r, *c, cell.input.as_str())),
-        );
+        )?;
         let mut s = state.sheets[index].borrow_mut();
         for (r, c, cell) in &placed {
             s.formats[*r][*c] = cell.format.clone();
@@ -725,8 +732,6 @@ fn build(view: &DocView) -> Result<WorkbookState, String> {
         }
     }
     state.engine.evaluate();
-    for index in 0..state.sheets.len() {
-        resync(&mut state, index);
-    }
+    state.sync_all_sheets();
     Ok(state)
 }

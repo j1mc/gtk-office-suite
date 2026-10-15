@@ -5,7 +5,7 @@ Audited on `e7e4df6`. The checked-off #95 backlog, stale ROADMAP.md, PARITY tabl
 ## Design
 Maintain a machine-readable capability manifest with stable feature IDs, app/format/direction, admitted scope, owner issue, required test IDs by layer, and status: implemented-unverified / verified / failing / deferred. Record revision, environment, command, test IDs, skips and artifact URLs with each test run. Validate references against collected tests, not source-string existence alone. Derive the published roadmap/status table from this evidence.
 
-## Status (2026-09-12)
+## Status (2026-10-13)
 
 The ledger exists: `conformance/capabilities.json`, validated by
 `conformance/validate_capabilities.py` with mutation tests in
@@ -20,8 +20,9 @@ immediately found #507), dated waivers, and validator mutation tests.
 Not done here, deliberately: back-filling every PARITY.md row (an entry
 asserts someone watched those tests pass at a named revision — writing
 that from prose would reproduce exactly the unfounded claims this
-replaces), deriving the published roadmap table from the ledger, and
-reconciling README/ROADMAP/TESTING wording beyond pointing at it.
+replaces), or deriving a published roadmap/status table automatically from
+the evidence ledger. Those remain separate from the current hand-maintained
+status documents.
 
 ## Work
 Each row below is ticked from the instrument that implements it, not from
@@ -37,18 +38,10 @@ named; the reasoning is under the row so a reader can disagree with it.
     answer different questions, and the Status note above says so — but the
     row as written asked for an extension, so it is not ticked.
 - [x] Report model, persistence, controller/bridge, GUI, interoperability, accessibility/visual and performance separately.
-  - Holds: `LAYERS = ("model", "format", "bridge", "gui", "a11y", "performance")`,
-    required per capability and reported per layer; evidence for a layer a
-    capability does not require is rejected.
-  - Does not: **persistence** was not a distinct layer, so save durability
-    landed under `format` or `model` and a green format layer could hide an
-    unproven save transaction. **Now it is** (#1207): `persistence` is in
-    `LAYERS`, and `suite.save.atomic-replace` is the first capability to cite
-    it. Checked when this row was ticked, no save-durability evidence was
-    left under `format` or `model`, and a structure check keeps it that way:
-    a test from the `atomic_save`, `autosave` or `save_transaction` modules
-    cited under either is rejected as belonging to `persistence`
-    (`StructureTests.test_save_durability_evidence_must_be_filed_under_persistence`).
+  - `LAYERS = ("model", "format", "persistence", "bridge", "gui", "a11y",
+    "performance")`, required per capability; evidence for an unrequired
+    layer is rejected. A structure test keeps `atomic_save`, `autosave` and
+    `save_transaction` evidence under `persistence`, not `model` or `format`.
 - [x] No marker, closed issue, skipped test, missing oracle, or --no-run report may count as observed success.
   - C4 in `validate_capabilities.py`, with mutation tests for a skipped
     result, a failed result and a test that never ran. Evidence must be a

@@ -77,10 +77,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev xvfb poppler-utils
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@bb0282cdd6e41599bc8dfa5fc712ebe9e27cfd8c # nextest
+      - uses: taiki-e/install-action@2eb6de229bc778f7df20e106e4b34e9a364c73e6 # nextest
         with:
           tool: nextest
       - name: Run the workspace tests at the release revision
@@ -95,39 +95,53 @@ jobs:
       - name: Run the release-critical journeys at the release revision
         if: always()
         run: |
+          # Every journey a release-critical capability cites, at any layer:
+          # an a11y journey left out here would be missing below, and the
+          # check would refuse the release for a test it never ran.
           python3 - > journeys.txt <<'PY'
           import json
           ledger = json.load(open("conformance/capabilities.json"))
+          journeys = {}
           for feature in ledger["features"]:
               if feature.get("release_critical"):
-                  for test in feature.get("evidence", {}).get("gui", []):
-                      print(test.removeprefix("tests/gui/"))
+                  for tests in feature.get("evidence", {}).values():
+                      for test in tests:
+                          if test.startswith("tests/gui/"):
+                              journeys[test.removeprefix("tests/gui/")] = None
+          print("\n".join(journeys))
           PY
           if [ ! -s journeys.txt ]; then
             echo "No release-critical capability names a journey."
             exit 0
           fi
-          # The journeys' verdicts are read from the report below, so a
-          # failure here is recorded rather than ending the job early.
+          # A failing journey fails this step; the next step still runs
+          # (always()) and names which release-critical test it was.
           tests/gui/run_gui_tests.sh $(cat journeys.txt) \
-            --junitxml="$GITHUB_WORKSPACE/gui-junit.xml" || true
+            --junitxml="$GITHUB_WORKSPACE/gui-junit.xml"
+      # --every-release-critical-result: this job runs every lane marked
+      # runs_on_candidate, so no release-critical test is another lane's
+      # business — one missing from these reports never ran at this
+      # revision and refuses the release (SH-001). The inventory is stamped
+      # with the commit actually checked out and must match it.
       - name: Refuse a release whose release-critical evidence did not pass
         if: always()
         run: |
+          revision="$(git rev-parse HEAD)"
           gui=()
           if [ -f gui-junit.xml ]; then gui=(--pytest-junit "tests/gui=gui-junit.xml"); fi
           python3 conformance/collect_test_inventory.py \
-            --junit "=target/nextest/ci/junit.xml" "${gui[@]}" \
+            --junit "=target/nextest/ci/junit.xml" "${gui[@]}" --revision "$revision" \
             --out rust-inventory.json --results-out rust-results.json
           python3 conformance/validate_capabilities.py \
             --lanes conformance/lanes.json --lane test \
             --collected rust-inventory.json --results rust-results.json \
-            --release-critical
+            --candidate "$revision" \
+            --release-critical --every-release-critical-result
       # The JUnit and the ledger's verdicts on it, kept for the release's
       # evidence bundle (release-evidence.yml).
       - name: Keep the release-critical evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-critical-evidence
           path: |

@@ -40,7 +40,7 @@ pub(super) fn workbook() -> WorkbookState {
     let mut state = WorkbookState::new(8, 5).unwrap();
     state.add_sheet("Data".into(), 8, 5).unwrap();
     for (sheet, r, c, v) in [(0, 0, 0, "1"), (0, 1, 0, "2"), (0, 2, 0, "=A1+A2"), (0, 3, 1, "=SUM(A1:A3)"), (1, 0, 0, "=Sheet1!A3*10"), (1, 1, 1, "text")] {
-        state.set_cell_input_on_sheet(sheet, r, c, v);
+        state.set_cell_input_on_sheet(sheet, r, c, v).unwrap();
     }
     state
 }
@@ -124,7 +124,7 @@ fn direct(state: &mut WorkbookState, op: &Op) -> Result<(), String> {
         None => 0,
     };
     match op {
-        Op::SetCell { row, col, input, .. } => state.set_cell_input_on_sheet(pos, *row, *col, input),
+        Op::SetCell { row, col, input, .. } => state.set_cell_input_on_sheet(pos, *row, *col, input)?,
         Op::SetFormat { row, col, format, .. } => state.sheets[pos].borrow_mut().formats[*row][*col] = format.clone(),
         Op::SetStyle { row, col, style, .. } => state.sheets[pos].borrow_mut().styles[*row][*col] = style.clone(),
         Op::SetBorder { row, col, border, .. } => state.sheets[pos].borrow_mut().borders[*row][*col] = border.clone(),
@@ -200,7 +200,7 @@ fn direct(state: &mut WorkbookState, op: &Op) -> Result<(), String> {
             let previous = state.active_sheet;
             state.engine.set_active_sheet(pos)?;
             for (r, c, input) in cells {
-                state.engine.set_cell_text(*r, *c, input);
+                state.engine.set_cell_text(*r, *c, input)?;
             }
             state.engine.set_active_sheet(previous)?;
             resync_all(state);
@@ -212,6 +212,7 @@ fn direct(state: &mut WorkbookState, op: &Op) -> Result<(), String> {
             let mut s = state.sheets[pos].borrow_mut();
             match prop.clone() {
                 SheetProp::Filtered(v) => *s.hidden_rows = v,
+                SheetProp::Filter(v) => s.filter = v,
                 SheetProp::HiddenRows(v) => *s.hidden_rows_manual = v,
                 SheetProp::HiddenCols(v) => *s.hidden_cols = v,
                 SheetProp::PrintArea(v) => s.print_area = v,
@@ -234,15 +235,7 @@ fn direct(state: &mut WorkbookState, op: &Op) -> Result<(), String> {
 }
 
 fn resync_all(state: &mut WorkbookState) {
-    state.grow_engine();
-    let previous = state.active_sheet;
-    for s in 0..state.sheets.len() {
-        state.engine.set_active_sheet(s).unwrap();
-        state.active_sheet = s;
-        state.sync_active_sheet();
-    }
-    state.engine.set_active_sheet(previous).unwrap();
-    state.active_sheet = previous;
+    state.sync_all_sheets();
 }
 
 #[test]

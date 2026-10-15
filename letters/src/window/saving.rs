@@ -19,6 +19,13 @@ fn show_message(page: &adw::TabPage, title: &str, message: &str) {
     let dialog = adw::AlertDialog::new(Some(&suite_common::i18n(title)), Some(message));
     dialog.add_response("ok", &suite_common::i18n("_OK"));
     dialog.set_close_response("ok");
+    // A failed save leaves the edit session intact; put the caret back
+    // where the user was once the error is dismissed (LET-001 step 4).
+    if let Some(view) = crate::page_container::find(&page.child()).and_then(|pc| pc.page_view()) {
+        dialog.connect_closed(move |_| {
+            view.grab_focus();
+        });
+    }
     dialog.present(page.child().root().and_downcast::<gtk::Window>().as_ref());
 }
 
@@ -34,11 +41,11 @@ fn save_page_to_path(page: &adw::TabPage, path: &Path) -> SaveOutcome {
     // savepoint. What the format drops was asked about before this
     // (`save_asking_about_loss`), so the report it returns is not shown again.
     // Parts the editor doesn't model but that are safe to keep (custom XML,
-    // a thumbnail, ODF settings) are read from the file the tab came from
-    // before the write replaces it, then put back (#1274).
-    let source = td.0.borrow().file.clone();
+    // a thumbnail, ODF settings) come from the imported revision pinned at
+    // open — never a re-read of the live source path, which may have been
+    // deleted or replaced since (#1274, LET-001).
+    let carried = td.0.borrow().carried_for_save();
     let result = td.0.borrow_mut().save_to(path.to_path_buf(), |path| {
-        let carried = source.as_deref().map(suite_common::carry::capture).unwrap_or_default();
         carried.write_with(path, |p| crate::bridge::save_buffer_to_file(&buf, p).map(|_| ()))?;
         // A document at a remote location is uploaded from its staged copy
         // (RFC-0003), inside the transaction so a failed upload doesn't
@@ -97,21 +104,62 @@ fn save_asking_about_loss(
     path: &Path,
     complete: impl FnOnce(SaveOutcome) + 'static,
 ) {
+    use letters_core::session::SourceState;
     let finish = {
         let page = page.clone();
         move |outcome: SaveOutcome, complete: Box<dyn FnOnce(SaveOutcome)>| {
-            if let SaveOutcome::Failed(ref error) = outcome {
+            if let SaveOutcome::Failed(error) = &outcome {
                 show_message(&page, "Could Not Save File", error);
             }
             complete(outcome);
         }
     };
     let child = page.child();
+    // The imported revision's state, read once: whether the source still
+    // resolves to the bytes the tab opened, what that revision held that no
+    // save can keep, and whether this save would overwrite that source.
+    // Sessions without provenance (untitled tabs) keep the old live read.
+    let (source_state, source_report, source_name, overwrites_source, at_stake, carried_names) =
+        tab_data_get(&child)
+            .map(|td| {
+                let session = td.0.borrow();
+                let state = session.source_state();
+                let (report, name, overwrites) = match state {
+                    SourceState::NoContext => {
+                        let live = session.file.clone();
+                        (
+                            live.as_ref().map(|p| letters_core::loss::content_a_save_drops(p)),
+                            live.as_ref()
+                                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+                            live.as_deref() == Some(path),
+                        )
+                    }
+                    _ => (
+                        session.stored_source_loss().cloned(),
+                        session.provenance_source_name(),
+                        session.provenance_source_matches(path),
+                    ),
+                };
+                (
+                    state,
+                    report,
+                    name,
+                    overwrites,
+                    session.has_unrecoverable_content(),
+                    session.imported_carried_names(),
+                )
+            })
+            .unwrap_or((SourceState::NoContext, None, None, false, false, Vec::new()));
+    // A "Save Anyway" was given for these bytes, not for whatever the path
+    // holds now: a source deleted or replaced since un-confirms it.
     let confirmed = unsafe { child.data::<std::path::PathBuf>(LOSS_CONFIRMED_KEY) }
-        .is_some_and(|p| unsafe { p.as_ref() }.as_path() == path);
+        .is_some_and(|p| unsafe { p.as_ref() }.as_path() == path)
+        && !(at_stake && matches!(source_state, SourceState::Missing | SourceState::Replaced) && overwrites_source);
     // An unknown extension has no report; the write refuses it with the
     // reason, as before.
     let format = (!confirmed).then(|| letters_core::save::format_for_path(path).ok()).flatten();
+    // The model report is recomputed for the *target* format on every Save
+    // As: bold warns for `.txt`, never for `.docx` (LET-001 step 3).
     let format_loss = format.and_then(|format| {
         let buf = crate::page_container::buffer_of(&child)?;
         let doc = crate::bridge::document_of(&buf);
@@ -120,41 +168,87 @@ fn save_asking_about_loss(
     });
     // What the file the tab came from holds that Letters never read and
     // can't carry (macros, embedded objects): any save leaves it out
-    // (#1274). Read from disk now, so a file Letters wrote never asks.
-    let source = tab_data_get(&child).and_then(|td| td.0.borrow().file.clone());
-    let source_loss = format
-        .and(source.as_ref())
-        .and_then(|source| Some((source.clone(), dropped_features(&letters_core::loss::content_a_save_drops(source))?)));
-    if format_loss.is_none() && source_loss.is_none() {
+    // (#1274). The imported revision's scan, not a re-read of the live
+    // path — so a file Letters wrote never asks, and a replaced file
+    // never warns about bytes the user didn't open.
+    let source_loss = format.and_then(|_| {
+        let report = source_report.as_ref()?;
+        Some((source_name.clone()?, dropped_features(report)?))
+    });
+    // A missing or replaced source with anything at stake always asks,
+    // even when neither report has bullets (carried-only packages): writing
+    // without the carried parts would drop them silently.
+    let origin_changed = at_stake && matches!(source_state, SourceState::Missing | SourceState::Replaced);
+    let names_origin = origin_changed && source_loss.is_none() && !carried_names.is_empty();
+    if format_loss.is_none() && source_loss.is_none() && !names_origin {
         finish(save_page_to_path(page, path), Box::new(complete));
         return;
     }
+    // Save-a-Copy is offered only when this save would overwrite the
+    // (missing or changed) original location; a Save As elsewhere already
+    // is one.
+    let offer_copy = origin_changed && overwrites_source;
     let heading = match &format_loss {
         Some((format, _)) => suite_common::i18n("Save as %s?").replace("%s", &suite_common::i18n(format.label())),
+        None if names_origin && matches!(source_state, SourceState::Missing) => {
+            suite_common::i18n("Original Unavailable")
+        }
+        None if names_origin => suite_common::i18n("File Changed on Disk"),
         None => suite_common::i18n("Save Without This Content?"),
     };
     let mut sections = Vec::new();
     if let Some((_, dropped)) = &format_loss {
         sections.push(format!("{}\n\n{}", suite_common::i18n("This format cannot hold:"), dropped));
     }
-    if let Some((source, dropped)) = &source_loss {
-        let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        sections.push(format!("{}\n\n{}", suite_common::i18n("%s has content Letters can't keep:").replace("%s", &name), dropped));
+    if let Some((name, dropped)) = &source_loss {
+        let preamble = if matches!(source_state, SourceState::Missing) {
+            suite_common::i18n("%s is no longer available, and it held content Letters can't keep:").replace("%s", name)
+        } else if matches!(source_state, SourceState::Replaced) {
+            suite_common::i18n("%s changed on disk since it was opened, and it held content Letters can't keep:")
+                .replace("%s", name)
+        } else {
+            suite_common::i18n("%s has content Letters can't keep:").replace("%s", name)
+        };
+        sections.push(format!("{preamble}\n\n{dropped}"));
+    }
+    if names_origin {
+        let name = source_name.clone().unwrap_or_default();
+        let parts = describe_parts(&carried_names);
+        sections.push(if matches!(source_state, SourceState::Missing) {
+            suite_common::i18n("%s is no longer there, so what Letters kept from it (%s) cannot be recovered from the original. Saving recreates the file without those parts.")
+                .replacen("%s", &name, 1)
+                .replacen("%s", &parts, 1)
+        } else {
+            suite_common::i18n("%s changed on disk since it was opened. Saving keeps the current text and does not carry anything over from the changed file (%s).")
+                .replacen("%s", &name, 1)
+                .replacen("%s", &parts, 1)
+        });
     }
     if format_loss.is_some() {
         sections.push(suite_common::i18n("Saving keeps the text and loses these. Save as ODT or DOCX to keep everything."));
     }
-    if let Some((source, _)) = &source_loss {
-        sections.push(if source.as_path() == path {
+    if let Some((name, _)) = &source_loss {
+        sections.push(if overwrites_source {
             suite_common::i18n("Saving replaces the file without them. Save a copy instead to keep the original as it is.")
+        } else if origin_changed {
+            suite_common::i18n("The new file will not have them.")
         } else {
-            let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            suite_common::i18n("The new file will not have them; %s keeps them.").replace("%s", &name)
+            suite_common::i18n("The new file will not have them; %s keeps them.").replace("%s", name)
+        });
+    }
+    if names_origin && source_loss.is_none() {
+        sections.push(if overwrites_source {
+            suite_common::i18n("Save a copy to choose where the text goes, or Save Anyway to write it here without those parts.")
+        } else {
+            suite_common::i18n("The new file will not have those parts.")
         });
     }
     let body = sections.join("\n\n");
     let dialog = adw::AlertDialog::new(Some(&heading), Some(&body));
     dialog.add_response("cancel", &suite_common::i18n("_Cancel"));
+    if offer_copy {
+        dialog.add_response("copy", &suite_common::i18n("Save a _Copy"));
+    }
     dialog.add_response("save", &suite_common::i18n("_Save Anyway"));
     dialog.set_response_appearance("save", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("cancel"));
@@ -163,13 +257,25 @@ fn save_asking_about_loss(
     let page = page.clone();
     let path = path.to_path_buf();
     dialog.choose(parent.as_ref(), None::<&gio::Cancellable>, move |response| {
-        if response != "save" {
+        if response == "save" {
+            unsafe { page.child().set_data(LOSS_CONFIRMED_KEY, path.clone()) };
+            finish(save_page_to_path(&page, &path), Box::new(complete));
+        } else if response == "copy" {
+            save_with_prompt(&page, true, complete);
+        } else {
             complete(SaveOutcome::Cancelled);
-            return;
         }
-        unsafe { page.child().set_data(LOSS_CONFIRMED_KEY, path.clone()) };
-        finish(save_page_to_path(&page, &path), Box::new(complete));
     });
+}
+
+/// The carried parts at stake, for the dialog: up to three names, then a
+/// count. Bodies stay short; the full list is in the package.
+fn describe_parts(names: &[String]) -> String {
+    if names.len() > 3 {
+        format!("{}, {} and {} more", names[0], names[1], names.len() - 2)
+    } else {
+        names.join(", ")
+    }
 }
 
 

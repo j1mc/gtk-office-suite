@@ -46,6 +46,10 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # LibreOffice interop oracle: every .docx letters-core writes must open
   # in LibreOffice Writer and extract identical text (both directions).
@@ -55,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -64,14 +68,50 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             libreoffice-writer libreoffice-calc libreoffice-impress
-      - name: Run oracle tests
+      - uses: taiki-e/install-action@2eb6de229bc778f7df20e106e4b34e9a364c73e6 # nextest
+        with:
+          tool: nextest
+      # One nextest run over both targets, so the lane leaves one JUnit
+      # report with every test's outcome for the ledger step below
+      # (SH-001); `cargo test` printed outcomes nothing could read back.
+      # --no-capture keeps the parity ratchet's per-document output in the
+      # log and runs the tests one at a time: concurrent soffice instances
+      # contend over the shared user profile and silently produce nothing.
+      - name: Run the oracle and the LibreOffice-authored parity corpus
         env:
           REQUIRE_SOFFICE: "1"
-        run: cargo test -p letters-core -p tables-core -p decks-core --test soffice_oracle
-      - name: Run LibreOffice-authored parity corpus
-        env:
-          REQUIRE_SOFFICE: "1"
-        run: cargo test -p letters-core -p decks-core --test lo_parity -- --nocapture
+        run: >-
+          cargo nextest run -p letters-core -p tables-core -p decks-core
+          --profile ci --no-fail-fast --no-capture
+          --test soffice_oracle --test lo_parity
+
+      # C3/C4/C9 for the oracle lane: the claims resting on it must name
+      # tests this run collected, every collected test needs an outcome, and
+      # none of the cited ones may have been skipped or failed. Judged
+      # against the oracle's own namespaces only (lanes.json), so the
+      # crate-level report cannot speak for the core crates' model tests.
+      - name: Capability ledger vs. the oracle run
+        if: always()
+        run: |
+          python3 conformance/collect_test_inventory.py \
+            --junit "=target/nextest/ci/junit.xml" --revision "$GITHUB_SHA" \
+            --out oracle-inventory.json --results-out oracle-results.json
+          python3 conformance/validate_capabilities.py \
+            --lanes conformance/lanes.json --lane oracle \
+            --collected oracle-inventory.json --results oracle-results.json \
+            --candidate "$GITHUB_SHA"
+
+      - name: Keep the oracle's outcomes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: oracle-evidence
+          path: |
+            target/nextest/ci/junit.xml
+            oracle-inventory.json
+            oracle-results.json
+          retention-days: 90
+          if-no-files-found: warn
 
       - name: Conformance scorecard (job summary)
         env:
@@ -80,7 +120,7 @@ jobs:
 
       - name: Upload capability-matrix artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: conformance-scorecard
           path: conformance/scorecard-latest.md
@@ -102,7 +142,7 @@ jobs:
       # tests/test_workspace_test_lanes.py keeps the two lists in step.
       - name: Install GTK4 deps, Xvfb and poppler
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev xvfb poppler-utils
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: stable
       - name: Install llvm-cov
@@ -127,7 +167,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: llvm-cov
           path: coverage/
@@ -143,7 +183,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
+      - uses: dtolnay/rust-toolchain@f0d5300ba8908d942c808f4d31c08471d7798ba3 # nightly
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
@@ -192,7 +232,7 @@ jobs:
           done
       - name: Upload minimized fuzz artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/

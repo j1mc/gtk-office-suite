@@ -113,6 +113,27 @@ EXPORT = {
 # "mq4" in ours (pixels equivalent), so word recall is 0.833 < 0.90 with
 # lost_lines 0. Same class as the letters/nested-list amber; covering it
 # keeps every eligible fixture inside the ratchet instead of outside it.
+#
+# NOTE (letters/nested-list #1127, letters/super-subscript #1115: accepted
+# OCR-artifact ambers, same class as render #904). Reduced to a layout/pango
+# cause per LET-004 and none found — the export pixels agree: nested-list
+# SSIM 0.9992 with disp 0.47pt, super-subscript SSIM 1.0000 with disp 0.0pt,
+# ink ~1.0 and lost_lines 0 on both (scorecard-export.json, main). Word
+# recall alone ambers them (0.889 / 0.75): the reference decodes misread a
+# bullet-adjacent "two" and the small raised/lowered "2" glyphs, while 4x
+# crops of ours-vs-LO are pixel-identical (indents, markers, super/subscript
+# shaping). There is no geometry miss to fix, so no thresholds are tuned and
+# no geometry is churned to chase the OCR: the ambers stand as documented.
+
+# NOTE (letters/exact-line-spacing, documented amber): line pitch is
+# identical (28pt exact/minimum boxes in both renderers, 1.5-spacing
+# pixel-identical), but the trailing gap after a fixed-height paragraph
+# differs by a few px after exact and ~18px after minimum: Writer packs
+# the next paragraph tighter there while keeping the same pitch, an
+# inconsistency inside Writer itself (13pt after exact vs 0 after
+# minimum against identical 10pt style spacing). Our model follows
+# Word's rule (fixed box, normal spacing after). Words all present,
+# page counts agree; the amber records the trailing-gap miss.
 
 
 def add(app, feature, path, expect):
@@ -275,6 +296,84 @@ def letters(img):
     p = x.add_paragraph(LOREM * 2)
     p.paragraph_format.left_indent = Inches(1)
     save(x, "indents", "First paragraph has a 0.5in first-line indent; second is indented 1in on the left")
+
+    x = doc()
+    # 22 fillers leave room for a few lines but not the ten-line kept
+    # paragraph, so keeping together must move it whole; without the
+    # flag orphan/widow control would split it across the break.
+    for n in range(22):
+        x.add_paragraph(f"Filler line {n + 1}")
+    p = x.add_paragraph(("Kept together. " + LOREM) * 5)
+    p.paragraph_format.keep_together = True
+    p = x.add_paragraph(("No widow control. " + LOREM) * 3)
+    p.paragraph_format.widow_control = False
+    save(x, "keep-widow", "A ten-line paragraph kept together moves whole past the page break; the next allows widowed lines")
+
+    x = doc()
+    p = x.add_paragraph(LOREM * 2)
+    p.paragraph_format.line_spacing = Pt(28)
+    p = x.add_paragraph(LOREM * 2)
+    # python-docx spells a Length as an exact rule; atLeast needs raw XML.
+    pPr = p._p.get_or_add_pPr()
+    spacing = OxmlElement("w:spacing")
+    spacing.set(qn("w:line"), "560")
+    spacing.set(qn("w:lineRule"), "atLeast")
+    pPr.append(spacing)
+    p = x.add_paragraph(LOREM * 2)
+    p.paragraph_format.line_spacing = 1.5
+    save(x, "exact-line-spacing", "Exact 28pt, minimum 28pt and 1.5-spaced paragraphs")
+
+    x = doc()
+    from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
+    p = x.add_paragraph()
+    p.add_run("Chapter 1\t1")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(6), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+    p = x.add_paragraph()
+    p.add_run("Total\t12.99")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.DECIMAL, WD_TAB_LEADER.DOTS)
+    p = x.add_paragraph()
+    p.add_run("Signed\tby hand")
+    p.paragraph_format.tab_stops.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.CENTER, WD_TAB_LEADER.DASHES)
+    save(x, "tab-leaders", "Right, decimal and centre tab stops with dot and dash leaders")
+
+    x = doc()
+
+    def shade(paragraph, fill):
+        pPr = paragraph._p.get_or_add_pPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:fill"), fill)
+        pPr.append(shd)
+
+    def borders(paragraph, edges):
+        # edges: side -> (style, eighths-of-a-point, color).
+        pPr = paragraph._p.get_or_add_pPr()
+        pbdr = OxmlElement("w:pBdr")
+        for side, (val, sz, color) in edges.items():
+            edge = OxmlElement(f"w:{side}")
+            edge.set(qn("w:val"), val)
+            edge.set(qn("w:sz"), str(sz))
+            edge.set(qn("w:space"), "1")
+            edge.set(qn("w:color"), color)
+            pbdr.append(edge)
+        pPr.append(pbdr)
+
+    p = x.add_paragraph("A shaded paragraph. " + LOREM)
+    shade(p, "D9D9D9")
+    p = x.add_paragraph("A paragraph with a red rule below. " + LOREM)
+    borders(p, {"bottom": ("single", 6, "FF0000")})
+    p = x.add_paragraph("A boxed paragraph. " + LOREM)
+    borders(p, {"top": ("single", 4, "000000"), "left": ("single", 4, "000000"),
+                "bottom": ("single", 4, "000000"), "right": ("single", 4, "000000")})
+    p = x.add_paragraph("A paragraph with a dashed blue bar on the left. " + LOREM)
+    borders(p, {"left": ("dashed", 12, "0000FF")})
+    save(x, "para-shading-borders", "A grey-shaded paragraph, a red rule, a boxed paragraph and a dashed blue left bar")
+
+    x = doc()
+    x.add_paragraph("Decomposed accents: cafe\u0301 nai\u0308ve (e plus combining acute, i plus combining diaeresis).")
+    x.add_paragraph("Vietnamese stacked marks: tie\u0302\u0301ng Vi\u00ea\u0323t.")
+    x.add_paragraph("Precomposed for contrast: café naïve.")
+    save(x, "combining-marks", "Combining accents and stacked Vietnamese marks beside precomposed text")
 
     x = doc()
     for t in ("Apples", "Oranges", "Pears"):
@@ -562,6 +661,23 @@ def tables():
     save(wb, "values", "A 5x4 block of integers, right-aligned in their cells")
 
     wb, ws = book()
+    pivot_rows = [
+        ("Region", "Apparel - Sum of Sales", "Electronics - Sum of Sales"),
+        ("North", 50, 100),
+        ("South", 0, 200),
+    ]
+    for row_index, row in enumerate(pivot_rows, start=1):
+        for col_index, value in enumerate(row, start=1):
+            ws.cell(row_index, col_index, value)
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 27
+    save(
+        wb,
+        "pivot-crosstab",
+        "A column-field pivot output: North and South sales by Apparel and Electronics",
+    )
+
+    wb, ws = book()
     # Name the face and size, as Excel and Calc always do. openpyxl's bare
     # Font(bold=True) writes a <font> with no name, which Calc draws in its
     # own serif fallback: that measured the fallback, not the style.
@@ -616,6 +732,14 @@ def tables():
     save(wb, "wrap-text", "A1 text wraps onto several lines; row 1 grows")
 
     wb, ws = book()
+    ws["A1"] = "A merged cell with wrapped text needs the combined width of its columns to fit its row."
+    ws.merge_cells("A1:B1")
+    ws["A1"].alignment = Alignment(wrap_text=True)
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 12
+    save(wb, "wrap-merged", "Wrapped text across merged columns; row height follows the combined column width")
+
+    wb, ws = book()
     ws.column_dimensions["B"].width = 40
     ws.row_dimensions[3].height = 60
     ws["B3"] = "wide and tall"
@@ -628,6 +752,27 @@ def tables():
         "A1:A10", CellIsRule(operator="greaterThan", formula=["50"], fill=PatternFill("solid", bgColor="FFC7CE"))
     )
     save(wb, "conditional", "A6:A10 (values > 50) are pink; A1:A5 are not")
+
+    # TBL-003: a value filter over a labeled column (only North shows;
+    # South/East rows are hidden by the filter, not by hand) plus a
+    # conditional rule owned by the later sheet — the visible
+    # filtered/cleared comparison for worksheet-scoped rules and
+    # persistent filters.
+    wb, ws = book()
+    for r, (region, amount) in enumerate(
+        (("Region", "Amount"), ("North", 10), ("South", 20), ("North", 30), ("East", 40)), start=1
+    ):
+        ws.cell(r, 1, region)
+        ws.cell(r, 2, amount)
+    ws.auto_filter.ref = "A1:B5"
+    ws.auto_filter.add_filter_column(0, ["North"])
+    later = wb.create_sheet("Later")
+    for i in range(1, 6):
+        later.cell(i, 1, i * 10)
+    later.conditional_formatting.add(
+        "A1:A5", CellIsRule(operator="greaterThan", formula=["25"], fill=PatternFill("solid", bgColor="FFC7CE"))
+    )
+    save(wb, "filtered", "Only the North rows show (South/East filtered out); the Later sheet carries its own pink rule")
 
     wb, ws = book()
     for r in range(1, 40):
@@ -702,6 +847,27 @@ def tables():
     ch.width, ch.height = 9, 6
     ws.add_chart(ch, "D2")
     save(wb, "chart-scatter", "An XY scatter of (1,3) (2.5,7) (4,5) (6,9) as points, anchored at D2")
+
+    # TBL-002: two named series with a bottom legend, so a visual
+    # comparison covers multi-series legends — what the single-series
+    # fixtures above cannot show. (No chart/axis titles: neither these
+    # fixtures nor the grid's chart drawing carry them.)
+    from openpyxl.chart.series import SeriesLabel
+    wb, ws = book()
+    for i, (q, a, b) in enumerate((("Q1", 3, 2), ("Q2", 7, 5), ("Q3", 5, 6), ("Q4", 9, 4)), start=1):
+        ws.cell(i, 1, q)
+        ws.cell(i, 2, a)
+        ws.cell(i, 3, b)
+    ch = BarChart()
+    ch.legend.position = "b"
+    ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[0].title = SeriesLabel(v="Sales")
+    ch.add_data(Reference(ws, min_col=3, min_row=1, max_row=4), titles_from_data=False)
+    ch.series[1].title = SeriesLabel(v="Plan")
+    ch.set_categories(Reference(ws, min_col=1, min_row=1, max_row=4))
+    ch.width, ch.height = 9, 6
+    ws.add_chart(ch, "D2")
+    save(wb, "chart-multi", "A bar chart of Sales (3,7,5,9) and Plan (2,5,6,4) over Q1..Q4 with a bottom legend, anchored at D2")
 
 
 # ── Decks (pptx) ──────────────────────────────────────────────────────────
@@ -809,6 +975,88 @@ def decks(img):
     tb.text = "Light text on dark background"
     tb.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
     save(p, "background", "Dark navy slide background with white text")
+
+    # DCK-004, reduced from the pay centre impact assessment (#1397): its
+    # title slide's background is a picture (p:bg -> a:blipFill, stretched
+    # 1% past each side by a:fillRect l="-1000" r="-1000") under a white
+    # title. The picture here is drawn for this fixture: navy, a light
+    # blue outlined box and a white footer band, at the source's 1.8:1
+    # aspect so the stretch onto 16:9 is measurable.
+    from lxml import etree
+    from pptx.oxml.ns import qn
+
+    bg_path = os.path.join(d, "pay-centre-background.png")
+    W, H = 1800, 1000
+    pic = Image.new("RGB", (W, H), (23, 42, 69))
+    draw = ImageDraw.Draw(pic)
+    draw.rectangle([0, 870, W - 1, H - 1], fill=(255, 255, 255))
+    draw.rectangle([60, 880 - 220, 120 + 640, 880 - 120], outline=(0, 170, 230), width=4)
+    draw.rectangle([1500, 905, 1740, 965], fill=(30, 30, 30))
+    pic.save(bg_path)
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    _, rid = s.part.get_or_add_image_part(bg_path)
+    bg = etree.fromstring(
+        '<p:bg xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<p:bgPr><a:blipFill dpi="0" rotWithShape="1">'
+        f'<a:blip r:embed="{rid}"><a:lum/></a:blip><a:srcRect/>'
+        '<a:stretch><a:fillRect l="-1000" r="-1000"/></a:stretch></a:blipFill>'
+        '<a:effectLst/></p:bgPr></p:bg>'
+    )
+    c_sld = s._element.find(qn("p:cSld"))
+    c_sld.insert(0, bg)
+    tb = s.shapes.add_textbox(Inches(0.6), Inches(2.8), Inches(10), Inches(1.5)).text_frame
+    fixed_box(tb)
+    tb.text = "Picture background under a white title"
+    run = tb.paragraphs[0].runs[0]
+    run.font.size, run.font.name = Pt(40), "Arial"
+    run.font.color.rgb = RGBColor(255, 255, 255)
+    save(p, "pay-centre-reduced-picture-background",
+         "A navy picture fills the slide (light blue box, white footer band) under a white 40pt title")
+
+    # DCK-004, reduced from the same title (#1397): one paragraph broken
+    # over three lines with a:br. Dropping the breaks welds "and" to the
+    # next line's first word and rewraps the paragraph. Measured amber
+    # (run 38699284598): words 1.0, lost_lines 0, SSIM 0.86, but disp
+    # 7.1pt > 6pt because our 100% line pitch for 36pt Arial is ~7% tighter
+    # than Impress's — a line-height defect of its own, not the breaks.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(11), Inches(3)).text_frame
+    fixed_box(tb)
+    para = tb.paragraphs[0]
+    for i, line in enumerate(("Line breaks inside one paragraph –", "the second line ends here and", "Departmental Surcharge starts the third")):
+        if i:
+            para.add_line_break()
+        run = para.add_run()
+        run.text = line
+        run.font.size, run.font.name = Pt(36), "Arial"
+    save(p, "pay-centre-reduced-line-breaks",
+         "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
+
+    # DCK-004, reduced from the 2024-2025 delegated authorities report: its
+    # theme was saved on a machine in a dark mode, so lt1 is the system
+    # "window" colour with lastClr="202020". The master's background is
+    # bg1 (lt1), and the window is white: the slide must stay white.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1.5)).text_frame
+    fixed_box(tb)
+    tb.text = "Dark text on the theme's white window background"
+    tb.paragraphs[0].runs[0].font.size = Pt(32)
+    tb.paragraphs[0].runs[0].font.color.rgb = RGBColor(0x54, 0x57, 0x5A)
+    themes = [part for part in p.part.package.iter_parts() if str(part.partname).startswith("/ppt/theme/")]
+    assert themes, "python-pptx's template has a theme part"
+    import re
+    for part in themes:
+        xml = part.blob.decode("utf-8")
+        dark = re.sub(r"<a:lt1>.*?</a:lt1>", '<a:lt1><a:sysClr val="window" lastClr="202020"/></a:lt1>', xml, count=1, flags=re.S)
+        assert dark != xml, "the template's theme names lt1"
+        part._blob = dark.encode("utf-8")
+    save(p, "delegated-authorities-reduced-dark-mode-window",
+         "A white slide (theme lt1 = system window, saved with lastClr 202020) with grey 32pt text")
 
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])

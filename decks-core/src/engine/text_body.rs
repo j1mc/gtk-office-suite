@@ -15,7 +15,7 @@ use letters_core::model::Run;
 
 /// Horizontal alignment of a paragraph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ParaAlign {
     #[default]
     Left,
@@ -70,7 +70,7 @@ impl ParaAlign {
 
 /// The marker in front of a paragraph.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Bullet {
     #[default]
     None,
@@ -83,7 +83,7 @@ pub enum Bullet {
 
 /// Space above or below a paragraph.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Spacing {
     /// Model units (already scaled onto the model's slide).
     Units(f64),
@@ -110,7 +110,7 @@ impl Spacing {
 
 /// One paragraph's layout.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParaStyle {
     pub align: ParaAlign,
     /// List level, 0-based (`a:pPr lvl`).
@@ -133,7 +133,7 @@ pub struct ParaStyle {
 /// in its own font: the default template's "•" is Arial's, a good deal
 /// smaller than the body font's.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MarkerStyle {
     pub font: Option<String>,
     pub size: Option<MarkerSize>,
@@ -143,7 +143,7 @@ pub struct MarkerStyle {
 
 /// A marker's size.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum MarkerSize {
     /// A fraction of the text's size (`buSzPct` / 100000).
     Relative(f64),
@@ -163,7 +163,7 @@ impl MarkerSize {
 
 /// Where the block of text sits vertically in its box.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Anchor {
     #[default]
     Top,
@@ -191,7 +191,7 @@ impl Anchor {
 
 /// Inner margins of a text box, in model units.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Insets {
     pub left: f64,
     pub top: f64,
@@ -209,7 +209,7 @@ impl Insets {
 /// recorded by how much it drew it smaller. Kept as stated rather than
 /// applied to the run sizes, so the sizes the author chose survive a save.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Autofit {
     /// Multiplier on every run's size (`fontScale` / 100000).
     pub font_scale: f64,
@@ -260,7 +260,7 @@ pub fn shrink_font_to_fit(inner_h: f64, measure: &mut dyn FnMut(f64) -> f64) -> 
 /// `TextBody` is a plain box: every paragraph left-aligned, no bullets,
 /// the canvas's own small inset, text from the top.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TextBody {
     pub paras: Vec<ParaStyle>,
     pub anchor: Anchor,
@@ -270,6 +270,25 @@ pub struct TextBody {
     pub autofit: Option<Autofit>,
     /// The layout placeholder the box fills (decks_core::layouts), if any.
     pub placeholder: Option<crate::layouts::Placeholder>,
+    /// The source placeholder the box was read from (DCK-006): the `p:ph`
+    /// type and `idx` as written, so `layouts::arrange` matches the box
+    /// back to its place by stable identity rather than by nth body
+    /// alone. `None` for authored boxes and formats without indices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_key: Option<crate::layouts::PlaceholderKey>,
+    /// The shape the text sits in, drawn under it: a filled or outlined
+    /// box holding text (PowerPoint's shape with text, a navy tile with
+    /// white figures). `None` is a bare text box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Frame>,
+}
+
+/// A text box's own shape: its preset and how it is painted.
+#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Frame {
+    pub kind: super::shape::ShapeKind,
+    pub style: super::shape::ShapeStyle,
 }
 
 impl TextBody {

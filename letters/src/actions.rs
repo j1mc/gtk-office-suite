@@ -197,14 +197,42 @@ pub(crate) fn cycle_line_spacing_in(buf: &gtk::TextBuffer) -> Option<f32> {
     let live = crate::live::of(buf)?;
     let current = live.borrow_mut().paragraph_style_at(caret_or_selection(buf).0)?.line_spacing;
     let next = *LINE_SPACINGS.iter().find(|s| **s > current + 0.01).unwrap_or(&LINE_SPACINGS[0]);
-    restyle_here(buf, |style| letters_core::ParaStyle { line_spacing: next, ..style.clone() }).then_some(next)
+    // Cycling steps through the proportional multiples: a fixed or
+    // minimum height would win over the multiple, so cycling clears it.
+    restyle_here(buf, |style| letters_core::ParaStyle { line_spacing: next, line_height: None, ..style.clone() }).then_some(next)
+}
+
+/// Toggle keep-lines-together on the caret's or selection's paragraphs
+/// as one model op (Word's "Keep lines together"): when the first
+/// paragraph keeps its lines the touched paragraphs stop, otherwise
+/// they start.
+pub(crate) fn toggle_keep_lines_in(buf: &gtk::TextBuffer) -> bool {
+    let Some(live) = crate::live::of(buf) else { return false };
+    let from = caret_or_selection(buf).0;
+    let keeping = live.borrow_mut().paragraph_style_at(from).is_some_and(|s| s.keep_lines);
+    restyle_here(buf, |style| letters_core::ParaStyle { keep_lines: !keeping, ..style.clone() })
+}
+
+/// Toggle widow/orphan control on the caret's or selection's paragraphs
+/// as one model op: controlled (the default) or stranded single lines
+/// allowed. Toggling back removes the override instead of writing an
+/// explicit on, so an imported file keeps its own spelling until
+/// touched.
+pub(crate) fn toggle_widow_control_in(buf: &gtk::TextBuffer) -> bool {
+    let Some(live) = crate::live::of(buf) else { return false };
+    let from = caret_or_selection(buf).0;
+    let free = live.borrow_mut().paragraph_style_at(from).is_some_and(|s| s.widow_control == Some(false));
+    restyle_here(buf, |style| letters_core::ParaStyle {
+        widow_control: if free { None } else { Some(false) },
+        ..style.clone()
+    })
 }
 
 /// Set the caret's or selection's paragraphs' tab stops (points from the
 /// paragraph's left edge) as a model op. The ruler used to put them on a
 /// buffer tag the model never read, so they were not saved.
 pub(crate) fn set_tab_stops_in(buf: &gtk::TextBuffer, tabs: &[f64]) -> bool {
-    restyle_here(buf, |style| letters_core::ParaStyle { tab_stops_pt: tabs.to_vec(), ..style.clone() })
+    restyle_here(buf, |style| letters_core::ParaStyle { tab_stops_pt: tabs.iter().map(|&p| letters_core::TabStop::left(p)).collect(), ..style.clone() })
 }
 
 /// The model mark a toggle name sets, if it is one of the toggles.
@@ -480,10 +508,19 @@ pub fn markdown_macro_at(b: &gtk::TextBuffer, pos: &gtk::TextIter) {
     {
         let offset = pos.offset();
         if offset < 2 { return; }
-
-        let mut line_start = *pos;
-        line_start.set_line_offset(0);
-        let before = b.text(&line_start, pos, false);
+        // The pattern scan reads the model (LET-003): the caret's buffer
+        // offset maps to a sequence offset, and the text before it comes
+        // from the paragraph's sequence text, not the buffer's line (whose
+        // list marker and table pipes are presentation, not content).
+        let Some(live) = crate::live::of(b) else { return };
+        let mut m = live.borrow_mut();
+        let caret = m.sequence_offset(offset.max(0) as usize);
+        let doc = m.document().clone();
+        drop(m);
+        let Some((para, _)) = letters_core::edit::locate(&doc, caret) else { return };
+        let seq: Vec<char> = letters_core::edit::sequence_text(&doc).chars().collect();
+        let pstart = letters_core::edit::paragraph_start(&doc, para);
+        let before: String = seq[pstart..caret.min(seq.len())].iter().collect();
 
         if let Some(inner) = extract_md_pattern(&before, "**", "**") {
             apply_md_pattern(b, pos, "**", inner, "bold");

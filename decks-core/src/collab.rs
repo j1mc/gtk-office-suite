@@ -12,9 +12,11 @@
 //! - a slide's children are its objects, in z-order.
 //!
 //! Each node's fields are last-writer-wins registers in its metadata map:
-//! - a slide: `title`, `bg`, `notes`, `master` and `tr` (the transition),
-//!   and `builds`, whose entries name their object by its node, not by its
-//!   index, so a concurrent insert or move doesn't retarget a build;
+//! - a slide: `title`, `bg`, `notes`, `master` (the master's stable id)
+//!   and `tr` (the transition), `layout` (the layout's stable id within
+//!   its master), and `builds`, whose entries name their object by its
+//!   node, not by its index, so a concurrent insert or move doesn't
+//!   retarget a build;
 //! - an object: `v`, its kind, and one register `f.<field>` per field of
 //!   that kind (`f.x`, `f.text`, `f.style`, ...), so one person moving a box
 //!   while another edits its text keeps both.
@@ -40,8 +42,9 @@
 //! - Text is one register per field: two people typing in the same box at
 //!   once keep one person's text. Rich text as a Loro `Text` is Letters'
 //!   phase.
-//! - `master` is an index into the deck's masters, which aren't replicated
-//!   yet.
+//! - `master`/`layout` name stable master/layout ids, but the masters
+//!   themselves aren't replicated yet: a rebuilt deck keeps the ids, and
+//!   the local session resolves them against its own masters.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -288,14 +291,15 @@ impl Replica {
         let meta = self.meta(node);
         put(&meta, "title", &s.title);
         put(&meta, "bg", &s.background);
+        put(&meta, "bgpic", &json(&s.background_picture));
         put(&meta, "notes", &s.notes);
-        put(&meta, "master", &json(&s.master_idx));
+        put(&meta, "master", &json(&s.master_id));
         put(&meta, "tr", &json(&s.transition));
-        put(&meta, "layout", &json(&s.layout));
+        put(&meta, "layout", &json(&s.layout_id));
         let builds: Vec<StoredBuild> = s
             .builds
             .iter()
-            .filter_map(|b| Some((self.nodes.get(s.ids.objects.get(b.object)?)?.to_string(), b.effect, b.out)))
+            .filter_map(|b| Some((self.nodes.get(&b.object)?.to_string(), b.effect, b.out)))
             .collect();
         put(&meta, "builds", &json(&builds));
     }
@@ -414,30 +418,32 @@ impl Replica {
             let mut s = Slide {
                 title: string_at(&meta, "title").unwrap_or_default(),
                 background: string_at(&meta, "bg").unwrap_or_default(),
+                background_picture: string_at(&meta, "bgpic").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
                 objects: Vec::new(),
                 notes: string_at(&meta, "notes").unwrap_or_default(),
-                master_idx: string_at(&meta, "master").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
+                master_id: string_at(&meta, "master").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
                 transition: string_at(&meta, "tr").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Transition::None),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: string_at(&meta, "layout").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
+                layout_id: string_at(&meta, "layout").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
             };
             s.ids.slide = id_for(node);
-            let mut index_of: HashMap<String, usize> = HashMap::new();
+            let mut id_of_node: HashMap<String, u64> = HashMap::new();
             for o in self.tree.children(node).unwrap_or_default() {
                 let meta = self.meta(o);
                 if is_deleted(&meta) {
                     continue;
                 }
                 let Some(object) = read_object(&meta) else { continue };
-                index_of.insert(o.to_string(), s.objects.len());
+                let id = id_for(o);
+                id_of_node.insert(o.to_string(), id);
                 s.objects.push(object);
-                s.ids.objects.push(id_for(o));
+                s.ids.objects.push(id);
             }
             let stored: Vec<StoredBuild> = string_at(&meta, "builds").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
             s.builds = stored
                 .into_iter()
-                .filter_map(|(o, effect, out)| Some(Build { object: *index_of.get(&o)?, effect, out }))
+                .filter_map(|(o, effect, out)| Some(Build { object: *id_of_node.get(&o)?, effect, out }))
                 .collect();
             deck.push(s);
         }

@@ -54,6 +54,23 @@ fn an_odt_whose_content_expands_past_the_budget_is_refused_not_allocated() {
     );
 }
 
+/// DOCX preflight must budget binary members as well as XML. Embedded media
+/// and objects are attacker-controlled package members too, and the parser
+/// must never get a chance to decompress one past the shared limit.
+#[test]
+fn a_docx_whose_binary_member_expands_past_the_budget_is_refused() {
+    let file = package(
+        &[("word/media/bomb.bin", OVERSIZED)],
+        &[("word/document.xml", "<w:document xmlns:w=\"w\"><w:body/></w:document>")],
+    );
+    let err = letters_core::docx::read(file.path().to_str().unwrap())
+        .expect_err("an oversized binary DOCX member must not be read");
+    assert!(
+        err.contains("package member") || err.contains("decompress"),
+        "the error must name the limit it hit, got: {err}"
+    );
+}
+
 /// styles.xml is optional, so an oversized one must not fail the document
 /// — but it must not be read either. The document opens with default
 /// styling, which is what a missing styles.xml already did.

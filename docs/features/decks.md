@@ -19,6 +19,12 @@ the pill at the bottom steps through slides and starts the show
 (**F5**). The Insert buttons (Text, Shape, Table, Chart, Image) are in the
 header bar. In a narrow window they fold into a single Insert menu.
 
+Double-click a text box to edit its text. **Return** inserts a new line;
+**Ctrl+Return** or **Apply** commits the edit. **Escape** or **Cancel** discards
+the draft. Closing the editor by clicking outside commits it. Committed edits
+support undo and redo. This is a plain-text editor, not a rich-text selection
+toolbar.
+
 ## The Format sidebar
 
 *The Format sidebar for a slide: its layout, background and transition.*
@@ -92,6 +98,11 @@ next one, the notes and a running clock. **F5** presents: with a second
 monitor the audience sees the slides there while the presenter view stays
 on the laptop, and with one monitor the audience view is shown alone.
 
+If an image file is missing, Decks asks before opening the show. **Cancel**
+lets you restore it; **Continue Anyway** presents with missing artwork.
+The check includes images on the referenced master and layout, but does not
+check whether an existing image file can be decoded.
+
 ## Dark style
 
 *Decks in the dark style.*
@@ -108,6 +119,11 @@ Without a screenshot of their own:
 - **Export** as PDF, as handouts, or as PNG images.
 - **Crash recovery**: unsaved work is snapshotted and offered back after a
   crash.
+- **Source safety**: if the original presentation is missing or cannot be
+  inspected, saving over it is blocked. To recover your current edits, use
+  **Save As** with a new filename and explicitly choose **Save Copy** in the
+  unverified-copy warning. Imported content may be missing from that copy;
+  the original is not replaced.
 
 ## Gaps these screenshots show
 

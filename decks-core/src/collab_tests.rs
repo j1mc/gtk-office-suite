@@ -37,13 +37,14 @@ fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
     Slide {
         title: title.into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects,
         notes: String::new(),
-        master_idx: None,
+        master_id: None,
         transition: Transition::None,
         builds: vec![],
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -56,9 +57,17 @@ fn base() -> Vec<Slide> {
 }
 
 /// The deck as the document defines it: what a person sees, without the
-/// local ids (each peer numbers its own).
+/// local ids (each peer numbers its own). Builds name stable object ids,
+/// so they are normalized to z-positions for the comparison.
 fn content(deck: &[Slide]) -> String {
-    let plain: Vec<Slide> = deck.iter().map(|s| Slide { ids: Default::default(), ..s.clone() }).collect();
+    let plain: Vec<Slide> = deck.iter().map(|s| {
+        let mut s = s.clone();
+        for b in s.builds.iter_mut() {
+            b.object = s.ids.objects.iter().position(|id| *id == b.object).unwrap_or(usize::MAX) as u64;
+        }
+        s.ids = Default::default();
+        s
+    }).collect();
     format!("{plain:#?}")
 }
 
@@ -121,7 +130,7 @@ fn random_op(rng: &mut Rng, deck: &[Slide]) -> Option<Op> {
         }
         _ => {
             let mut p = SlideProps::of(s);
-            p.builds.push(Build { object: pick?, effect: BuildEffect::ALL[rng.below(BuildEffect::ALL.len())], out: rng.below(2) == 1 });
+            p.builds.push(Build { object: s.ids.objects[pick?], effect: BuildEffect::ALL[rng.below(BuildEffect::ALL.len())], out: rng.below(2) == 1 });
             Op::SetSlide { slide: s.ids.slide, props: Box::new(p) }
         }
     })
@@ -283,15 +292,17 @@ fn concurrent_inserts_at_one_place_keep_both_in_one_order() {
 fn builds_follow_their_object_through_concurrent_reorders() {
     let (mut a, mut deck_a, mut b, mut deck_b) = pair();
     // A builds the third object in; B moves the first object to the top.
+    let third = deck_a[0].ids.objects[2];
     let mut p = SlideProps::of(&deck_a[0]);
-    p.builds.push(Build { object: 2, effect: BuildEffect::Dissolve, out: false });
+    p.builds.push(Build { object: third, effect: BuildEffect::Dissolve, out: false });
     let sa = deck_a[0].ids.slide;
     edit(&mut deck_a, &mut a, vec![Op::SetSlide { slide: sa, props: Box::new(p) }]);
     let (sb, ob) = (deck_b[0].ids.slide, deck_b[0].ids.objects[0]);
     edit(&mut deck_b, &mut b, vec![Op::MoveObject { slide: sb, id: ob, to: 2 }]);
     let (deck_a, deck_b) = merged(a, b);
     for deck in [&deck_a, &deck_b] {
-        let built = &deck[0].objects[deck[0].builds[0].object];
+        let at = deck[0].object_index(deck[0].builds[0].object).expect("the build still names a live object");
+        let built = &deck[0].objects[at];
         assert!(matches!(built, SlideObject::Rect { x, .. } if *x == 200.0), "the build still names the same object: {built:?}");
     }
 }

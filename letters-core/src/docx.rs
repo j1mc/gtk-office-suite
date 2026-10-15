@@ -6,21 +6,48 @@
 // flattened (see read()). Fidelity is measured by tests/docx.rs and the
 // LO-authored corpus in tests/lo_parity.rs.
 
-use crate::model::{Alignment, Document, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParaStyle, Run, RunStyle};
+use crate::model::{Alignment, BorderStyle, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParaBorder, ParaBorders, ParaStyle, Run, RunStyle, TabAlign, TabLeader, TabStop};
 use rdocx_oxml::shared::ST_Jc;
 
 /// The body-paragraph properties rdocx does not hand back, in twips.
 ///
-/// Two unrelated gaps share one scan of `word/document.xml`: the
-/// strict-OOXML indents rdocx never parses, and the tab stops it parses
-/// but exposes only as a count (`tab_stop_count`), with no positions.
+/// Several unrelated gaps share one scan of `word/document.xml`: the
+/// strict-OOXML indents rdocx never parses, the tab stops it parses but
+/// exposes only as a count (`tab_stop_count`), with no positions,
+/// alignments or leaders, the line rule (`line_spacing` reports the
+/// length but not exact vs atLeast), and the per-side paragraph borders
+/// (only the bottom edge has a reader).
 #[derive(Clone, Default)]
 struct RawPara {
     start_twips: Option<f64>,
     end_twips: Option<f64>,
-    tab_twips: Vec<f64>,
+    tabs: Vec<RawTab>,
     /// Direct `w:contextualSpacing` (rdocx does not model it).
     contextual: bool,
+    /// Direct `w:lineRule` of the paragraph's `w:spacing`.
+    line_rule: Option<String>,
+    /// Direct `w:pBdr` edges: top, left, bottom, right. `None` is no
+    /// direct edge; `Some(None)` is a direct edge the model drops
+    /// (nil, or an unmodelled look), which still suppresses the style's.
+    borders: [Option<Option<RawBorder>>; 4],
+}
+
+/// A tab stop as the file spells it: its position in twips, its
+/// alignment (`w:val`) and its leader (`w:leader`).
+#[derive(Clone, Copy)]
+struct RawTab {
+    twips: f64,
+    align: TabAlign,
+    leader: TabLeader,
+}
+
+/// One `w:pBdr` edge as the file spells it: a modelled look, an RRGGBB
+/// colour and a width in points.
+#[derive(Clone)]
+struct RawBorder {
+    style: BorderStyle,
+    color: String,
+    width_pt: f64,
 }
 
 /// Per body paragraph: strict-spelled indents and tab-stop positions.
@@ -73,6 +100,30 @@ fn raw_paragraph_props(path: &str) -> RawParas {
         // a tab character inside a run. Only the former has a position,
         // so the flag is what keeps a tabbed line from inventing stops.
         let mut in_tabs = false;
+        // The paragraph whose properties the scan is inside, if the scan
+        // pushed one for it: `w:p` inside a text box (`w:txbxContent`)
+        // is not a body paragraph, so it pushes none and sets none of
+        // these. Without the box guard a text box's paragraphs threw the
+        // positional pairing off and the whole scan was discarded.
+        let mut txbx_depth = 0usize;
+        let mut in_para = false;
+        // Inside the paragraph's own `w:pPr` (depth 1; a `w:pPrChange`
+        // holds the old value, not the paragraph's), and outside any
+        // `w:rPr` (a run's `w:spacing` is letter spacing, and a paragraph
+        // mark's sits in the `w:pPr`'s own `w:rPr`).
+        let mut ppr_depth = 0u32;
+        let mut rpr_depth = 0u32;
+        let mut in_pbdr = false;
+        // The paragraph list the current paragraph feeds, if any: what
+        // the scanned properties below append to.
+        let mut list: Option<usize> = None;
+        fn last_mut(out: &mut RawParas, list: Option<usize>) -> Option<&mut RawPara> {
+            match list {
+                Some(0) => out.body.last_mut(),
+                Some(1) => out.cells.last_mut(),
+                _ => None,
+            }
+        }
         loop {
             match reader.read_event()? {
                 quick_xml::events::Event::Eof => break,
@@ -83,34 +134,81 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         }
                         table_depth += 1;
                     }
+                    "w:txbxContent" => txbx_depth += 1,
                     "w:tabs" => in_tabs = true,
                     "w:p" => {
-                        if let Some(list) = at(&mut out, table_depth) {
-                            list.push(RawPara::default());
+                        // A skipped paragraph (in a text box, or nested
+                        // past the tables the scan pairs) clears the
+                        // attachment: its properties belong to no entry.
+                        if txbx_depth == 0 {
+                            if let Some(fed) = at(&mut out, table_depth) {
+                                fed.push(RawPara::default());
+                                list = Some(table_depth.min(1));
+                                in_para = true;
+                            } else {
+                                list = None;
+                            }
+                        } else {
+                            list = None;
                         }
+                    }
+                    "w:pPr" if in_para => {
+                        ppr_depth += 1;
+                    }
+                    "w:rPr" => rpr_depth += 1,
+                    "w:pBdr" if in_para && ppr_depth == 1 => {
+                        in_pbdr = true;
                     }
                     _ => {}
                 },
                 quick_xml::events::Event::End(e) => match e.name().as_ref() {
                     "w:tbl" => table_depth = table_depth.saturating_sub(1),
+                    "w:txbxContent" => txbx_depth = txbx_depth.saturating_sub(1),
                     "w:tabs" => in_tabs = false,
+                    "w:p" => {
+                        if txbx_depth == 0 {
+                            in_para = false;
+                            ppr_depth = 0;
+                            in_pbdr = false;
+                        } else {
+                            // A text box's paragraph ends: attachment
+                            // returns to the outer paragraph's list.
+                            list = match table_depth {
+                                0 => Some(0),
+                                1 => Some(1),
+                                _ => None,
+                            };
+                        }
+                    }
+                    "w:pPr" => {
+                        ppr_depth = ppr_depth.saturating_sub(1);
+                        if ppr_depth == 0 {
+                            in_pbdr = false;
+                        }
+                    }
+                    "w:rPr" => rpr_depth = rpr_depth.saturating_sub(1),
+                    "w:pBdr" => in_pbdr = false,
                     _ => {}
                 },
                 quick_xml::events::Event::Empty(e) => match e.name().as_ref() {
                     // A `w:p` with nothing in it is still a paragraph.
                     "w:p" => {
-                        if let Some(list) = at(&mut out, table_depth) {
-                            list.push(RawPara::default());
+                        if txbx_depth == 0 {
+                            if let Some(fed) = at(&mut out, table_depth) {
+                                fed.push(RawPara::default());
+                            }
                         }
                     }
                     "w:tab" if in_tabs => {
-                        let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) else { continue };
+                        let Some(last) = last_mut(&mut out, list) else { continue };
                         let mut pos = None;
                         let mut val = None;
+                        let mut leader = None;
                         for a in e.attributes().with_checks(false).flatten() {
                             match a.key.as_ref() {
                                 "w:pos" => pos = a.value.trim().parse::<f64>().ok(),
                                 "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
+                                "w:leader" => leader = Some(a.value.trim().to_ascii_lowercase()),
                                 _ => {}
                             }
                         }
@@ -121,21 +219,35 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                         // list's numbering gap, not user tab stops. An
                         // allowlist keeps each of those from arriving as
                         // a phantom stop the document never had.
-                        let keep = matches!(
-                            val.as_deref().unwrap_or("left"),
-                            "left" | "start" | "center" | "centre" | "right" | "end" | "decimal"
-                        );
-                        if let (Some(v), true) = (pos, keep) {
-                            last.tab_twips.push(v);
+                        let align = match val.as_deref().unwrap_or("left") {
+                            "left" | "start" => Some(TabAlign::Left),
+                            "center" | "centre" => Some(TabAlign::Center),
+                            "right" | "end" => Some(TabAlign::Right),
+                            "decimal" => Some(TabAlign::Decimal),
+                            _ => None,
+                        };
+                        // `heavy` is a thick rule the model has no look
+                        // for: it draws as an underscore, and the save
+                        // dialog says so (`loss::content_a_save_drops`).
+                        let leader = match leader.as_deref().unwrap_or("none") {
+                            "none" => Some(TabLeader::None),
+                            "dot" => Some(TabLeader::Dot),
+                            "hyphen" => Some(TabLeader::Hyphen),
+                            "underscore" | "heavy" => Some(TabLeader::Underscore),
+                            "middledot" => Some(TabLeader::MiddleDot),
+                            _ => None,
+                        };
+                        if let (Some(v), Some(align), Some(leader)) = (pos, align, leader) {
+                            last.tabs.push(RawTab { twips: v, align, leader });
                         }
                     }
                     "w:contextualSpacing" => {
-                        if let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) {
+                        if let Some(last) = last_mut(&mut out, list) {
                             last.contextual = on_off(&e);
                         }
                     }
                     "w:ind" => {
-                        let Some(last) = at(&mut out, table_depth).and_then(|l| l.last_mut()) else { continue };
+                        let Some(last) = last_mut(&mut out, list) else { continue };
                         for a in e.attributes().with_checks(false).flatten() {
                             let v = || {
                                 a.value.trim().parse::<f64>().ok()
@@ -147,6 +259,26 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                             }
                         }
                     }
+                    "w:spacing" => {
+                        if in_para && ppr_depth == 1 && rpr_depth == 0 {
+                            let Some(last) = last_mut(&mut out, list) else { continue };
+                            for a in e.attributes().with_checks(false).flatten() {
+                                if a.key.as_ref() == "w:lineRule" {
+                                    last.line_rule = Some(a.value.trim().to_ascii_lowercase());
+                                }
+                            }
+                        }
+                    }
+                    "w:top" | "w:left" | "w:bottom" | "w:right" if in_pbdr => {
+                        let Some(last) = last_mut(&mut out, list) else { continue };
+                        let idx = match e.name().as_ref() {
+                            "w:top" => 0,
+                            "w:left" => 1,
+                            "w:bottom" => 2,
+                            _ => 3,
+                        };
+                        last.borders[idx] = Some(raw_border(&e));
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -155,6 +287,40 @@ fn raw_paragraph_props(path: &str) -> RawParas {
         Ok(out)
     }
     scan(path).unwrap_or_default()
+}
+
+/// One `w:pBdr` edge as a modelled border, if its look is one the model
+/// keeps. Anything else (`w:val` wave, triple, inset and the rest) reads
+/// as no border here, and the save dialog names it (`loss`), never a
+/// silent restyle.
+fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
+    let mut val = None;
+    let mut sz = None;
+    let mut color = None;
+    for a in e.attributes().with_checks(false).flatten() {
+        match a.key.as_ref() {
+            "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
+            "w:sz" => sz = a.value.trim().parse::<f64>().ok(),
+            "w:color" => color = Some(a.value.trim().to_ascii_uppercase()),
+            _ => {}
+        }
+    }
+    let style = match val.as_deref().unwrap_or("single") {
+        "nil" | "none" => return None,
+        "single" | "thick" => BorderStyle::Single,
+        "double" => BorderStyle::Double,
+        "dotted" => BorderStyle::Dotted,
+        "dashed" | "dashSmallGap" => BorderStyle::Dashed,
+        _ => return None,
+    };
+    // "auto" is Word's current-text colour, which here is black; anything
+    // that is not six hex digits cannot go back into a file, so it reads
+    // as black too rather than corrupting the save.
+    let color = match color.as_deref() {
+        Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_string(),
+        _ => "000000".to_string(),
+    };
+    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0 })
 }
 
 /// Lay the scanned properties over what rdocx read. Transitional wins
@@ -167,7 +333,104 @@ fn apply_strict_indents(style: &mut ParaStyle, raw: &RawPara) {
     if style.right_indent_pt == 0.0 {
         if let Some(tw) = raw.end_twips { style.right_indent_pt = tw / 20.0; }
     }
-    style.tab_stops_pt = raw.tab_twips.iter().map(|tw| tw / 20.0).collect();
+    apply_raw_typography(style, raw);
+}
+
+/// Lay the scanned direct typography over what rdocx read: tab stops
+/// with their alignments and leaders. rdocx exposes stops as a count
+/// only, so the scan is the only source.
+fn apply_raw_typography(style: &mut ParaStyle, raw: &RawPara) {
+    style.tab_stops_pt = raw
+        .tabs
+        .iter()
+        .map(|t| TabStop { pos_pt: t.twips / 20.0, align: t.align, leader: t.leader })
+        .collect();
+}
+
+/// A paragraph's borders: its style chain's edges, with the scanned
+/// direct edges over them. A direct edge the model drops (nil, or an
+/// unmodelled look) still suppresses the style's, as Word draws it.
+fn para_borders(raw: Option<&RawPara>, styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
+    let base = styled_borders(styled);
+    let Some(raw) = raw else { return base };
+    let [top, left, bottom, right] = &raw.borders;
+    let pick = |direct: &Option<Option<RawBorder>>, fallback: Option<ParaBorder>| {
+        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt })).unwrap_or(fallback)
+    };
+    ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) }
+}
+
+/// A style chain's `w:pBdr` edges as modelled borders.
+fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
+    let edge = |b: Option<&rdocx_oxml::borders::CT_BorderEdge>| b.and_then(styled_edge_border);
+    match &styled.borders {
+        Some(b) => ParaBorders {
+            top: edge(b.top.as_ref()),
+            left: edge(b.left.as_ref()),
+            bottom: edge(b.bottom.as_ref()),
+            right: edge(b.right.as_ref()),
+        },
+        None => ParaBorders::default(),
+    }
+}
+
+/// One style-chain border edge as a modelled border, if its look is one
+/// the model keeps (see `raw_border`).
+fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBorder> {
+    use rdocx_oxml::shared::ST_Border;
+    let style = match e.val {
+        ST_Border::None => return None,
+        ST_Border::Single | ST_Border::Thick => BorderStyle::Single,
+        ST_Border::Double => BorderStyle::Double,
+        ST_Border::Dotted => BorderStyle::Dotted,
+        ST_Border::Dashed => BorderStyle::Dashed,
+        _ => return None,
+    };
+    let color = match e.color.as_deref() {
+        Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_uppercase(),
+        _ => "000000".to_string(),
+    };
+    Some(ParaBorder { style, color, width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0) })
+}
+
+/// A paragraph's fixed or minimum line height: the direct `w:spacing`
+/// length when its rule is exact/atLeast, else the style chain's.
+/// The auto rule is already a multiple (`line_spacing_multiple`).
+fn para_line_height(
+    direct_multiple: Option<f64>,
+    direct_len: Option<rdocx::Length>,
+    raw_rule: Option<&str>,
+    styled: &rdocx_oxml::properties::CT_PPr,
+) -> Option<LineHeight> {
+    if direct_multiple.is_some() {
+        return None;
+    }
+    if let Some(len) = direct_len {
+        let pt = len.to_pt();
+        return match raw_rule.or(styled.line_rule.as_deref()) {
+            Some("atLeast") | Some("atleast") => Some(LineHeight::Minimum(pt)),
+            _ => Some(LineHeight::Exact(pt)),
+        };
+    }
+    let line = styled.line_spacing?;
+    let pt = f64::from(line.0) / 20.0;
+    match styled.line_rule.as_deref() {
+        Some("exact") => Some(LineHeight::Exact(pt)),
+        Some("atLeast") | Some("atleast") => Some(LineHeight::Minimum(pt)),
+        _ => None,
+    }
+}
+
+/// A paragraph's shading fill: its own `w:shd`, else its style's.
+/// "auto" is no fill; the fill is an RRGGBB claim.
+fn para_shading(direct: Option<&str>, styled: &rdocx_oxml::properties::CT_PPr) -> Option<String> {
+    let fill = direct
+        .filter(|f| !f.eq_ignore_ascii_case("auto") && !f.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            styled.shading.as_ref().and_then(|s| s.fill.clone()).filter(|f| !f.eq_ignore_ascii_case("auto") && !f.is_empty())
+        })?;
+    Some(fill.trim_start_matches('#').to_uppercase())
 }
 
 /// An OOXML on/off element's value: present means on, unless `w:val`
@@ -290,7 +553,49 @@ fn read_on_this_thread(path: &str) -> Result<Document, String> {
     if footer.is_some() {
         read.footer = footer;
     }
+    let [(header_pictures, header_alignment), (footer_pictures, footer_alignment)] = header_footer_extras(path);
+    (read.header_pictures, read.header_alignment) = (header_pictures, header_alignment);
+    (read.footer_pictures, read.footer_alignment) = (footer_pictures, footer_alignment);
     Ok(read)
+}
+
+/// The pictures of the default header and footer (a letterhead's logo),
+/// each kept in the media cache like a body picture (#455), and how each
+/// part's text is aligned.
+fn header_footer_extras(path: &str) -> [(Vec<Run>, Alignment); 2] {
+    let none = || [(Vec::new(), Alignment::Left), (Vec::new(), Alignment::Left)];
+    let Some(mut zip) = std::fs::File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok()) else { return none() };
+    let (Some(document), Some(rels)) = (part_text(&mut zip, "word/document.xml"), part_text(&mut zip, "word/_rels/document.xml.rels")) else {
+        return none();
+    };
+    let styles = part_text(&mut zip, "word/styles.xml").unwrap_or_default();
+    let (h, f) = crate::docx_fields::default_parts(&document, &rels);
+    let mut extras = |part: Option<String>| -> (Vec<Run>, Alignment) {
+        let Some(part) = part else { return (Vec::new(), Alignment::Left) };
+        let Some(xml) = part_text(&mut zip, &part) else { return (Vec::new(), Alignment::Left) };
+        let (dir, file) = part.rsplit_once('/').unwrap_or(("", part.as_str()));
+        let part_rels = part_text(&mut zip, &format!("{dir}/_rels/{file}.rels")).unwrap_or_default();
+        let pictures = crate::docx_anchors::pictures_in(&xml)
+            .into_iter()
+            .filter_map(|pic| {
+                let target = crate::docx_anchors::relationship_target(&part_rels, &pic.embed)?;
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut zip.by_name(&target).ok()?, &mut bytes).ok()?;
+                let path = suite_common_core::media_cache::persist(&bytes).ok()?;
+                Some(Run {
+                    text: pic.alt,
+                    style: RunStyle {
+                        image: Some(path.to_string_lossy().into_owned()),
+                        image_extent_emu: pic.extent,
+                        image_anchor: pic.anchor,
+                        ..Default::default()
+                    },
+                })
+            })
+            .collect();
+        (pictures, crate::docx_fields::alignment(&xml, &styles))
+    };
+    [extras(h), extras(f)]
 }
 
 /// A zip part's text, if it is there.
@@ -355,6 +660,165 @@ fn tabs_as_elements(xml: &str) -> String {
         rest = &rest[close..];
     }
     out.push_str(rest);
+    out
+}
+
+/// One tab stop as builders spell it: its alignment, and its leader.
+/// rdocx names no middle dot: a middle dot writes as a dot, which the
+/// reader reads back as a dot (ODT keeps the middle dot exactly).
+fn emit_tab_stop<'a>(p: rdocx::Paragraph<'a>, stop: &TabStop) -> rdocx::Paragraph<'a> {
+    let align = match stop.align {
+        TabAlign::Center => rdocx::TabAlignment::Center,
+        TabAlign::Right => rdocx::TabAlignment::Right,
+        TabAlign::Decimal => rdocx::TabAlignment::Decimal,
+        TabAlign::Left => rdocx::TabAlignment::Left,
+    };
+    let pos = rdocx::Length::pt(stop.pos_pt);
+    match stop.leader {
+        TabLeader::None => p.add_tab_stop(align, pos),
+        TabLeader::Dot => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Dot),
+        TabLeader::Hyphen => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Hyphen),
+        TabLeader::Underscore => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Underscore),
+        TabLeader::MiddleDot => p.add_tab_stop_with_leader(align, pos, rdocx::TabLeader::Dot),
+    }
+}
+
+/// A document paragraph's properties rdocx cannot emit, in document
+/// order: whether its line rule is atLeast (`set_line_spacing_at_least`
+/// is crate-internal, so minima are written exact and fixed below) and
+/// its per-side borders (only all-sides and bottom have builders).
+struct ParaPost {
+    at_least: bool,
+    borders: Option<ParaBorders>,
+}
+
+impl ParaPost {
+    fn of(style: &ParaStyle) -> Self {
+        Self {
+            at_least: matches!(style.line_height, Some(LineHeight::Minimum(_))),
+            borders: if style.borders.is_empty() { None } else { Some(style.borders.clone()) },
+        }
+    }
+
+    fn trivial() -> Self {
+        Self { at_least: false, borders: None }
+    }
+
+    fn nontrivial(&self) -> bool {
+        self.at_least || self.borders.is_some()
+    }
+}
+
+/// Fix the properties of `specs` into the document's paragraphs, the
+/// n-th `<w:p>` taking the n-th spec. Specs run with the paragraphs in
+/// document order — body and table cells, separators included, covered
+/// cells already removed — which is how rdocx serializes them.
+fn para_post_pass(xml: &str, specs: &[ParaPost]) -> String {
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    let mut n = 0usize;
+    while let Some(at) = find_para(rest) {
+        let Some(open_end) = rest[at..].find('>').map(|e| at + e + 1) else { break };
+        out.push_str(&rest[..open_end]);
+        rest = &rest[open_end..];
+        let self_closed = out.ends_with("/>");
+        let Some(spec) = specs.get(n) else { n += 1; continue };
+        n += 1;
+        if !spec.nontrivial() || self_closed {
+            continue;
+        }
+        // The paragraph's extent: to its closing tag. A `w:p` never
+        // nests, so the first close is its own.
+        let Some(close) = rest.find("</w:p>") else { break };
+        let (body, tail) = rest.split_at(close);
+        let mut fixed = body.to_string();
+        if spec.at_least {
+            fixed = fixed.replacen("w:lineRule=\"exact\"", "w:lineRule=\"atLeast\"", 1);
+        }
+        if let Some(borders) = spec.borders.as_ref() {
+            let pbdr = pbdr_xml(borders);
+            if let Some(ppr) = find_ppr(&fixed) {
+                let Some(end) = fixed[ppr..].find('>').map(|e| ppr + e + 1) else { break };
+                if fixed[..end].ends_with("/>") {
+                    fixed.replace_range(end - 2..end, &format!(">{pbdr}</w:pPr>"));
+                } else {
+                    // `w:pBdr` sorts with the paragraph properties, ahead
+                    // of shading, tabs, spacing, indents and justification.
+                    let slot = ["<w:shd", "<w:tabs", "<w:spacing", "<w:ind", "<w:jc"]
+                        .into_iter()
+                        .filter_map(|t| fixed[end..].find(t).map(|e| end + e))
+                        .min()
+                        .or_else(|| fixed.find("</w:pPr>"));
+                    let Some(slot) = slot else { break };
+                    fixed.insert_str(slot, &pbdr);
+                }
+            } else {
+                fixed.insert_str(0, &format!("<w:pPr>{pbdr}</w:pPr>"));
+            }
+        }
+        out.push_str(&fixed);
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `<w:p` open tags only: `<w:pPr`, `<w:pStyle` and the rest are not
+/// paragraphs. Returns the tag's start.
+fn find_para(xml: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = xml[from..].find("<w:p").map(|e| from + e) {
+        match xml.as_bytes().get(at + 4) {
+            Some(b'>') | Some(b' ') | Some(b'/') => return Some(at),
+            _ => from = at + 4,
+        }
+    }
+    None
+}
+
+/// `<w:pPr` open tags only: `<w:pPrChange` is the old value, not the
+/// paragraph's. Returns the tag's start.
+fn find_ppr(xml: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = xml[from..].find("<w:pPr").map(|e| from + e) {
+        match xml.as_bytes().get(at + 6) {
+            Some(b'>') | Some(b' ') | Some(b'/') => return Some(at),
+            _ => from = at + 6,
+        }
+    }
+    None
+}
+
+/// A paragraph's per-side borders as a `w:pBdr` element. Widths are
+/// eighths of a point; the content gap is a point, as Word writes it.
+fn pbdr_xml(borders: &ParaBorders) -> String {
+    let edge = |name: &str, e: &ParaBorder| {
+        let val = match e.style {
+            BorderStyle::Single => "single",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+        };
+        format!(
+            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"1\" w:color=\"{}\"/>",
+            (e.width_pt * 8.0).round().clamp(1.0, 96.0) as u32,
+            e.color
+        )
+    };
+    let mut out = String::from("<w:pBdr>");
+    if let Some(e) = &borders.top {
+        out.push_str(&edge("top", e));
+    }
+    if let Some(e) = &borders.left {
+        out.push_str(&edge("left", e));
+    }
+    if let Some(e) = &borders.bottom {
+        out.push_str(&edge("bottom", e));
+    }
+    if let Some(e) = &borders.right {
+        out.push_str(&edge("right", e));
+    }
+    out.push_str("</w:pBdr>");
     out
 }
 
@@ -453,7 +917,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         if p.style_id() == Some("HorizontalLine") && p.text().is_empty() {
             continue;
         }
-        let mut para = map_paragraph(&doc, p, None);
+        let mut para = map_paragraph(&doc, p, None, raw.as_ref().and_then(|s| s.get(i)));
         // A run-level break after this paragraph's text belongs to the
         // paragraph that follows, which is where LibreOffice puts the
         // break it converts from an ODF `fo:break-before`. The trailing
@@ -491,9 +955,6 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         let direct_contextual = raw.as_ref().and_then(|s| s.get(i)).is_some_and(|r| r.contextual);
         let is_contextual = direct_contextual || style_id.as_deref().is_some_and(|id| contextual_ids.contains(id));
         contextual.push((style_id, is_contextual));
-        if let Some(r) = raw.as_ref().and_then(|s| s.get(i)) {
-            apply_strict_indents(&mut para.style, r);
-        }
         list_indent_from_declared(&doc, p, &mut para.style);
         word_numbers.push(counter.number(&doc, p, &mut para.style));
         paragraphs.push(para);
@@ -532,17 +993,56 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     }
     let raw_cells = (raw_cells.len() == cell_paragraphs).then_some(raw_cells);
     let mut cell_index = 0usize;
+    let mut table_spans: std::collections::BTreeMap<u32, Vec<crate::model::CellSpan>> = Default::default();
     for (ti, table) in tables.iter().enumerate() {
         let mut paragraphs: Vec<Paragraph> = Vec::new();
+        let spans = table_spans.entry(ti as u32).or_default();
+        // Per grid column: the vertical merge open there (`w:vMerge`
+        // restart), as an index into `spans`.
+        let mut open: std::collections::HashMap<u32, usize> = Default::default();
         for ri in 0..table.row_count() {
             let Some(row) = table.row(ri) else { continue };
+            // A cell's column is its place in the grid: the columns of the
+            // cells before it, each `w:gridSpan` wide. Counting cells put
+            // everything after a merged cell in the wrong column.
+            let mut grid_col = 0u32;
             for ci in 0..row.cell_count() {
                 let Some(cell) = row.cell(ci) else { continue };
+                let col = grid_col;
+                let width = cell.grid_span().unwrap_or(1).max(1);
+                grid_col += width;
+                match cell.v_merge() {
+                    Some(rdocx::VMerge::Continue) => {
+                        if let Some(span) = open.get(&col).and_then(|&k| spans.get_mut(k)) {
+                            span.rows += 1;
+                        }
+                    }
+                    Some(rdocx::VMerge::Restart) => {
+                        open.insert(col, spans.len());
+                        spans.push(crate::model::CellSpan { row: ri as u32, col, rows: 1, cols: width });
+                    }
+                    None => {
+                        open.remove(&col);
+                        if width > 1 {
+                            spans.push(crate::model::CellSpan { row: ri as u32, col, rows: 1, cols: width });
+                        }
+                    }
+                }
+                // The grid positions a merged cell covers keep a paragraph.
+                for covered in col + 1..col + width {
+                    paragraphs.push(Paragraph {
+                        style: ParaStyle {
+                            table_cell: Some(crate::model::TableCell { table: ti as u32, row: ri as u32, col: covered }),
+                            ..Default::default()
+                        },
+                        runs: vec![],
+                    });
+                }
                 let mut wrote_any = false;
                 let mut keep = |para: Paragraph| {
                     let mut para = para;
                     para.style.table_cell = Some(crate::model::TableCell {
-                        table: ti as u32, row: ri as u32, col: ci as u32,
+                        table: ti as u32, row: ri as u32, col,
                     });
                     paragraphs.push(para);
                     wrote_any = true;
@@ -554,10 +1054,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                             cell_index += 1;
                             // An empty paragraph is a line of the cell:
                             // a form's answer box is a cell of them.
-                            let mut para = map_paragraph(&doc, &cp, table.style_id());
-                            if let Some(r) = raw_cell {
-                                apply_strict_indents(&mut para.style, r);
-                            }
+                            let para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
                             keep(para);
                         }
                         // A table nested in a cell belongs to its outer
@@ -568,7 +1065,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                         rdocx::CellItemRef::Table(nested) => {
                             for_each_nested_paragraph(&nested, &mut |cp| {
                                 if !cp.text().is_empty() {
-                                    keep(map_paragraph(&doc, cp, table.style_id()));
+                                    keep(map_paragraph(&doc, cp, table.style_id(), None));
                                 }
                             });
                         }
@@ -580,7 +1077,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                     paragraphs.push(Paragraph {
                         style: ParaStyle {
                             table_cell: Some(crate::model::TableCell {
-                                table: ti as u32, row: ri as u32, col: ci as u32,
+                                table: ti as u32, row: ri as u32, col,
                             }),
                             ..Default::default()
                         },
@@ -589,8 +1086,12 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                 }
             }
         }
+        // Row-major within each row, as every reader of the grid expects.
+        paragraphs.sort_by_key(|p| p.style.table_cell.map(|c| (c.row, c.col)));
+        spans.retain(|s| s.rows > 1 || s.cols > 1);
         table_paragraphs.push(paragraphs);
     }
+    table_spans.retain(|_, spans| !spans.is_empty());
     // In reverse, so each insertion leaves the earlier positions valid;
     // tables at one position keep their order.
     for (ti, cells) in table_paragraphs.into_iter().enumerate().rev() {
@@ -619,12 +1120,17 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         footnotes,
         header: doc.header_text(),
         footer: doc.footer_text(),
+        header_pictures: Vec::new(),
+        footer_pictures: Vec::new(),
+        header_alignment: Alignment::Left,
+        footer_alignment: Alignment::Left,
         page: read_page_geometry(&doc),
         base_font: read_base_font(&doc),
         heading_styles: read_heading_styles(&doc),
         comments: Vec::new(),
         table_columns,
         table_rows,
+        table_spans,
         table_fills,
     })
 }
@@ -635,11 +1141,17 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
     let mut fills = Vec::new();
     for ri in 0..table.row_count() {
         let Some(row) = table.row(ri) else { continue };
+        // At the cell's grid column, as the cells are read: the columns of
+        // the cells before it, each `w:gridSpan` wide.
+        let mut col = 0u32;
         for ci in 0..row.cell_count() {
-            let Some(fill) = row.cell(ci).and_then(|c| c.shading_fill().map(str::to_string)) else { continue };
+            let Some(cell) = row.cell(ci) else { continue };
+            let at = col;
+            col += cell.grid_span().unwrap_or(1).max(1);
+            let Some(fill) = cell.shading_fill().map(str::to_string) else { continue };
             let color = fill.trim_start_matches('#').to_uppercase();
             if color.len() == 6 && color.chars().all(|c| c.is_ascii_hexdigit()) {
-                fills.push(crate::model::CellFill { row: ri as u32, col: ci as u32, color });
+                fills.push(crate::model::CellFill { row: ri as u32, col: at, color });
             }
         }
     }
@@ -742,6 +1254,28 @@ fn read_page_geometry(doc: &rdocx::Document) -> Option<PageGeometry> {
     })
 }
 
+/// The text of a paragraph marking a table cell that a merged cell
+/// covers, which `without_covered_cells` takes out of the saved XML.
+const COVERED_CELL: &str = "\u{E00A}letters:covered-cell\u{E00A}";
+
+/// `xml` without the table cells marked `COVERED_CELL`: the grid
+/// positions a merged cell spans in its own row, which OOXML has no
+/// cell for. The writer flattens nested tables, so a marked cell's
+/// `w:tc` is the nearest one around the marker.
+fn without_covered_cells(xml: &str) -> String {
+    let mut out = xml.to_string();
+    while let Some(at) = out.find(COVERED_CELL) {
+        let start = [out[..at].rfind("<w:tc>"), out[..at].rfind("<w:tc ")].into_iter().flatten().max();
+        let end = out[at..].find("</w:tc>").map(|e| at + e + "</w:tc>".len());
+        match (start, end) {
+            (Some(s), Some(e)) => out.replace_range(s..e, ""),
+            // Not in a cell after all: drop the marker alone.
+            _ => out.replace_range(at..at + COVERED_CELL.len(), ""),
+        }
+    }
+    out
+}
+
 /// Write a Document to a .docx file.
 pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), String> {
     let mut out = rdocx::Document::new();
@@ -769,6 +1303,12 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     // (rdocx's default page: Letter with 1in margins).
     let text_width_pt = doc.page.map_or(468.0, |g| g.width_pt - g.margin_left_pt - g.margin_right_pt);
     let mut has_toc = false;
+
+    // Per emitted document paragraph, in document order: the properties
+    // rdocx cannot emit, fixed as XML below (`para_post_pass`).
+    let mut post: Vec<ParaPost> = Vec::new();
+    // Whether a merged cell covers a grid position (`COVERED_CELL`).
+    let mut has_covered = false;
     // The numIds of the bullet and numbered list definitions, once made.
     let mut list_ids: [Option<u32>; 2] = [None, None];
     // What each numbered item shows, and what Word would show it as.
@@ -822,13 +1362,44 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         cell.remove_first_empty_paragraph();
                     }
                     let mut cp = cell.add_paragraph("");
-                    // A cell paragraph's indents and alignment, which the
-                    // reader maps the same way it maps a body paragraph's.
+                    // A cell paragraph's typography, which the reader maps
+                    // the same way it maps a body paragraph's: without
+                    // this a save dropped what a read kept.
                     if p.style.left_indent_pt != 0.0 {
                         cp = cp.indent_left(rdocx::Length::pt(p.style.left_indent_pt));
                     }
                     if p.style.right_indent_pt != 0.0 {
                         cp = cp.indent_right(rdocx::Length::pt(p.style.right_indent_pt));
+                    }
+                    if p.style.first_line_indent_pt != 0.0 {
+                        cp = cp.first_line_indent(rdocx::Length::pt(p.style.first_line_indent_pt));
+                    }
+                    if p.style.space_before_pt != 0.0 {
+                        cp = cp.space_before(rdocx::Length::pt(p.style.space_before_pt));
+                    }
+                    if p.style.space_after_pt != 0.0 {
+                        cp = cp.space_after(rdocx::Length::pt(p.style.space_after_pt));
+                    }
+                    if p.style.keep_lines {
+                        cp = cp.keep_together(true);
+                    }
+                    if let Some(control) = p.style.widow_control {
+                        cp = cp.widow_control(control);
+                    }
+                    match p.style.line_height {
+                        Some(LineHeight::Exact(pt)) => cp = cp.line_spacing(pt),
+                        Some(LineHeight::Minimum(pt)) => cp = cp.line_spacing(pt),
+                        None => {
+                            if (p.style.line_spacing - 1.0).abs() > 0.01 {
+                                cp = cp.line_spacing_multiple(p.style.line_spacing as f64);
+                            }
+                        }
+                    }
+                    if let Some(fill) = p.style.shading.as_deref().filter(|f| !f.is_empty()) {
+                        cp = cp.shading(fill);
+                    }
+                    for stop in &p.style.tab_stops_pt {
+                        cp = emit_tab_stop(cp, stop);
                     }
                     cp = match p.style.alignment {
                         Alignment::Center => cp.alignment(rdocx::Alignment::Center),
@@ -836,6 +1407,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         Alignment::Justify => cp.alignment(rdocx::Alignment::Justify),
                         _ => cp,
                     };
+                    post.push(ParaPost::of(&p.style));
                     // A cell's comments open and close inside it.
                     let mut in_cell: Vec<u32> = Vec::new();
                     for run in p.runs.iter().map(Some).chain([None]) {
@@ -854,6 +1426,28 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                     }
                 }
             }
+            // Merged cells: the first spans its columns (`w:gridSpan`) and
+            // starts a vertical merge (`w:vMerge`) the rows below continue.
+            // The grid positions it covers in its own row are no cells in
+            // OOXML: they are marked here and taken out below.
+            for span in doc.table_spans.get(&tc0.table).into_iter().flatten() {
+                for r in span.row..span.row + span.rows {
+                    if let Some(mut cell) = tbl.cell(r as usize, span.col as usize) {
+                        if span.cols > 1 {
+                            cell.set_grid_span(span.cols);
+                        }
+                        if span.rows > 1 {
+                            if r == span.row { cell.set_v_merge_restart() } else { cell.set_v_merge_continue() }
+                        }
+                    }
+                    for c in span.col + 1..span.col + span.cols {
+                        if let Some(mut cell) = tbl.cell(r as usize, c as usize) {
+                            cell.add_paragraph(COVERED_CELL);
+                            has_covered = true;
+                        }
+                    }
+                }
+            }
             // OOXML requires a paragraph in every cell, which a cell left
             // empty keeps from its creation, and one after a table that
             // ends the document or meets another; the reader drops it
@@ -864,6 +1458,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                     .space_before(rdocx::Length::pt(0.0))
                     .space_after(rdocx::Length::pt(0.0))
                     .line_spacing(1.0);
+                post.push(ParaPost::trivial());
             }
             continue;
         }
@@ -922,8 +1517,29 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         if para.style.keep_with_next {
             p = p.keep_with_next(true);
         }
-        if (para.style.line_spacing - 1.0).abs() > 0.01 {
-            p = p.line_spacing_multiple(para.style.line_spacing as f64);
+        if para.style.keep_lines {
+            p = p.keep_together(true);
+        }
+        if let Some(control) = para.style.widow_control {
+            p = p.widow_control(control);
+        }
+        match para.style.line_height {
+            // Exact has a builder; atLeast does not
+            // (`set_line_spacing_at_least` is crate-internal), so a
+            // minimum is written exact here and fixed by the post pass
+            // below (`para_post_pass`).
+            Some(LineHeight::Exact(pt)) => p = p.line_spacing(pt),
+            Some(LineHeight::Minimum(pt)) => {
+                p = p.line_spacing(pt);
+            }
+            None => {
+                if (para.style.line_spacing - 1.0).abs() > 0.01 {
+                    p = p.line_spacing_multiple(para.style.line_spacing as f64);
+                }
+            }
+        }
+        if let Some(fill) = para.style.shading.as_deref().filter(|f| !f.is_empty()) {
+            p = p.shading(fill);
         }
         // Paragraph indents and spacing. The odt writer has carried these
         // since it was written; this one never emitted them at all, so a
@@ -960,18 +1576,15 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         if para.style.space_after_pt != 0.0 {
             p = p.space_after(rdocx::Length::pt(para.style.space_after_pt));
         }
-        // Tab stops, which neither writer persisted: a paragraph's stops
-        // were lost on every save in both formats, self round trip
-        // included. The model has positions only, so every stop is a
-        // left-aligned one.
+        // Tab stops with their alignments and leaders.
         // A table of contents entry: Word's TOC style for its level, and
         // its page number at a right tab with a dot leader at the margin.
         if let Some(level) = para.style.toc {
             p = p.style(&format!("TOC{}", level.clamp(1, 9)));
             p = p.add_tab_stop_with_leader(rdocx::TabAlignment::Right, rdocx::Length::pt(text_width_pt), rdocx::TabLeader::Dot);
         } else {
-            for pos in &para.style.tab_stops_pt {
-                p = p.add_tab_stop(rdocx::TabAlignment::Left, rdocx::Length::pt(*pos));
+            for stop in &para.style.tab_stops_pt {
+                p = emit_tab_stop(p, stop);
             }
         }
         p = match para.style.alignment {
@@ -980,6 +1593,9 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             Alignment::Right => p.alignment(rdocx::Alignment::Right),
             Alignment::Justify => p.alignment(rdocx::Alignment::Justify),
         };
+        // Properties rdocx cannot emit (atLeast line rules, per-side
+        // borders) are fixed as XML below, in document order.
+        post.push(ParaPost::of(&para.style));
         let _ = p; // release the builder borrow before append_hyperlink
         // A numbered item Word would number otherwise: a restart (#1205),
         // or the first item of a list after a paragraph that ended the one
@@ -1127,11 +1743,30 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             let _ = out.last_paragraph_mut().expect("paragraph").add_run(&crate::docx_comments::marker(id, start));
         }
     }
-    if let Some(h) = &doc.header {
-        out.set_header(h);
-    }
-    if let Some(f) = &doc.footer {
-        out.set_footer(f);
+    // A header or footer with pictures, or aligned, is written whole, its
+    // pictures in its first paragraph (docx_anchors::header_footer_part).
+    for (is_header, text, pictures, alignment) in [
+        (true, &doc.header, &doc.header_pictures, doc.header_alignment),
+        (false, &doc.footer, &doc.footer_pictures, doc.footer_alignment),
+    ] {
+        if pictures.is_empty() && alignment == Alignment::Left {
+            match (is_header, text) {
+                (true, Some(h)) => out.set_header(h),
+                (false, Some(f)) => out.set_footer(f),
+                _ => {}
+            }
+            continue;
+        }
+        if text.is_none() && pictures.is_empty() {
+            continue;
+        }
+        let (xml, images) = crate::docx_anchors::header_footer_part(is_header, text.as_deref().unwrap_or(""), pictures, alignment);
+        let images: Vec<(&str, &[u8], &str)> = images.iter().map(|(r, b, n)| (r.as_str(), b.as_slice(), n.as_str())).collect();
+        if is_header {
+            out.set_raw_header_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);
+        } else {
+            out.set_raw_footer_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);
+        }
     }
     if let Some(pg) = &doc.page {
         out.set_page_size(rdocx::Length::pt(pg.width_pt), rdocx::Length::pt(pg.height_pt));
@@ -1154,12 +1789,17 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     let bytes = with_letters_styles(&bytes, &doc.base_font, &doc.heading_styles)
         .map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?;
     let tabbed = paras.iter().flat_map(|p| &p.runs).any(|r| r.text.contains('\t'));
-    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && floating.is_empty() {
+    let has_post = post.iter().any(ParaPost::nontrivial);
+    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post {
         bytes
     } else {
         with_part(&bytes, "word/document.xml", |xml| {
             let xml = if tabbed { tabs_as_elements(xml) } else { xml.to_string() };
-            let xml = if floating.is_empty() { xml } else { crate::docx_anchors::float(&xml, &floating) };
+            let xml = if has_covered { without_covered_cells(&xml) } else { xml };
+            // After covered cells are gone: the remaining paragraphs run
+            // with `post` in document order.
+            let xml = if has_post { para_post_pass(&xml, &post) } else { xml };
+            let xml = if floating.is_empty() { xml } else { crate::docx_anchors::float(&xml, &floating, 9001) };
             let xml = crate::docx_revisions::wrap(&crate::docx_chips::wrap(&xml, &chips), &revisions);
             let xml = crate::docx_comments::wrap(&xml, &doc.comments);
             if has_toc { crate::docx_toc::wrap(&xml) } else { xml }
@@ -1338,15 +1978,24 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Write a DOCX and append previously captured, non-conflicting package parts.
+/// Write a DOCX and merge previously captured, non-conflicting package parts.
+///
+/// The merge is a single atomic replace (LET-002): the writer writes a
+/// staging file beside `path`, the parts are merged into those staged bytes,
+/// and only the merged bytes ever replace `path` — there is no moment on
+/// disk with the edit but without the carried parts.
+///
+/// The live save path carries only the admitted safe subset
+/// (`DocumentSession::carried_for_save` — custom XML, thumbnail, ODF
+/// settings, per `suite_common_core::carry`); anything else the model cannot
+/// keep routes to the LET-001 loss dialog instead of being passed through.
 pub fn write_with_opaque(
     doc: &Document,
     path: impl AsRef<std::path::Path>,
     opaque: &suite_common_core::interop::OpaquePackage,
 ) -> Result<(), String> {
     let path = path.as_ref();
-    write(doc, path)?;
-    opaque.append_to(path)
+    crate::save::opaque_single_write(path, |p| write(doc, p), opaque)
 }
 
 /// Map one rdocx paragraph (body or table cell) into a model paragraph.
@@ -1681,7 +2330,9 @@ fn for_each_nested_paragraph(table: &rdocx::TableRef<'_>, f: &mut dyn FnMut(&rdo
 }
 
 /// `table_style` is the style of the table a cell paragraph is in.
-fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style: Option<&str>) -> Paragraph {
+/// `raw` is the scan's direct properties for this paragraph, when the
+/// scan paired them (indents, tab stops, line rule, borders).
+fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style: Option<&str>, raw: Option<&RawPara>) -> Paragraph {
     let heading = p.style_id().and_then(style_id_to_heading);
     // LO uses "Quotations"; Word uses "Quote"/"IntenseQuote".
     let block_quote = matches!(p.style_id(), Some("Quote") | Some("Quotations") | Some("IntenseQuote") | Some("BlockQuote") | Some("BlockQuotation"));
@@ -1716,6 +2367,10 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
     let page_break_before = p.is_page_break_before() || run_page_break(p).leading;
     // Keep with next: the paragraph's own setting, else its style's.
     let keep_with_next = p.keep_with_next_value().or(styled.keep_next).unwrap_or(false);
+    // Keep lines together, and widow/orphan control: the paragraph's own
+    // setting, else its style's.
+    let keep_lines = p.keep_together_value().or(styled.keep_lines).unwrap_or(false);
+    let widow_control = p.widow_control_value().or(styled.widow_control);
     let numbering = paragraph_numbering(doc, p);
     let (list, list_level) = match numbering {
         // The item's own level says bullet or number: a numbered list's
@@ -1873,7 +2528,15 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         style: ParaStyle {
             heading, alignment, list, code_block, block_quote,
             list_level, list_start,
-            named_style, page_break_before, keep_with_next,
+            named_style, page_break_before, keep_with_next, keep_lines, widow_control,
+            line_height: para_line_height(
+                p.line_spacing_multiple(),
+                p.line_spacing(),
+                raw.and_then(|r| r.line_rule.as_deref()),
+                &styled,
+            ),
+            shading: para_shading(p.shading_fill(), &styled),
+            borders: para_borders(raw, &styled),
             // Absent means "inherit": the paragraph looks the way its style
             // chain says, which the model has no styles to express, so the
             // inherited value is read into the paragraph. Reading only
@@ -1907,6 +2570,9 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         },
         runs,
     };
+    if let Some(r) = raw {
+        apply_strict_indents(&mut para.style, r);
+    }
     normalize(&mut para);
     para
 }

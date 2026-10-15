@@ -294,8 +294,8 @@ fn xml_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     tag[start..].split('"').next()
 }
 
-/// `(row, col, style index)` for every cell in a worksheet part that names a
-/// non-default style, 0-based.
+/// `(row, col, style index)` for every cell in a worksheet part, 0-based.
+/// Missing `s` means index zero, which can itself carry non-default protection.
 pub fn cell_style_indices(sheet_xml: &str) -> Vec<(usize, usize, usize)> {
     let Some(data) = sheet_xml.split("<sheetData").nth(1) else { return Vec::new() };
     let data = data.split("</sheetData>").next().unwrap_or("");
@@ -303,7 +303,7 @@ pub fn cell_style_indices(sheet_xml: &str) -> Vec<(usize, usize, usize)> {
         .skip(1)
         .filter_map(|tag| {
             let tag = format!(" {}", tag.split('>').next().unwrap_or(""));
-            let s = xml_attr(&tag, "s")?.parse::<usize>().ok().filter(|&s| s > 0)?;
+            let s = xml_attr(&tag, "s").unwrap_or("0").parse::<usize>().ok()?;
             let (r, c) = crate::sheet::parse_cell_ref(xml_attr(&tag, "r")?)?;
             Some((r, c, s))
         })
@@ -384,6 +384,6 @@ mod tests {
         let sheet = r#"<worksheet><sheetData><row r="1"><c r="A1" s="1"><v>0.153</v></c>
             <c r="B1"><v>2</v></c></row><row r="3"><c r="C3" s="2" t="n"><v>1</v></c></row>
             </sheetData></worksheet>"#;
-        assert_eq!(cell_style_indices(sheet), vec![(0, 0, 1), (2, 2, 2)]);
+        assert_eq!(cell_style_indices(sheet), vec![(0, 0, 1), (0, 1, 0), (2, 2, 2)]);
     }
 }

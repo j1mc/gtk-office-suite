@@ -81,8 +81,8 @@ fn write_xfrm<W: std::io::Write>(
     Ok(())
 }
 
-// EMU per model unit across and down, for the deck being written: its
-// slide size over the model's 960x540 (`MasterSlide::page_emu`).
+// EMU per model unit across and down, for the deck being written: the
+// deck's own size (`Deck.page_size`, DCK-006) over the model's 960x540.
 // `write_pptx_bytes` sets it for the length of one write.
 thread_local! {
     static TO_EMU: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((9525.0, 9525.0)) };
@@ -93,7 +93,8 @@ struct PageScale;
 
 impl PageScale {
     fn set(deck: &Deck) -> PageScale {
-        let (cx, cy) = deck.masters.first().and_then(|m| m.page_emu).unwrap_or(super::SlideScale::DEFAULT_EMU);
+        // The deck's own size (DCK-006): never a first-master fallback.
+        let (cx, cy) = deck.page_emu();
         TO_EMU.with(|t| t.set((cx / 960.0, cy / 540.0)));
         PageScale
     }
@@ -292,50 +293,67 @@ fn write_paragraphs<W: std::io::Write>(
         if piece.is_empty() {
             continue;
         }
-        writer.write_event(Event::Start(BytesStart::new("a:r")))?;
-        let mut r_pr = BytesStart::new("a:rPr");
-        r_pr.push_attribute(("lang", "en-US"));
-        let sz = (file_size(run.style.font_size_hp.unwrap_or(36) as f64) * 50.0).round() as u32;
-        r_pr.push_attribute(("sz", sz.to_string().as_str()));
-        if run.style.bold { r_pr.push_attribute(("b", "1")); }
-        if run.style.italic { r_pr.push_attribute(("i", "1")); }
-        if run.style.underline { r_pr.push_attribute(("u", "sng")); }
-        if run.style.strikethrough { r_pr.push_attribute(("strike", "sngStrike")); }
-        let family = run.style.font_family.as_deref().map(str::trim).filter(|f| !f.is_empty());
-        if run.style.color.is_some() || family.is_some() {
-            writer.write_event(Event::Start(r_pr))?;
-            // CT_TextCharacterProperties order: the fill, then a:latin.
-            if let Some(color) = &run.style.color {
-                writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
-                let mut clr = BytesStart::new("a:srgbClr");
-                clr.push_attribute(("val", color.to_uppercase().as_str()));
-                writer.write_event(Event::Empty(clr))?;
-                writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
+        // A line break inside the paragraph (`LINE_BREAK`) is an `a:br`
+        // between runs of the same look, not a character in `a:t`.
+        for (k, line) in piece.split(crate::engine::LINE_BREAK).enumerate() {
+            if k > 0 {
+                writer.write_event(Event::Empty(BytesStart::new("a:br")))?;
             }
-            if let Some(family) = family {
-                let mut latin = BytesStart::new("a:latin");
-                latin.push_attribute(("typeface", family));
-                writer.write_event(Event::Empty(latin))?;
+            if !line.is_empty() {
+                write_run(writer, &run.style, line)?;
             }
-            writer.write_event(Event::End(BytesEnd::new("a:rPr")))?;
-        } else {
-            writer.write_event(Event::Empty(r_pr))?;
         }
-        writer.write_event(Event::Start(BytesStart::new("a:t")))?;
-        let escaped = quick_xml::escape::escape(piece.as_str());
-        writer.write_event(Event::Text(BytesText::new(&escaped)))?;
-        writer.write_event(Event::End(BytesEnd::new("a:t")))?;
-        writer.write_event(Event::End(BytesEnd::new("a:r")))?;
     }
     writer.write_event(Event::End(BytesEnd::new("a:p")))?;
     Ok(())
 }
 
-/// A layout placeholder's `p:nvSpPr` children after `p:cNvPr`: locked
-/// against grouping, and `p:ph` with its type and index (`ph_idx`).
+/// One `a:r`: `text` in the look `style` gives it.
+fn write_run<W: std::io::Write>(writer: &mut Writer<W>, style: &RunStyle, text: &str) -> Result<(), quick_xml::Error> {
+    writer.write_event(Event::Start(BytesStart::new("a:r")))?;
+    let mut r_pr = BytesStart::new("a:rPr");
+    r_pr.push_attribute(("lang", "en-US"));
+    let sz = (file_size(style.font_size_hp.unwrap_or(36) as f64) * 50.0).round() as u32;
+    r_pr.push_attribute(("sz", sz.to_string().as_str()));
+    if style.bold { r_pr.push_attribute(("b", "1")); }
+    if style.italic { r_pr.push_attribute(("i", "1")); }
+    if style.underline { r_pr.push_attribute(("u", "sng")); }
+    if style.strikethrough { r_pr.push_attribute(("strike", "sngStrike")); }
+    let family = style.font_family.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    if style.color.is_some() || family.is_some() {
+        writer.write_event(Event::Start(r_pr))?;
+        // CT_TextCharacterProperties order: the fill, then a:latin.
+        if let Some(color) = &style.color {
+            writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
+            let mut clr = BytesStart::new("a:srgbClr");
+            clr.push_attribute(("val", color.to_uppercase().as_str()));
+            writer.write_event(Event::Empty(clr))?;
+            writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
+        }
+        if let Some(family) = family {
+            let mut latin = BytesStart::new("a:latin");
+            latin.push_attribute(("typeface", family));
+            writer.write_event(Event::Empty(latin))?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("a:rPr")))?;
+    } else {
+        writer.write_event(Event::Empty(r_pr))?;
+    }
+    writer.write_event(Event::Start(BytesStart::new("a:t")))?;
+    let escaped = quick_xml::escape::escape(text);
+    writer.write_event(Event::Text(BytesText::new(&escaped)))?;
+    writer.write_event(Event::End(BytesEnd::new("a:t")))?;
+    writer.write_event(Event::End(BytesEnd::new("a:r")))?;
+    Ok(())
+}
+
+/// `p:nvPr` for a placeholder box: `p:cNvSpPr` locks (as PowerPoint writes
+/// them, against grouping) and `p:ph` with its type and index. A box or
+/// place that remembers its source identity (`ty`) writes that back, so
+/// the identity round-trips; otherwise the role's own type is written.
 fn write_placeholder_nv<W: std::io::Write>(
     writer: &mut Writer<W>,
-    role: crate::layouts::Placeholder,
+    ty: &str,
     ph_idx: Option<u32>,
 ) -> Result<(), quick_xml::Error> {
     writer.write_event(Event::Start(BytesStart::new("p:cNvSpPr")))?;
@@ -345,7 +363,7 @@ fn write_placeholder_nv<W: std::io::Write>(
     writer.write_event(Event::End(BytesEnd::new("p:cNvSpPr")))?;
     writer.write_event(Event::Start(BytesStart::new("p:nvPr")))?;
     let mut ph = BytesStart::new("p:ph");
-    ph.push_attribute(("type", role.to_pptx()));
+    ph.push_attribute(("type", ty));
     if let Some(i) = ph_idx {
         ph.push_attribute(("idx", i.to_string().as_str()));
     }
@@ -389,7 +407,15 @@ fn write_text_box<W: std::io::Write>(
     writer.write_event(Event::Empty(c_nv_pr))?;
 
     match body.placeholder {
-        Some(role) => write_placeholder_nv(writer, role, ph_idx)?,
+        Some(role) => {
+            // The box's source identity writes back when it has one, so
+            // the identity round-trips; otherwise the role's own type.
+            let (ty, idx) = match body.placeholder_key.as_ref().filter(|k| !k.ty.is_empty()) {
+                Some(k) => (k.ty.as_str(), k.idx.or(ph_idx)),
+                None => (role.to_pptx(), ph_idx),
+            };
+            write_placeholder_nv(writer, ty, idx)?
+        }
         None => {
             let mut c_nv_sp_pr = BytesStart::new("p:cNvSpPr");
             c_nv_sp_pr.push_attribute(("txBox", "1"));
@@ -403,11 +429,18 @@ fn write_text_box<W: std::io::Write>(
     writer.write_event(Event::Start(BytesStart::new("p:spPr")))?;
     write_xfrm(writer, at)?;
 
-    let mut prst_geom = BytesStart::new("a:prstGeom");
-    prst_geom.push_attribute(("prst", "rect"));
-    writer.write_event(Event::Start(prst_geom))?;
-    writer.write_event(Event::Empty(BytesStart::new("a:avLst")))?;
-    writer.write_event(Event::End(BytesEnd::new("a:prstGeom")))?;
+    // A box with a shape of its own is that shape, painted; a bare one a
+    // plain rectangle.
+    match &body.frame {
+        Some(frame) => write_geometry_and_paint(writer, &frame.kind, &frame.style)?,
+        None => {
+            let mut prst_geom = BytesStart::new("a:prstGeom");
+            prst_geom.push_attribute(("prst", "rect"));
+            writer.write_event(Event::Start(prst_geom))?;
+            writer.write_event(Event::Empty(BytesStart::new("a:avLst")))?;
+            writer.write_event(Event::End(BytesEnd::new("a:prstGeom")))?;
+        }
+    }
 
     writer.write_event(Event::End(BytesEnd::new("p:spPr")))?;
 
@@ -512,7 +545,6 @@ fn write_shape<W: std::io::Write>(
     kind: &super::shape::ShapeKind,
     style: &super::shape::ShapeStyle,
 ) -> Result<(), quick_xml::Error> {
-    use super::shape::ShapeKind;
     writer.write_event(Event::Start(BytesStart::new("p:sp")))?;
     writer.write_event(Event::Start(BytesStart::new("p:nvSpPr")))?;
     let mut c_nv_pr = BytesStart::new("p:cNvPr");
@@ -525,6 +557,19 @@ fn write_shape<W: std::io::Write>(
 
     writer.write_event(Event::Start(BytesStart::new("p:spPr")))?;
     write_xfrm(writer, at)?;
+    write_geometry_and_paint(writer, kind, style)?;
+    writer.write_event(Event::End(BytesEnd::new("p:spPr")))?;
+    writer.write_event(Event::End(BytesEnd::new("p:sp")))?;
+    Ok(())
+}
+
+/// A shape's preset geometry, fill and outline, inside its `p:spPr`.
+fn write_geometry_and_paint<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    kind: &super::shape::ShapeKind,
+    style: &super::shape::ShapeStyle,
+) -> Result<(), quick_xml::Error> {
+    use super::shape::ShapeKind;
     let mut prst_geom = BytesStart::new("a:prstGeom");
     prst_geom.push_attribute(("prst", kind.prst()));
     writer.write_event(Event::Start(prst_geom))?;
@@ -546,8 +591,38 @@ fn write_shape<W: std::io::Write>(
         writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
         Ok(())
     };
-    match (&style.gradient, style.fill) {
-        (Some(g), _) => {
+    // A carried colour reference (DCK-006): the statement the file made,
+    // literal or theme token, written back instead of the resolved cache
+    // so a save keeps the live link rather than freezing the colour.
+    let solid_ref = |writer: &mut Writer<W>, r: &super::theme::ColorRef| -> Result<(), quick_xml::Error> {
+        writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
+        match r {
+            super::theme::ColorRef::Rgb(hex) => {
+                let mut srgb = BytesStart::new("a:srgbClr");
+                srgb.push_attribute(("val", hex.to_uppercase().as_str()));
+                writer.write_event(Event::Empty(srgb))?;
+            }
+            super::theme::ColorRef::Theme(t) => {
+                let mut clr = BytesStart::new("a:schemeClr");
+                clr.push_attribute(("val", t.slot.as_str()));
+                if t.mods.is_empty() {
+                    writer.write_event(Event::Empty(clr))?;
+                } else {
+                    writer.write_event(Event::Start(clr))?;
+                    for m in &t.mods {
+                        let mut mod_el = BytesStart::new(m.xml_name());
+                        mod_el.push_attribute(("val", m.value().to_string().as_str()));
+                        writer.write_event(Event::Empty(mod_el))?;
+                    }
+                    writer.write_event(Event::End(BytesEnd::new("a:schemeClr")))?;
+                }
+            }
+        }
+        writer.write_event(Event::End(BytesEnd::new("a:solidFill")))?;
+        Ok(())
+    };
+    match (&style.fill_src, &style.gradient, style.fill) {
+        (_, Some(g), _) => {
             writer.write_event(Event::Start(BytesStart::new("a:gradFill")))?;
             writer.write_event(Event::Start(BytesStart::new("a:gsLst")))?;
             for stop in &g.stops {
@@ -566,26 +641,35 @@ fn write_shape<W: std::io::Write>(
             writer.write_event(Event::Empty(lin))?;
             writer.write_event(Event::End(BytesEnd::new("a:gradFill")))?;
         }
-        (None, Some(c)) => solid(writer, c)?,
-        (None, None) => writer.write_event(Event::Empty(BytesStart::new("a:noFill")))?,
+        (Some(super::theme::FillSrc::Color(r)), None, _) => solid_ref(writer, r)?,
+        (Some(super::theme::FillSrc::NoFill), None, _) => writer.write_event(Event::Empty(BytesStart::new("a:noFill")))?,
+        (None, None, Some(c)) => solid(writer, c)?,
+        (None, None, None) => writer.write_event(Event::Empty(BytesStart::new("a:noFill")))?,
     }
     let mut ln = BytesStart::new("a:ln");
-    match style.stroke {
-        Some(stroke) => {
+    match (&style.stroke_src, style.stroke) {
+        (Some(super::theme::StrokeSrc::Color(r)), stroke) => {
+            // The carried line colour; the width is the resolved one, or
+            // DrawingML's default when nothing stated any.
+            let w = stroke.map(|s| s.width).unwrap_or(9525.0 / TO_EMU.with(|t| t.get().0));
+            ln.push_attribute(("w", emu(w).as_str()));
+            writer.write_event(Event::Start(ln))?;
+            solid_ref(writer, r)?;
+            writer.write_event(Event::End(BytesEnd::new("a:ln")))?;
+        }
+        (Some(super::theme::StrokeSrc::NoLine), _) | (None, None) => {
+            writer.write_event(Event::Start(ln))?;
+            writer.write_event(Event::Empty(BytesStart::new("a:noFill")))?;
+            writer.write_event(Event::End(BytesEnd::new("a:ln")))?;
+        }
+        (None, Some(stroke)) => {
             // Model units, as write_xfrm writes coordinates.
             ln.push_attribute(("w", emu(stroke.width).as_str()));
             writer.write_event(Event::Start(ln))?;
             solid(writer, stroke.color)?;
             writer.write_event(Event::End(BytesEnd::new("a:ln")))?;
         }
-        None => {
-            writer.write_event(Event::Start(ln))?;
-            writer.write_event(Event::Empty(BytesStart::new("a:noFill")))?;
-            writer.write_event(Event::End(BytesEnd::new("a:ln")))?;
-        }
     }
-    writer.write_event(Event::End(BytesEnd::new("p:spPr")))?;
-    writer.write_event(Event::End(BytesEnd::new("p:sp")))?;
     Ok(())
 }
 
@@ -651,13 +735,34 @@ fn write_table<W: std::io::Write>(
         writer.write_event(Event::Empty(col))?;
     }
     writer.write_event(Event::End(BytesEnd::new("a:tblGrid")))?;
+    let owners = table.owners();
     for (r, h) in rows.iter().enumerate() {
         let mut tr = BytesStart::new("a:tr");
         tr.push_attribute(("h", emu_y(*h).as_str()));
         writer.write_event(Event::Start(tr))?;
         for c in 0..cols.len() {
             let cell = table.rows.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
-            writer.write_event(Event::Start(BytesStart::new("a:tc")))?;
+            // A merged cell's span, and each cell it covers marked by the
+            // way it is covered: from the left, or from above.
+            let mut tc = BytesStart::new("a:tc");
+            let owner = owners.get(r).and_then(|o| o.get(c)).copied().unwrap_or((r, c));
+            if owner == (r, c) {
+                let (cs, rs) = cell.span();
+                if cs > 1 {
+                    tc.push_attribute(("gridSpan", cs.to_string().as_str()));
+                }
+                if rs > 1 {
+                    tc.push_attribute(("rowSpan", rs.to_string().as_str()));
+                }
+            } else {
+                if owner.1 < c {
+                    tc.push_attribute(("hMerge", "1"));
+                }
+                if owner.0 < r {
+                    tc.push_attribute(("vMerge", "1"));
+                }
+            }
+            writer.write_event(Event::Start(tc))?;
             writer.write_event(Event::Start(BytesStart::new("a:txBody")))?;
             writer.write_event(Event::Empty(BytesStart::new("a:bodyPr")))?;
             writer.write_event(Event::Empty(BytesStart::new("a:lstStyle")))?;
@@ -836,15 +941,16 @@ fn write_group_prelude<W: std::io::Write>(
     Ok(())
 }
 
-/// Emit `p:bg` for an explicit colour. White and anything unparseable is
-/// left out, so a deck that never set a background is not rewritten with
-/// one.
+/// Emit `p:bg` for an explicit colour, white included: an explicit white
+/// background is not the absence of one (DCK-006), and Impress preserves
+/// an explicit `p:bg`. Only an empty (absent) or unparseable background
+/// is left out, so a deck that never set one is not rewritten with one.
 fn write_background<W: std::io::Write>(
     writer: &mut Writer<W>,
     background: &str,
 ) -> Result<(), quick_xml::Error> {
     let bg = background.trim_start_matches('#');
-    if bg.len() != 6 || bg.eq_ignore_ascii_case("ffffff") {
+    if bg.len() != 6 {
         return Ok(());
     }
     writer.write_event(Event::Start(BytesStart::new("p:bg")))?;
@@ -860,15 +966,52 @@ fn write_background<W: std::io::Write>(
     Ok(())
 }
 
+/// `p:bg` for a picture stretched over the slide (relationship `rel_id`),
+/// its `a:fillRect` insets in thousandths of a percent and omitted when
+/// the picture fills the slide exactly, as PowerPoint writes it.
+fn background_picture_xml(rel_id: &str, fill: &crate::engine::FillRect) -> String {
+    let inset = |name: &str, v: f64| {
+        let v = (v * 100_000.0).round() as i64;
+        if v == 0 { String::new() } else { format!(" {name}=\"{v}\"") }
+    };
+    format!(
+        "<p:bg><p:bgPr><a:blipFill dpi=\"0\" rotWithShape=\"1\"><a:blip r:embed=\"{rel_id}\"/><a:srcRect/>\
+         <a:stretch><a:fillRect{}{}{}{}/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>",
+        inset("l", fill.left),
+        inset("t", fill.top),
+        inset("r", fill.right),
+        inset("b", fill.bottom),
+    )
+}
+
 /// Write a master's decoration shapes.
 ///
 /// Images are skipped: they would need a media part and a relationship per
 /// master, and the master reader parses `p:sp` only, so writing one would
 /// be a part nothing reads. Text, rects and circles are what it reads, and
 /// they are what this writes.
+/// A master's or layout's pictures as they are written: each is the part's
+/// relationship `rId{first_rel + k}` to `../media/imageN.png`, its file
+/// added to the package's media (`images`).
+struct PartPictures<'a> {
+    first_rel: usize,
+    targets: Vec<String>,
+    images: &'a mut Vec<String>,
+}
+
+impl PartPictures<'_> {
+    /// The relationship id for a picture of the file at `path`.
+    fn add(&mut self, path: &str) -> String {
+        self.images.push(path.to_string());
+        self.targets.push(format!("../media/image{}.png", self.images.len()));
+        format!("rId{}", self.first_rel + self.targets.len() - 1)
+    }
+}
+
 fn write_master_shapes<W: std::io::Write>(
     writer: &mut Writer<W>,
     shapes: &[SlideObject],
+    pictures: &mut PartPictures<'_>,
 ) -> Result<(), quick_xml::Error> {
     for (j, obj) in shapes.iter().enumerate() {
         let id = 2 + j;
@@ -907,7 +1050,11 @@ fn write_master_shapes<W: std::io::Write>(
                 Placement { x: *x, y: *y, w: *w, h: *h, rotation: *rotation },
                 table,
             )?,
-            SlideObject::Image { .. } | SlideObject::Chart { .. } => {}
+            SlideObject::Image { path, x, y, w, h, rotation, crop } => {
+                let rel = pictures.add(path);
+                write_image(writer, id, j + 1, &rel, Placement { x: *x, y: *y, w: *w, h: *h, rotation: *rotation }, crop)?
+            }
+            SlideObject::Chart { .. } => {}
         }
     }
     Ok(())
@@ -930,7 +1077,27 @@ const PART_NS: [(&str, &str); 3] = [
     ("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main"),
 ];
 
-/// `ppt/theme/themeN.xml` — where a pptx keeps a master's default font.
+/// The `p:clrMap` for `master`: its own colour map when it states one,
+/// else the identity mapping above, byte-identical to what the writer
+/// has always emitted.
+fn clr_map_xml(master: &MasterSlide) -> String {
+    if master.color_map.is_empty() {
+        return CLR_MAP.to_string();
+    }
+    // The twelve presentation names in schema order, each to the slot
+    // the master maps it to, or to itself when it maps nothing.
+    let names = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+    let mut out = String::from("<p:clrMap");
+    for name in names {
+        let slot = master.color_map.get(name).map(String::as_str).unwrap_or(name);
+        out.push_str(&format!(" {name}=\"{slot}\""));
+    }
+    out.push_str("/>");
+    out
+}
+
+/// `ppt/theme/themeN.xml` — where a pptx keeps a master's colours and its
+/// default font.
 ///
 /// OOXML has no "default font" attribute on a master: the body font lives
 /// in the theme's `a:fontScheme/a:minorFont`, and the heading font in
@@ -944,17 +1111,43 @@ const PART_NS: [(&str, &str); 3] = [
 /// emitted masters with none. Impress opened those packages anyway, which
 /// is why nothing caught it.
 ///
+/// A master that names a retained theme (`Deck.themes`) writes that
+/// theme's own slots, fonts and name back (DCK-006); any other master
+/// writes the conventional slots and its own font, as before. Either way
 /// `a:clrScheme` and `a:fmtScheme` are present because a `a:themeElements`
-/// missing either is rejected outright by stricter readers; their values
-/// are the identity-ish defaults matching `CLR_MAP`.
-fn theme_part_xml(master: &MasterSlide) -> String {
-    let font = quick_xml::escape::escape(master.font_family());
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
-         <a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
-         name=\"{name}\"><a:themeElements>\
-         <a:clrScheme name=\"Office\">\
-         <a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1>\
+/// missing either is rejected outright by stricter readers.
+fn theme_part_xml(master: &MasterSlide, retained: Option<&super::theme::Theme>) -> String {
+    let name = retained.map(|t| t.name.as_str()).unwrap_or(master.name.as_str());
+    let scheme = match retained {
+        Some(t) => {
+            // The part's own slots, in schema order; dk1/lt1 keep the
+            // conventional system colours when the part states the
+            // default values for them, so a round trip through a package
+            // that used them does not churn the bytes.
+            let slot = |slot: &str, sys: Option<&str>| -> String {
+                let hex = t.colors.get(slot).map(String::as_str).unwrap_or("");
+                match (slot, hex, sys) {
+                    ("dk1", "000000", Some(_)) | ("lt1", "FFFFFF", Some(_)) => sys.unwrap_or_default().to_string(),
+                    _ if hex.len() == 6 => format!("<a:srgbClr val=\"{hex}\"/>"),
+                    _ => sys.unwrap_or_default().to_string(),
+                }
+            };
+            let dk1 = "<a:sysClr val=\"windowText\" lastClr=\"000000\"/>";
+            let lt1 = "<a:sysClr val=\"window\" lastClr=\"FFFFFF\"/>";
+            let slots = ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+            slots
+                .iter()
+                .map(|s| {
+                    let sys = match *s {
+                        "dk1" => Some(dk1),
+                        "lt1" => Some(lt1),
+                        _ => None,
+                    };
+                    format!("<{s}>{}</{s}>", slot(s, sys))
+                })
+                .collect::<String>()
+        }
+        None => "<a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1>\
          <a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1>\
          <a:dk2><a:srgbClr val=\"44546A\"/></a:dk2>\
          <a:lt2><a:srgbClr val=\"E7E6E6\"/></a:lt2>\
@@ -965,12 +1158,27 @@ fn theme_part_xml(master: &MasterSlide) -> String {
          <a:accent5><a:srgbClr val=\"5B9BD5\"/></a:accent5>\
          <a:accent6><a:srgbClr val=\"70AD47\"/></a:accent6>\
          <a:hlink><a:srgbClr val=\"0563C1\"/></a:hlink>\
-         <a:folHlink><a:srgbClr val=\"954F72\"/></a:folHlink>\
-         </a:clrScheme>\
+         <a:folHlink><a:srgbClr val=\"954F72\"/></a:folHlink>"
+            .to_string(),
+    };
+    // The retained fonts, or the master's own font for both schemes.
+    let (major, minor) = match retained {
+        Some(t) => (
+            t.major_font.as_deref().unwrap_or(master.font_family()),
+            t.minor_font.as_deref().unwrap_or(master.font_family()),
+        ),
+        None => (master.font_family(), master.font_family()),
+    };
+    let (major, minor) = (quick_xml::escape::escape(major), quick_xml::escape::escape(minor));
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+         name=\"{name}\"><a:themeElements>\
+         <a:clrScheme name=\"Office\">{scheme}</a:clrScheme>\
          <a:fontScheme name=\"Office\">\
-         <a:majorFont><a:latin typeface=\"{font}\"/><a:ea typeface=\"\"/>\
+         <a:majorFont><a:latin typeface=\"{major}\"/><a:ea typeface=\"\"/>\
          <a:cs typeface=\"\"/></a:majorFont>\
-         <a:minorFont><a:latin typeface=\"{font}\"/><a:ea typeface=\"\"/>\
+         <a:minorFont><a:latin typeface=\"{minor}\"/><a:ea typeface=\"\"/>\
          <a:cs typeface=\"\"/></a:minorFont>\
          </a:fontScheme>\
          <a:fmtScheme name=\"Office\">\
@@ -987,8 +1195,7 @@ fn theme_part_xml(master: &MasterSlide) -> String {
          <a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>\
          <a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst>\
          </a:fmtScheme></a:themeElements></a:theme>",
-        name = quick_xml::escape::escape(master.name.as_str()),
-        font = font,
+        name = quick_xml::escape::escape(name),
     )
 }
 
@@ -1020,7 +1227,7 @@ fn layout_part_of(parts: &[(usize, Option<usize>)], k: usize, layout: Option<usi
 
 /// `ppt/slideMasters/slideMasterN.xml` — the decorations and the colour map.
 /// Its layouts are `layouts` (their part numbers), as `rId1..`.
-fn master_part_xml(master: &MasterSlide, layouts: &[usize]) -> Result<Vec<u8>, String> {
+fn master_part_xml(master: &MasterSlide, layouts: &[usize], pictures: &mut PartPictures<'_>) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut writer = Writer::new(std::io::Cursor::new(&mut out));
@@ -1038,7 +1245,7 @@ fn master_part_xml(master: &MasterSlide, layouts: &[usize]) -> Result<Vec<u8>, S
         write_background(&mut writer, &master.background).map_err(|e| e.to_string())?;
         writer.write_event(Event::Start(BytesStart::new("p:spTree"))).map_err(|e| e.to_string())?;
         write_group_prelude(&mut writer).map_err(|e| e.to_string())?;
-        write_master_shapes(&mut writer, &master.shapes).map_err(|e| e.to_string())?;
+        write_master_shapes(&mut writer, &master.shapes, pictures).map_err(|e| e.to_string())?;
         writer.write_event(Event::End(BytesEnd::new("p:spTree"))).map_err(|e| e.to_string())?;
         writer.write_event(Event::End(BytesEnd::new("p:cSld"))).map_err(|e| e.to_string())?;
         writer.write_event(Event::End(BytesEnd::new("p:sldMaster"))).map_err(|e| e.to_string())?;
@@ -1055,7 +1262,7 @@ fn master_part_xml(master: &MasterSlide, layouts: &[usize]) -> Result<Vec<u8>, S
         .enumerate()
         .map(|(i, n)| format!("<p:sldLayoutId id=\"{}\" r:id=\"rId{}\"/>", 2_147_483_648u64 + 1000 + *n as u64, i + 1))
         .collect();
-    let tail = format!("{CLR_MAP}<p:sldLayoutIdLst>{ids}</p:sldLayoutIdLst>");
+    let tail = format!("{}<p:sldLayoutIdLst>{ids}</p:sldLayoutIdLst>", clr_map_xml(master));
     xml.splice(at..at, tail.into_bytes());
     Ok(xml)
 }
@@ -1066,7 +1273,7 @@ fn master_part_xml(master: &MasterSlide, layouts: &[usize]) -> Result<Vec<u8>, S
 /// that consults the layout first still sees them. A layout of the model
 /// (decks_core::layouts) is written as itself: its kind, name, own
 /// background and decorations, and a placeholder per place.
-fn layout_part_xml(master: &MasterSlide, layout: Option<&crate::layouts::Layout>) -> Result<Vec<u8>, String> {
+fn layout_part_xml(master: &MasterSlide, layout: Option<&crate::layouts::Layout>, pictures: &mut PartPictures<'_>) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut writer = Writer::new(std::io::Cursor::new(&mut out));
@@ -1094,7 +1301,7 @@ fn layout_part_xml(master: &MasterSlide, layout: Option<&crate::layouts::Layout>
         writer.write_event(Event::Start(BytesStart::new("p:spTree"))).map_err(|e| e.to_string())?;
         write_group_prelude(&mut writer).map_err(|e| e.to_string())?;
         if let Some(l) = layout {
-            write_master_shapes(&mut writer, &l.shapes).map_err(|e| e.to_string())?;
+            write_master_shapes(&mut writer, &l.shapes, pictures).map_err(|e| e.to_string())?;
             let mut bodies = 0u32;
             for (j, p) in l.placeholders.iter().enumerate() {
                 let idx = placeholder_idx(p.role, bodies);
@@ -1129,7 +1336,10 @@ fn write_layout_placeholder<W: std::io::Write>(
     c_nv_pr.push_attribute(("id", id.to_string().as_str()));
     c_nv_pr.push_attribute(("name", format!("{:?} Placeholder {id}", p.role).as_str()));
     writer.write_event(Event::Empty(c_nv_pr))?;
-    write_placeholder_nv(writer, p.role, ph_idx)?;
+    // The place's source identity writes back when it has one, so the
+    // identity round-trips; otherwise the role's own type and index.
+    let ty = if p.source_ty.is_empty() { p.role.to_pptx() } else { p.source_ty.as_str() };
+    write_placeholder_nv(writer, ty, p.source_idx.or(ph_idx))?;
     writer.write_event(Event::End(BytesEnd::new("p:nvSpPr")))?;
     writer.write_event(Event::Start(BytesStart::new("p:spPr")))?;
     write_xfrm(writer, Placement { x: p.x, y: p.y, w: p.w, h: p.h, rotation: 0.0 })?;
@@ -1187,12 +1397,6 @@ fn rels_part(rels: &[(&str, &str)]) -> String {
     }
     out.push_str("</Relationships>");
     out
-}
-
-/// A relationships part with one relationship, which is all a layout needs
-/// to point back at its master.
-fn one_rel(kind: &str, target: &str) -> String {
-    rels_part(&[(kind, target)])
 }
 
 pub fn write_pptx(path: &str, deck: &Deck) -> Result<(), String> {
@@ -1372,10 +1576,19 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
             }
             writer.write_event(Event::Start(c_sld)).map_err(|e| e.to_string())?;
 
-            // Slide background (only when it differs from the default
-            // white — Impress preserves an explicit p:bg).
+            // Slide background when the slide states one, white included:
+            // an explicit white slide on a coloured master stays white
+            // (DCK-006), and Impress preserves an explicit p:bg. A picture
+            // is written as PowerPoint writes one: a stretched blip fill
+            // with its `a:fillRect`, the picture a media part of its own.
             let bg = slide.background.trim_start_matches('#');
-            if !bg.eq_ignore_ascii_case("ffffff") && bg.len() == 6 {
+            if let Some(pic) = &slide.background_picture {
+                let img_idx = images_to_add.len() + 1;
+                images_to_add.push(pic.path.clone());
+                let rel_id = format!("rId{}", slide_rels.len() + 1);
+                slide_rels.push((rel_id.clone(), IMAGE_REL, format!("../media/image{img_idx}.png")));
+                writer.get_mut().write_all(background_picture_xml(&rel_id, &pic.fill).as_bytes()).map_err(|e| e.to_string())?;
+            } else if bg.len() == 6 {
                 writer.write_event(Event::Start(BytesStart::new("p:bg"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("p:bgPr"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("a:solidFill"))).map_err(|e| e.to_string())?;
@@ -1473,8 +1686,10 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
                 writer.get_mut().write_all(xml.as_bytes()).map_err(|e| e.to_string())?;
             }
             // Builds, after the transition as CT_Slide orders them; shapes
-            // are numbered 2 + index above.
-            if let Some(xml) = super::timing::timing_xml(&slide.builds, |i| 2 + i as u32) {
+            // are numbered 2 + index above, so each build's stable object
+            // id maps back to its cNvPr id here.
+            let spid = |id: u64| slide.ids.objects.iter().position(|o| *o == id).map(|j| 2 + j as u32).unwrap_or(0);
+            if let Some(xml) = super::timing::timing_xml(&slide.builds, spid) {
                 writer.get_mut().write_all(xml.as_bytes()).map_err(|e| e.to_string())?;
             }
             writer.write_event(Event::End(BytesEnd::new("p:sld"))).map_err(|e| e.to_string())?;
@@ -1490,11 +1705,18 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
         // part is now written for every slide rather than only for slides
         // that carry an image or notes.
         let has_notes = !slide.notes.is_empty();
+        // The slide's master and layout, resolved by stable id (DCK-005);
+        // the (master, layout) positions below only live inside this
+        // write. An unknown master id falls back to the first master, as
+        // an out-of-range index did before.
         let layout = slide
-            .master_idx
-            .filter(|k| *k < deck.masters.len())
+            .master_id
+            .and_then(|id| deck.masters.iter().position(|m| m.id == id))
             .or(if deck.masters.is_empty() { None } else { Some(0) })
-            .and_then(|k| layout_part_of(&parts, k, slide.layout));
+            .and_then(|k| {
+                let j = slide.layout_id.and_then(|id| deck.masters[k].layouts.iter().position(|l| l.id == id));
+                layout_part_of(&parts, k, j)
+            });
         if !slide_rels.is_empty() || has_notes || layout.is_some() {
             let mut rels_str = String::from(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
@@ -1544,7 +1766,9 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
         zip.start_file(format!("ppt/slideMasters/slideMaster{n}.xml"), options)
             .map_err(|e| e.to_string())?;
         let mine: Vec<usize> = parts.iter().enumerate().filter(|(_, p)| p.0 == k).map(|(i, _)| i + 1).collect();
-        zip.write_all(&master_part_xml(master, &mine)?).map_err(|e| e.to_string())?;
+        // Its pictures' relationships follow its layouts' and its theme's.
+        let mut pictures = PartPictures { first_rel: mine.len() + 2, targets: Vec::new(), images: &mut images_to_add };
+        zip.write_all(&master_part_xml(master, &mine, &mut pictures)?).map_err(|e| e.to_string())?;
         zip.start_file(format!("ppt/slideMasters/_rels/slideMaster{n}.xml.rels"), options)
             .map_err(|e| e.to_string())?;
         // Layouts first: master_part_xml names them rId1.. in order.
@@ -1552,22 +1776,24 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
         let theme_target = format!("../theme/theme{n}.xml");
         let mut rels: Vec<(&str, &str)> = targets.iter().map(|t| ("slideLayout", t.as_str())).collect();
         rels.push(("theme", &theme_target));
+        rels.extend(pictures.targets.iter().map(|t| ("image", t.as_str())));
         zip.write_all(rels_part(&rels).as_bytes()).map_err(|e| e.to_string())?;
 
         zip.start_file(format!("ppt/theme/theme{n}.xml"), options).map_err(|e| e.to_string())?;
-        zip.write_all(theme_part_xml(master).as_bytes()).map_err(|e| e.to_string())?;
+        zip.write_all(theme_part_xml(master, deck.theme_of(master)).as_bytes()).map_err(|e| e.to_string())?;
 
         for m in &mine {
             let layout = parts[m - 1].1.and_then(|j| master.layouts.get(j));
             zip.start_file(format!("ppt/slideLayouts/slideLayout{m}.xml"), options)
                 .map_err(|e| e.to_string())?;
-            zip.write_all(&layout_part_xml(master, layout)?).map_err(|e| e.to_string())?;
+            let mut pictures = PartPictures { first_rel: 2, targets: Vec::new(), images: &mut images_to_add };
+            zip.write_all(&layout_part_xml(master, layout, &mut pictures)?).map_err(|e| e.to_string())?;
             zip.start_file(format!("ppt/slideLayouts/_rels/slideLayout{m}.xml.rels"), options)
                 .map_err(|e| e.to_string())?;
-            zip.write_all(
-                one_rel("slideMaster", &format!("../slideMasters/slideMaster{n}.xml")).as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
+            let master_target = format!("../slideMasters/slideMaster{n}.xml");
+            let mut rels = vec![("slideMaster", master_target.as_str())];
+            rels.extend(pictures.targets.iter().map(|t| ("image", t.as_str())));
+            zip.write_all(rels_part(&rels).as_bytes()).map_err(|e| e.to_string())?;
         }
     }
 
@@ -1609,8 +1835,9 @@ mod emu_rounding_tests {
             slides: vec![Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 notes: String::new(),
-                master_idx: None,
+                master_id: None,
                 objects: vec![SlideObject::TextBox {
                     text: text.into(),
                     x: at, y: at, w, h,
@@ -1621,7 +1848,7 @@ mod emu_rounding_tests {
                 transition: Default::default(),
                 builds: Vec::new(),
                 ids: Default::default(),
-                layout: None,
+                layout_id: None,
             }],
             ..Default::default()
         }

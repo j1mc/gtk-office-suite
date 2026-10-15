@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:cSld>
+  <p:spTree>
+   <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+   <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="5143500"/><a:chOff x="0" y="0"/><a:chExt cx="9144000" cy="5143500"/></a:xfrm></p:grpSpPr>
+   <p:pic>
+    <p:nvPicPr><p:cNvPr id="2" name="Movie"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+    <p:blipFill><a:blip r:embed="rId2"/><a:videoFile r:link="rId3"/></p:blipFill>
+    <p:spPr><a:xfrm><a:off x="952500" y="952500"/><a:ext cx="2857500" cy="762000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+   </p:pic>
+  </p:spTree>
+  <p:oleObj spid="_x0000_s1026" name="Worksheet" r:id="rId4" imgW="0" imgH="0" progId="Excel.Sheet.12"><p:embed followColorScheme="1"/></p:oleObj>
+ </p:cSld>
+ <p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" restart="never" nodeType="mainSeq"><p:childTnLst><p:par><p:cTn id="2" presetID="1" presetClass="emph" presetSubtype="0" fill="hold" nodeType="clickEffect"><p:childTnLst/></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>
+</p:sld>

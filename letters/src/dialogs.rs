@@ -159,6 +159,44 @@ pub(crate) fn apply_page_geometry(buf: &gtk::TextBuffer, page: letters_core::mod
     crate::live::sync_actions(buf);
     applied
 }
+/// Find matches as sequence offsets in the model's text (LET-003): the
+/// buffer is only the caret host, so enumeration reads the model's
+/// sequence text via `document_of`, never `forward_search` on the buffer.
+/// Case-insensitive, non-overlapping, in order. Empty query: no matches. A
+/// query can only match document content: list markers, table pipes and
+/// footnote "[n]" live in the buffer alone and never match.
+pub(crate) fn find_matches(doc: &letters_core::model::Document, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let folded: Vec<char> = letters_core::edit::sequence_text(doc).to_lowercase().chars().collect();
+    let needle: Vec<char> = query.to_lowercase().chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= folded.len() {
+        if folded[i..i + needle.len()] == needle[..] {
+            out.push((i, i + needle.len()));
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Buffer offsets of sequence-offset `matches`: the caret and the
+/// presentation-only highlight tags live in the buffer, so matches are
+/// shown through `LiveModel::buffer_offset`. Empty when the buffer has no
+/// live model — there is no buffer-without-model fallback that writes
+/// content.
+fn buffer_ranges(buf: &gtk::TextBuffer, matches: &[(usize, usize)]) -> Vec<(i32, i32)> {
+    let Some(live) = crate::live::of(buf) else { return Vec::new() };
+    let mut m = live.borrow_mut();
+    matches
+        .iter()
+        .filter_map(|&(s, e)| Some((m.buffer_offset(s)? as i32, m.buffer_offset(e)? as i32)))
+        .collect()
+}
 
 /// Create and wire the search bar and find/replace controls for Letters.
 pub fn make_find_replace_widget(tv: &adw::TabView) -> (gtk::SearchBar, gtk::SearchEntry) {
@@ -262,19 +300,14 @@ pub fn make_find_replace_widget(tv: &adw::TabView) -> (gtk::SearchBar, gtk::Sear
                 }
 
                 if !query.is_empty() {
-                    let mut cur = buf.start_iter();
-                    while let Some((m_start, m_end)) = cur.forward_search(
-                        &query,
-                        gtk::TextSearchFlags::CASE_INSENSITIVE,
-                        None,
-                    ) {
-                        let so = m_start.offset();
-                        let eo = m_end.offset();
+                    // Enumeration reads the model; the buffer only hosts the
+                    // caret and the highlight tags.
+                    let doc = crate::bridge::document_of(&buf);
+                    for (so, eo) in buffer_ranges(&buf, &find_matches(&doc, &query)) {
                         st.matches.push((so, eo));
                         if let Some(tag) = buf.tag_table().lookup("search-match") {
-                            buf.apply_tag(&tag, &m_start, &m_end);
+                            buf.apply_tag(&tag, &buf.iter_at_offset(so), &buf.iter_at_offset(eo));
                         }
-                        cur = m_end;
                     }
                 }
             }
@@ -343,16 +376,14 @@ pub fn make_find_replace_widget(tv: &adw::TabView) -> (gtk::SearchBar, gtk::Sear
             let rep = re.text().to_string();
             if query.is_empty() { return; }
             if let Some(buf) = active_buffer(&tv) {
-                let mut ranges = Vec::new();
-                let mut cur = buf.start_iter();
-                while let Some((ms, me)) = cur.forward_search(
-                    &query,
-                    gtk::TextSearchFlags::CASE_INSENSITIVE,
-                    None,
-                ) {
-                    ranges.push((ms.offset().max(0) as usize, me.offset().max(0) as usize));
-                    cur = me;
-                }
+                // Enumeration reads the model; the ranges are buffer offsets
+                // for `replace_ranges`, which maps them back through the
+                // model before editing.
+                let doc = crate::bridge::document_of(&buf);
+                let ranges: Vec<(usize, usize)> = buffer_ranges(&buf, &find_matches(&doc, &query))
+                    .into_iter()
+                    .map(|(s, e)| (s.max(0) as usize, e.max(0) as usize))
+                    .collect();
                 replace_ranges(&buf, &ranges, &rep);
                 se.emit_by_name::<()>("search-changed", &[]);
             }

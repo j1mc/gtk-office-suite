@@ -1,14 +1,11 @@
 // engine.rs — Spreadsheet engine using IronCalc for formula evaluation.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Decision: IronCalc (v0.7.1) over Formualizer.
-// Rationale:
-//   - IronCalc is MIT/Apache 2.0 licensed (Formualizer license unclear)
-//   - 83 functions covering all common spreadsheet operations
-//   - Pure Rust, minimal dependencies
-//   - Active development, v0.7.1 stable
-//   - Simpler API surface for our needs
-//   - XLSX import/export via calamine + rust_xlsxwriter (existing deps)
+// Decision: IronCalc; `ironcalc_base = "0.8"` is locked to 0.8.3.
+// Upstream 0.8 added dynamic arrays/spilling, LAMBDA/LET, and 100+ functions.
+// Tables delegates evaluation, but its tests only establish the SEQUENCE
+// spill cases below; they do not certify the full upstream or Excel feature set.
+// XLSX import/export remain separate: calamine + rust_xlsxwriter.
 //
 // Architecture:
 //   TablesEngine wraps ironcalc_base::Model and provides:
@@ -16,6 +13,20 @@
 //   - Formula evaluation via model.evaluate()
 //   - Column/row management
 //   - Grid data export for Cairo rendering
+//
+// Calculation authority (TBL-006): IronCalc owns inputs, formulas, names,
+// dependencies and calculated values. `SheetModel.data` is a projection —
+// read-only display text, never written back as input. Every path in and
+// out of the engine, with its upstream API and error semantics:
+//
+// | path | upstream API | on upstream error |
+// | user edits, paste, fill, sort (controller ops) | `put_cells_on_sheet`, one `evaluate` per batch | the op fails; `apply_all` undoes the group, history and redo untouched |
+// | structural ops and reference relinks | `insert/delete_rows/cols`, `put_cells_on_sheet` | same: the op fails before any history step |
+// | reference translation (sort, fill) | `move_cell_value_to_area`, `extend_copied_value` | `Err`: the operation aborts instead of keeping stale references |
+// | import (`io::load`) | `put_cell_text` per cell, one `evaluate` | `Err` naming the cell; a failed load commits nothing to the window |
+// | collab rebuild | `put_cells_on_sheet` | `Err`; the merge keeps the previous workbook |
+// | save, autosave, recovery (`io::save`) | `formula_at` + `input_at`, never the projection | `Err`; the previous file or snapshot stays |
+// | reads (render, copy, formula bar, stats) | `cell_at` (displayed), `input_at` (editable), `formula_at` | n/a: infallible reads, unknown cells read empty |
 
 use ironcalc_base::expressions::types::{Area, CellReferenceIndex};
 use ironcalc_base::{cell::CellValue, Model};
@@ -156,6 +167,49 @@ impl TablesEngine {
             .unwrap_or_default()
     }
 
+    /// Whether the cell holds a plain number (not text, bool, error or an
+    /// unevaluated formula): the writer and the editor keep the engine's
+    /// canonical numeric text for these, since a formatted rendering (a
+    /// date, a currency) would not parse back to the value.
+    pub fn is_number_at(&self, sheet: usize, row: usize, col: usize) -> bool {
+        matches!(
+            self.model.get_cell_value_by_index(sheet as u32, row as i32 + 1, col as i32 + 1),
+            Ok(CellValue::Number(_))
+        )
+    }
+
+    /// The editable input for a cell: its formula with the leading `=`,
+    /// else text that recreates it when set back. A spill-derived cell
+    /// (`Cell::SpillCell`: materialized by evaluation, holding another
+    /// cell's computed value) reports no input — writing its displayed
+    /// value back would flatten it into a constant blocking the spill.
+    /// Plain values otherwise come from [`Self::input_at`] — except
+    /// numbers, where a formatted rendering does not parse back and the
+    /// canonical numeric text does. This is what undo captures, copy
+    /// carries, sort moves and save writes; the displayed value never
+    /// stands in for it.
+    pub fn editable_input_at(&self, sheet: usize, row: usize, col: usize) -> String {
+        if let Ok(ws) = self.model.workbook.worksheet(sheet as u32) {
+            if let Some(cell) = ws.cell(row as i32 + 1, col as i32 + 1) {
+                if matches!(cell, ironcalc_base::types::Cell::SpillCell { .. }) {
+                    return String::new();
+                }
+            }
+        }
+        if self.formula_at(sheet, row, col).is_some() {
+            return self.input_at(sheet, row, col);
+        }
+        let input = self.input_at(sheet, row, col);
+        if input.is_empty() {
+            return String::new();
+        }
+        if self.is_number_at(sheet, row, col) {
+            self.cell_at(sheet, row, col)
+        } else {
+            input
+        }
+    }
+
     /// Every formula cell in the workbook, `(sheet, row, col, input)`.
     pub fn formula_cells(&self) -> Vec<(usize, usize, usize, String)> {
         let mut out = Vec::new();
@@ -230,11 +284,19 @@ impl TablesEngine {
         }
     }
 
-    /// Set cell value or formula (if starts with '=').
-    pub fn set_cell_text(&mut self, row: usize, col: usize, val: &str) {
-        self.put_cell_text(row, col, val);
-        // Re-evaluate formulas
-        self.model.evaluate();
+    /// Set a cell on the active sheet and recalculate, propagating an
+    /// upstream rejection (an unknown sheet, a cell that cannot take
+    /// input) instead of looking successful. For many cells prefer
+    /// [`Self::put_cells_on_sheet`]: one calculation boundary for the
+    /// whole batch, not one recalculation per cell.
+    pub fn set_cell_text(&mut self, row: usize, col: usize, val: &str) -> Result<(), String> {
+        let sheet = self.active_sheet;
+        self.put_cells_on_sheet(sheet, [(row, col, val)])
+    }
+
+    /// [`Self::set_cell_text`] on `sheet` instead of the active one.
+    pub fn set_cell_text_on_sheet(&mut self, sheet: usize, row: usize, col: usize, val: &str) -> Result<(), String> {
+        self.put_cells_on_sheet(sheet, [(row, col, val)])
     }
 
     /// `set_cell_text` without the recalculation, for loops that set many
@@ -242,12 +304,52 @@ impl TablesEngine {
     /// `evaluate` walks the whole workbook, so recalculating per cell made
     /// opening a file, pasting a grid and exporting a PDF quadratic in the
     /// cell count: a 512×128 xlsx did not open in twenty minutes (#1208).
-    pub fn put_cell_text(&mut self, row: usize, col: usize, val: &str) {
+    ///
+    /// The upstream error is returned: a write the engine rejects is an
+    /// error here, not a silent no-op.
+    pub fn put_cell_text(&mut self, row: usize, col: usize, val: &str) -> Result<(), String> {
+        let sheet = self.active_sheet;
+        self.put_cell_text_on_sheet(sheet, row, col, val)
+    }
+
+    /// [`Self::put_cell_text`] on `sheet` instead of the active one.
+    pub fn put_cell_text_on_sheet(&mut self, sheet: usize, row: usize, col: usize, val: &str) -> Result<(), String> {
         let r = row as i32 + 1; // IronCalc uses 1-based, i32
         let c = col as i32 + 1;
-        let _ = self
-            .model
-            .set_user_input(self.active_sheet as u32, r, c, val.to_string());
+        self.model
+            .set_user_input(sheet as u32, r, c, val.to_string())
+            .map_err(|e| format!("cell ({row}, {col}) on sheet {sheet}: {e}"))
+    }
+
+    /// Write many cells on `sheet` with a single calculation boundary, all
+    /// or nothing: the inputs they had are put back and the error returned
+    /// if any write is rejected, so a failed batch leaves engine,
+    /// projections, history and redo exactly where they were. Every
+    /// batched user write (paste, fill, sort, import, collab rebuild)
+    /// comes through here.
+    pub fn put_cells_on_sheet<'a>(
+        &mut self,
+        sheet: usize,
+        inputs: impl IntoIterator<Item = (usize, usize, &'a str)>,
+    ) -> Result<(), String> {
+        let inputs: Vec<(usize, usize, &'a str)> = inputs.into_iter().collect();
+        let olds: Vec<(usize, usize, String)> = inputs
+            .iter()
+            .map(|(row, col, _)| (*row, *col, self.editable_input_at(sheet, *row, *col)))
+            .collect();
+        for (row, col, val) in &inputs {
+            if let Err(e) = self.put_cell_text_on_sheet(sheet, *row, *col, val) {
+                // Best effort: the batch already failed; put back what was
+                // there so the caller sees one error, not a half-write.
+                for (row, col, old) in &olds {
+                    let _ = self.put_cell_text_on_sheet(sheet, *row, *col, old);
+                }
+                self.model.evaluate();
+                return Err(e);
+            }
+        }
+        self.model.evaluate();
+        Ok(())
     }
 
     /// Put a file's text cell at (row, col) as text, never parsed: a text
@@ -255,9 +357,13 @@ impl TablesEngine {
     /// prefix only where plain input would read it as something else.
     /// Through `put_cell_text` a code column of text digits became numbers
     /// and showed as "1,041" (render-real `bics-sectoral-consumption`).
-    pub fn put_cell_literal_text(&mut self, row: usize, col: usize, val: &str) {
+    /// The upstream error is returned, as `put_cell_text` returns it.
+    pub fn put_cell_literal_text(&mut self, row: usize, col: usize, val: &str) -> Result<(), String> {
         let (r, c) = (row as i32 + 1, col as i32 + 1);
-        let _ = self.model.update_cell_with_text(self.active_sheet as u32, r, c, val);
+        let sheet = self.active_sheet;
+        self.model
+            .update_cell_with_text(sheet as u32, r, c, val)
+            .map_err(|e| format!("cell ({row}, {col}) on sheet {sheet}: {e}"))
     }
 
     /// The formula of workbook-level name `name`, if it's defined.
@@ -306,9 +412,13 @@ impl TablesEngine {
     }
 
     /// Translate relative references as a cell input moves within the grid.
-    pub fn move_input(&mut self, input: &str, from: (usize, usize), to: (usize, usize)) -> String {
+    /// An upstream rejection (an unknown sheet, a reference the engine
+    /// cannot move) is an error, not the input back unchanged: callers
+    /// decide, visibly, what a failed translation means for their
+    /// operation instead of keeping stale references that look successful.
+    pub fn move_input(&mut self, input: &str, from: (usize, usize), to: (usize, usize)) -> Result<String, String> {
         if !input.starts_with('=') || from == to {
-            return input.to_string();
+            return Ok(input.to_string());
         }
         let source = CellReferenceIndex {
             sheet: self.active_sheet as u32,
@@ -329,7 +439,7 @@ impl TablesEngine {
         };
         self.model
             .move_cell_value_to_area(input, &source, &target, &area)
-            .unwrap_or_else(|_| input.to_string())
+            .map_err(|e| format!("cannot move {input:?}: {e}"))
     }
 
     /// Adjust a formula's relative references as if it were copied (not
@@ -338,9 +448,9 @@ impl TablesEngine {
     /// (which updates *other* cells' references to point at a relocated
     /// cell), this is the fill-handle/copy-paste semantics: only the
     /// formula text itself changes, nothing else in the sheet does.
-    pub fn extend_input(&mut self, input: &str, from: (usize, usize), to: (usize, usize)) -> String {
+    pub fn extend_input(&mut self, input: &str, from: (usize, usize), to: (usize, usize)) -> Result<String, String> {
         if !input.starts_with('=') || from == to {
-            return input.to_string();
+            return Ok(input.to_string());
         }
         let source = CellReferenceIndex {
             sheet: self.active_sheet as u32,
@@ -354,7 +464,7 @@ impl TablesEngine {
         };
         self.model
             .extend_copied_value(input, &source, &target)
-            .unwrap_or_else(|_| input.to_string())
+            .map_err(|e| format!("cannot copy {input:?}: {e}"))
     }
 
     /// Check if cell contains a formula (starts with '=').
@@ -374,10 +484,17 @@ impl TablesEngine {
     }
 
     pub fn has_formula(&self, row: usize, col: usize) -> bool {
+        self.has_formula_at(self.active_sheet, row, col)
+    }
+
+    /// [`Self::has_formula`] on `sheet` instead of the active one. Reads
+    /// the engine's formula flag, not the projection, so a synced sheet
+    /// and the engine cannot disagree about what is a formula.
+    pub fn has_formula_at(&self, sheet: usize, row: usize, col: usize) -> bool {
         let r = row as i32 + 1;
         let c = col as i32 + 1;
         // Check raw cell for formula flag
-        if let Ok(ws) = self.model.workbook.worksheet(self.active_sheet as u32) {
+        if let Ok(ws) = self.model.workbook.worksheet(sheet as u32) {
             if let Some(cell) = ws.cell(r, c) {
                 return cell.has_formula();
             }
@@ -464,61 +581,90 @@ mod tests {
     #[test]
     fn test_set_and_get_cell() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        engine.set_cell_text(0, 0, "Hello");
+        engine.set_cell_text(0, 0, "Hello").unwrap();
         assert_eq!(engine.cell(0, 0), "Hello");
     }
 
     #[test]
     fn test_formula_sum() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        engine.set_cell_text(0, 0, "10");
-        engine.set_cell_text(1, 0, "20");
-        engine.set_cell_text(2, 0, "30");
-        engine.set_cell_text(2, 1, "=SUM(A1:A3)");
+        engine.set_cell_text(0, 0, "10").unwrap();
+        engine.set_cell_text(1, 0, "20").unwrap();
+        engine.set_cell_text(2, 0, "30").unwrap();
+        engine.set_cell_text(2, 1, "=SUM(A1:A3)").unwrap();
         assert_eq!(engine.cell(2, 1), "60");
+    }
+
+    #[test]
+    fn sequence_formula_spills_values_into_the_rendered_grid() {
+        let mut engine = TablesEngine::new(4, 2).unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(3)").unwrap();
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "1");
+        assert_eq!(grid[1][0], "2");
+        assert_eq!(grid[2][0], "3");
+        let mut sheet = crate::sheet::SheetModel::new("Sheet1", 4, 2, 0);
+        sheet.sync_from_engine(&engine);
+        assert_eq!(sheet.data[0][0], "1");
+        assert_eq!(sheet.data[1][0], "2");
+        assert_eq!(sheet.data[2][0], "3");
+        assert!(sheet.formulas[0][0]);
+        assert!(!sheet.formulas[1][0]);
+    }
+
+    #[test]
+    fn sequence_formula_surfaces_spill_blocked_by_existing_cell() {
+        let mut engine = TablesEngine::new(4, 4).unwrap();
+        engine.set_cell_text(1, 1, "blocked").unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(2,2)").unwrap();
+
+        let grid = engine.to_grid();
+        assert_eq!(grid[0][0], "#SPILL!");
+        assert_eq!(grid[1][1], "blocked");
     }
 
     #[test]
     fn test_formula_concat() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "Hello");
-        engine.set_cell_text(0, 1, "World");
-        engine.set_cell_text(0, 2, "=CONCAT(A1, \" \", B1)");
+        engine.set_cell_text(0, 0, "Hello").unwrap();
+        engine.set_cell_text(0, 1, "World").unwrap();
+        engine.set_cell_text(0, 2, "=CONCAT(A1, \" \", B1)").unwrap();
         assert_eq!(engine.cell(0, 2), "Hello World");
     }
 
     #[test]
     fn extend_input_shifts_relative_references() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        let shifted = engine.extend_input("=A1", (0, 0), (1, 0));
+        let shifted = engine.extend_input("=A1", (0, 0), (1, 0)).unwrap();
         assert_eq!(shifted, "=A2");
     }
 
     #[test]
     fn extend_input_leaves_absolute_references_unchanged() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        let shifted = engine.extend_input("=$A$1", (0, 0), (1, 0));
+        let shifted = engine.extend_input("=$A$1", (0, 0), (1, 0)).unwrap();
         assert_eq!(shifted, "=$A$1");
     }
 
     #[test]
     fn extend_input_leaves_non_formulas_unchanged() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        assert_eq!(engine.extend_input("42", (0, 0), (1, 0)), "42");
+        assert_eq!(engine.extend_input("42", (0, 0), (1, 0)).unwrap(), "42");
     }
 
     #[test]
     fn extend_input_same_source_and_target_is_a_no_op() {
         let mut engine = TablesEngine::new(5, 5).unwrap();
-        assert_eq!(engine.extend_input("=A1+1", (2, 2), (2, 2)), "=A1+1");
+        assert_eq!(engine.extend_input("=A1+1", (2, 2), (2, 2)).unwrap(), "=A1+1");
     }
 
     #[test]
     fn test_grid_export() {
         let mut engine = TablesEngine::new(2, 2).unwrap();
-        engine.set_cell_text(0, 0, "A1");
-        engine.set_cell_text(0, 1, "B1");
-        engine.set_cell_text(1, 0, "A2");
+        engine.set_cell_text(0, 0, "A1").unwrap();
+        engine.set_cell_text(0, 1, "B1").unwrap();
+        engine.set_cell_text(1, 0, "A2").unwrap();
         let grid = engine.to_grid();
         assert_eq!(grid[0][0], "A1");
         assert_eq!(grid[0][1], "B1");
@@ -534,23 +680,23 @@ mod tests {
     #[test]
     fn test_has_formula_detection() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "=1+1");
+        engine.set_cell_text(0, 0, "=1+1").unwrap();
         assert!(engine.has_formula(0, 0));
-        engine.set_cell_text(0, 1, "not a formula");
+        engine.set_cell_text(0, 1, "not a formula").unwrap();
         assert!(!engine.has_formula(0, 1));
     }
 
     #[test]
     fn cross_sheet_formula_recalculates() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "7");
+        engine.set_cell_text(0, 0, "7").unwrap();
         engine.add_sheet("Sheet2").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "=Sheet1!A1*2");
+        engine.set_cell_text(0, 0, "=Sheet1!A1*2").unwrap();
         assert_eq!(engine.cell(0, 0), "14");
 
         engine.set_active_sheet(0).unwrap();
-        engine.set_cell_text(0, 0, "9");
+        engine.set_cell_text(0, 0, "9").unwrap();
         engine.set_active_sheet(1).unwrap();
         assert_eq!(engine.cell(0, 0), "18");
     }
@@ -558,13 +704,13 @@ mod tests {
     #[test]
     fn delete_sheet_removes_only_that_sheet() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "1");
+        engine.set_cell_text(0, 0, "1").unwrap();
         engine.add_sheet("Sheet2").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "2");
+        engine.set_cell_text(0, 0, "2").unwrap();
         engine.add_sheet("Sheet3").unwrap();
         engine.set_active_sheet(2).unwrap();
-        engine.set_cell_text(0, 0, "3");
+        engine.set_cell_text(0, 0, "3").unwrap();
 
         engine.delete_sheet(1).unwrap();
         assert_eq!(engine.sheet_count(), 2);
@@ -583,13 +729,13 @@ mod tests {
     #[test]
     fn reorder_sheets_moves_content_and_keeps_cross_sheet_formulas_live() {
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "1"); // Sheet1
+        engine.set_cell_text(0, 0, "1").unwrap(); // Sheet1
         engine.add_sheet("Sheet2").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "=Sheet1!A1*10");
+        engine.set_cell_text(0, 0, "=Sheet1!A1*10").unwrap();
         engine.add_sheet("Sheet3").unwrap();
         engine.set_active_sheet(2).unwrap();
-        engine.set_cell_text(0, 0, "3");
+        engine.set_cell_text(0, 0, "3").unwrap();
 
         // Move Sheet3 to the front: [2, 0, 1]
         engine.reorder_sheets(&[2, 0, 1]).unwrap();
@@ -601,7 +747,7 @@ mod tests {
         assert_eq!(engine.cell_at(2, 0, 0), "10");
 
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "5");
+        engine.set_cell_text(0, 0, "5").unwrap();
         assert_eq!(engine.cell_at(2, 0, 0), "50");
     }
 
@@ -614,4 +760,47 @@ mod tests {
         assert_eq!(engine.active_sheet(), 0);
         assert_eq!(engine.sheet_name_at(engine.active_sheet()).as_deref(), Some("Sheet2"));
     }
+    #[test]
+    fn rejected_writes_are_errors_not_silent_no_ops() {
+        let mut engine = TablesEngine::new(2, 2).unwrap();
+        assert!(engine.put_cell_text_on_sheet(99, 0, 0, "x").is_err());
+        assert!(engine.set_cell_text_on_sheet(99, 0, 0, "x").is_err());
+        assert!(engine.put_cells_on_sheet(99, [(0, 0, "x")]).is_err());
+    }
+
+    #[test]
+    fn failed_batch_writes_leave_the_prior_inputs_in_place() {
+        let mut engine = TablesEngine::new(3, 3).unwrap();
+        engine.set_cell_text(0, 0, "kept").unwrap();
+        let before = engine.input_at(0, 0, 0);
+        assert!(engine.put_cells_on_sheet(99, [(0, 0, "x")]).is_err());
+        assert_eq!(engine.input_at(0, 0, 0), before);
+        assert_eq!(before, "kept");
+    }
+
+    #[test]
+    fn reference_translation_reports_upstream_rejections() {
+        let mut engine = TablesEngine::new(2, 2).unwrap();
+        // The fast paths never touch upstream; anything else is the
+        // engine's own answer, success included — never the input back
+        // with a swallowed error. (`extend` shifting `=A1` to `=A2` is
+        // the long-established behavior above.)
+        assert_eq!(engine.move_input("42", (0, 0), (1, 0)).unwrap(), "42");
+        assert_eq!(engine.move_input("=A1+1", (2, 2), (2, 2)).unwrap(), "=A1+1");
+        assert_eq!(engine.extend_input("=A1", (0, 0), (1, 0)).unwrap(), "=A2");
+        assert!(engine.move_input("=A1", (0, 0), (1, 0)).is_ok());
+    }
+
+    #[test]
+    fn spill_derived_cells_report_no_editable_input() {
+        let mut engine = TablesEngine::new(5, 5).unwrap();
+        engine.set_cell_text(0, 0, "=SEQUENCE(3)").unwrap();
+        // The spill shows downstream, but only the anchor holds input:
+        // carrying the displayed "2" as input would flatten the spill
+        // into a constant that blocks it.
+        assert_eq!(engine.cell(1, 0), "2");
+        assert_eq!(engine.editable_input_at(0, 1, 0), "");
+        assert_eq!(engine.editable_input_at(0, 0, 0), "=SEQUENCE(3)");
+    }
+
 }

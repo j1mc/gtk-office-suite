@@ -16,7 +16,7 @@ use crate::undo::{obj_bounds, set_obj_origin};
 
 /// Where a moving build comes from (in) or goes to (out).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Edge {
     Left,
     Right,
@@ -26,7 +26,7 @@ pub enum Edge {
 
 /// How an object builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum BuildEffect {
     /// At once.
     Appear,
@@ -58,13 +58,23 @@ impl BuildEffect {
     }
 }
 
-/// One build: object `object` (an index into the slide's objects) arrives
-/// (`out` false) or leaves (`out` true) with `effect`, on its own click.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One build: object `object` (a stable object id from the slide's
+/// [`crate::ops::SlideIds::objects`]) arrives (`out` false) or leaves
+/// (`out` true) with `effect`, on its own click. Identity, not z-position:
+/// reordering never retargets a build, and deleting an object drops its
+/// builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Build {
-    pub object: usize,
+    pub object: u64,
     pub effect: BuildEffect,
     pub out: bool,
+}
+
+impl Build {
+    /// The z-position of this build's object on `slide`, if still there.
+    pub fn index_on(&self, slide: &Slide) -> Option<usize> {
+        slide.object_index(self.object)
+    }
 }
 
 /// How many clicks a slide's builds take before the next slide.
@@ -72,10 +82,11 @@ pub fn steps(slide: &Slide) -> usize {
     slide.builds.len()
 }
 
-/// Whether `object` is on the slide once `done` builds have played: an
-/// object that builds in is hidden until its build, one that builds out
-/// is gone after its build.
-fn shown_after(slide: &Slide, object: usize, done: usize) -> bool {
+/// Whether the object with stable id `object` is on the slide once `done`
+/// builds have played: an object that builds in is hidden until its build,
+/// one that builds out is gone after its build. A build whose object is
+/// gone hides nothing.
+fn shown_after(slide: &Slide, object: u64, done: usize) -> bool {
     let mut shown = !slide.builds.iter().any(|b| b.object == object && !b.out)
         || slide.builds.iter().position(|b| b.object == object && !b.out).is_some_and(|i| i < done);
     if slide.builds.iter().enumerate().any(|(i, b)| b.object == object && b.out && i < done) {
@@ -119,7 +130,8 @@ pub fn frame(slide: &Slide, step: usize, t: f64) -> Vec<FrameObject> {
         .iter()
         .enumerate()
         .filter_map(|(i, o)| {
-            if let Some(b) = current.filter(|b| b.object == i) {
+            let id = slide.ids.objects.get(i).copied().unwrap_or(u64::MAX);
+            if let Some(b) = current.filter(|b| b.object == id) {
                 // This object's build is playing.
                 let amount = if b.out { 1.0 - e } else { e };
                 return Some(match b.effect {
@@ -130,30 +142,20 @@ pub fn frame(slide: &Slide, step: usize, t: f64) -> Vec<FrameObject> {
                     BuildEffect::Move(edge) => FrameObject { object: slid(o, edge, amount), opacity: 1.0 },
                 });
             }
-            shown_after(slide, i, step).then(|| FrameObject { object: o.clone(), opacity: 1.0 })
+            shown_after(slide, id, step).then(|| FrameObject { object: o.clone(), opacity: 1.0 })
         })
         .filter(|f| f.opacity > 0.0)
         .collect()
 }
 
-/// A slide's builds after object `index` is removed: its own go, later
-/// indices shift down.
-pub fn after_delete(builds: &[Build], index: usize) -> Vec<Build> {
-    builds
-        .iter()
-        .filter(|b| b.object != index)
-        .map(|b| Build { object: if b.object > index { b.object - 1 } else { b.object }, ..*b })
-        .collect()
+/// A slide's builds after the object with stable id `id` is removed: its
+/// own builds go; every other build keeps its target, whatever z-position
+/// that object now has. Reordering needs no rewrite at all: identity is
+/// not position.
+pub fn without_object(builds: &[Build], id: u64) -> Vec<Build> {
+    builds.iter().filter(|b| b.object != id).copied().collect()
 }
 
-/// A slide's builds after its objects are reordered: `old_of_new[n]` is
-/// the old index of the object now at `n`.
-pub fn after_reorder(builds: &[Build], old_of_new: &[usize]) -> Vec<Build> {
-    builds
-        .iter()
-        .filter_map(|b| old_of_new.iter().position(|&old| old == b.object).map(|n| Build { object: n, ..*b }))
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -165,16 +167,18 @@ mod tests {
     }
 
     fn slide(builds: Vec<Build>) -> Slide {
+        // Builds name objects by these stable ids, not z-positions.
         Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![sq(0.0), sq(100.0), sq(200.0)],
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Default::default(),
             builds,
-            ids: Default::default(),
-            layout: None,
+            ids: crate::ops::SlideIds { slide: 1, objects: vec![11, 12, 13], deleted: vec![] },
+            layout_id: None,
         }
     }
 
@@ -185,8 +189,8 @@ mod tests {
     #[test]
     fn objects_that_build_in_wait_for_their_click() {
         let s = slide(vec![
-            Build { object: 1, effect: BuildEffect::Dissolve, out: false },
-            Build { object: 2, effect: BuildEffect::Appear, out: false },
+            Build { object: 12, effect: BuildEffect::Dissolve, out: false },
+            Build { object: 13, effect: BuildEffect::Appear, out: false },
         ]);
         assert_eq!(steps(&s), 2);
         assert_eq!(xs(&frame(&s, 0, 0.0)), [(0.0, 1.0)], "only the object without a build");
@@ -198,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_build_out_leaves_and_stays_gone() {
-        let s = slide(vec![Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: true }]);
+        let s = slide(vec![Build { object: 11, effect: BuildEffect::Move(Edge::Left), out: true }]);
         assert_eq!(xs(&frame(&s, 0, 0.0))[0], (0.0, 1.0));
         let mid = xs(&frame(&s, 0, 0.5));
         assert_eq!(mid[0], (-25.0, 1.0), "half way to beyond the left edge (x = -50)");
@@ -207,7 +211,7 @@ mod tests {
 
     #[test]
     fn a_move_in_slides_from_beyond_the_edge() {
-        let s = slide(vec![Build { object: 2, effect: BuildEffect::Move(Edge::Right), out: false }]);
+        let s = slide(vec![Build { object: 13, effect: BuildEffect::Move(Edge::Right), out: false }]);
         let at = |t| xs(&frame(&s, 0, t)).last().copied().unwrap();
         assert_eq!(xs(&frame(&s, 0, 0.0)).len(), 2, "not started: still hidden");
         assert!(at(0.001).0 > 959.0, "starts beyond the right edge");
@@ -216,10 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn builds_follow_their_objects_through_deletes_and_reorders() {
+    fn deleting_an_object_drops_only_its_builds_and_reorder_keeps_them() {
         let b = |object| Build { object, effect: BuildEffect::Appear, out: false };
-        assert_eq!(after_delete(&[b(0), b(1), b(2)], 1), vec![b(0), b(1)]);
-        // Object 0 sent to the back of three: new order is old [1, 2, 0].
-        assert_eq!(after_reorder(&[b(0), b(2)], &[1, 2, 0]), vec![b(2), b(1)]);
+        assert_eq!(without_object(&[b(11), b(12), b(13)], 12), vec![b(11), b(13)]);
+        // Reordering needs no rewrite: the same builds still name the same
+        // objects whatever z-position they now hold.
+        assert_eq!(without_object(&[b(11), b(13)], u64::MAX), vec![b(11), b(13)]);
+        let s = slide(vec![b(11), b(13)]);
+        assert_eq!(s.builds[0].index_on(&s), Some(0));
+        assert_eq!(s.builds[1].index_on(&s), Some(2));
+        assert_eq!(Build { object: 99, ..b(99) }.index_on(&s), None);
     }
 }

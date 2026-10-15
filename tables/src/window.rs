@@ -41,7 +41,7 @@ impl Listener<Hint> for HistoryActionListener {
 // File I/O lives in tables_core::io; window code only adapts AppState.
 use tables_core::io::load_workbook;
 use crate::persistence::{
-    attach_xlsx_sidecars, autosave_bytes, autosave_state_dir, next_doc_id, save_engine_to_xlsx,
+    attach_xlsx_sidecars, autosave_bytes, autosave_state_dir, next_doc_id,
     unsupported_save_format_message,
 };
 
@@ -222,17 +222,16 @@ impl TablesWindow {
             let gl = show_gridlines.clone();
             let da_refs = formula_refs.clone();
             let autofit = pending_autofit.clone();
+            let ctl = controller.clone();
             // The accent color comes from the widget handed to the
             // closure, never from a captured clone of it — see above.
             drawing_area.set_draw_func(move |da, cr, width, height| {
                 if let Some(col) = autofit.take() {
-                    let st = da_state.borrow();
-                    let mut sh = st.sheet_mut();
-                    auto_fit_column(cr, &mut sh, col, da_h.value());
-                    // draw_grid() re-borrows the same AppState RefCell,
-                    // so drop both guards, not just the sheet's.
-                    drop(sh);
-                    drop(st);
+                    crate::sheet_actions::apply(&ctl, da, |c| {
+                        c.mutate_sheet("Auto-fit Column", |sheet| {
+                            auto_fit_column(cr, sheet, col, da_h.value());
+                        });
+                    });
                 }
                 crate::grid_render::restore_saved_view(&da_state, &da_h, &da_v);
                 draw_grid(cr, &da_state, width as f64, height as f64,
@@ -515,7 +514,7 @@ impl TablesWindow {
                 if y < COL_HEADER_HEIGHT {
                     if let Some(col) = tables_core::sheet::col_at(x, h.value(), &sh) {
                         drop(sh); drop(st);
-                        ctl.borrow_mut().toggle_sort(col);
+                        crate::sheet_actions::apply(&ctl, &da, |c| c.toggle_sort(col));
                         da.queue_draw();
                         return;
                     }
@@ -545,7 +544,9 @@ impl TablesWindow {
                         } else {
                             sh.select_cell(row, col);
                         }
-                        let val = sh.data[row][col].clone();
+                        // The formula bar edits inputs, not displayed
+                        // results: a formula cell shows its formula here.
+                        let val = st.cell_input(row, col);
                         // fx.set_text() fires `changed` synchronously, and
                         // for formula text that handler re-borrows this
                         // same per-sheet RefCell -- drop before calling it.
@@ -566,22 +567,24 @@ impl TablesWindow {
             let da = drawing_area.clone();
             let h = h_adj.clone();
             let drag_col = Rc::new(Cell::new(None::<(usize, f64)>));
-            let resize_before = Rc::new(RefCell::new(None::<SheetModel>));
             let drag = gtk4::GestureDrag::new();
             drag.set_button(1);
             let dc2 = drag_col.clone();
             let dc3 = drag_col.clone();
-            let before_begin = resize_before.clone();
-            let before_end = resize_before.clone();
             let s2 = s.clone();
             let resize_controller = controller.clone();
-            let _h2 = h.clone();
+            let begin_controller = controller.clone();
+            let begin_grid = drawing_area.clone();
+            let end_grid = drawing_area.clone();
             drag.connect_drag_begin(move |_g, x, y| {
                 let st = s.borrow();
                 let sh = st.sheet();
                 if let Some(col) = hit_col_divider(x, y, h.value(), &sh) {
-                    *before_begin.borrow_mut() = Some(sh.clone());
-                    dc2.set(Some((col, sh.col_width(col))));
+                    let width = sh.col_width(col);
+                    drop(sh); drop(st);
+                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(); }) {
+                        dc2.set(Some((col, width)));
+                    }
                 }
             });
             drag.connect_drag_update(move |_g, dx, _dy| {
@@ -595,9 +598,7 @@ impl TablesWindow {
                 }
             });
             drag.connect_drag_end(move |_g, _dx, _dy| {
-                if let (Some((col, old_width)), Some(_)) =
-                    (dc3.get(), before_end.borrow_mut().take())
-                {
+                if let Some((col, old_width)) = dc3.get() {
                     let new_width = resize_controller
                         .borrow()
                         .state
@@ -605,9 +606,10 @@ impl TablesWindow {
                         .sheet()
                         .col_width(col);
                     if (new_width - old_width).abs() > f64::EPSILON {
-                        resize_controller
-                            .borrow_mut()
-                            .record_resize(tables_core::controller::Axis::Cols, col, old_width);
+                        crate::sheet_actions::apply(&resize_controller, &end_grid, |c| {
+                            c.record_resize(tables_core::controller::Axis::Cols, col, old_width);
+                        });
+                        end_grid.queue_draw();
                     }
                 }
                 dc3.set(None);
@@ -621,21 +623,24 @@ impl TablesWindow {
             let da = drawing_area.clone();
             let v = v_adj.clone();
             let drag_row = Rc::new(Cell::new(None::<(usize, f64)>));
-            let resize_before = Rc::new(RefCell::new(None::<SheetModel>));
             let drag = gtk4::GestureDrag::new();
             drag.set_button(1);
             let dr2 = drag_row.clone();
             let dr3 = drag_row.clone();
-            let before_begin = resize_before.clone();
-            let before_end = resize_before.clone();
             let s2 = s.clone();
             let resize_controller = controller.clone();
+            let begin_controller = controller.clone();
+            let begin_grid = drawing_area.clone();
+            let end_grid = drawing_area.clone();
             drag.connect_drag_begin(move |_g, x, y| {
                 let st = s.borrow();
                 let sh = st.sheet();
                 if let Some(row) = hit_row_divider(x, y, v.value(), &sh) {
-                    *before_begin.borrow_mut() = Some(sh.clone());
-                    dr2.set(Some((row, sh.row_height(row))));
+                    let height = sh.row_height(row);
+                    drop(sh); drop(st);
+                    if crate::sheet_actions::apply(&begin_controller, &begin_grid, |c| { c.begin_resize(); }) {
+                        dr2.set(Some((row, height)));
+                    }
                 }
             });
             drag.connect_drag_update(move |_g, _dx, dy| {
@@ -649,9 +654,7 @@ impl TablesWindow {
                 }
             });
             drag.connect_drag_end(move |_g, _dx, _dy| {
-                if let (Some((row, old_height)), Some(_)) =
-                    (dr3.get(), before_end.borrow_mut().take())
-                {
+                if let Some((row, old_height)) = dr3.get() {
                     let new_height = resize_controller
                         .borrow()
                         .state
@@ -659,9 +662,10 @@ impl TablesWindow {
                         .sheet()
                         .row_height(row);
                     if (new_height - old_height).abs() > f64::EPSILON {
-                        resize_controller
-                            .borrow_mut()
-                            .record_resize(tables_core::controller::Axis::Rows, row, old_height);
+                        crate::sheet_actions::apply(&resize_controller, &end_grid, |c| {
+                            c.record_resize(tables_core::controller::Axis::Rows, row, old_height);
+                        });
+                        end_grid.queue_draw();
                     }
                 }
                 dr3.set(None);
@@ -767,7 +771,7 @@ impl TablesWindow {
                                 xy_to_cell(x, y, h.value(), v.value(), &sh)
                             };
                             if let Some((col, row)) = target {
-                                ctl.borrow_mut().fill(sel, row, col);
+                                crate::sheet_actions::apply(&ctl, &da, |c| c.fill(sel, row, col));
                             }
                         }
                         refresh();
@@ -977,6 +981,7 @@ impl TablesWindow {
             let sm = sheet_model.clone();
             let sd = sheet_switcher.clone();
             let btn = rename_sheet_btn.clone();
+            let da = drawing_area.clone();
             rename_sheet_btn.connect_clicked(move |_| {
                 let w = btn.root().and_downcast::<adw::ApplicationWindow>();
                 let idx = sd.selected() as usize;
@@ -992,13 +997,14 @@ impl TablesWindow {
                     &current_name,
                     &suite_common::i18n("_Rename"),
                 );
-                let (sm, sd, ctl) = (sm.clone(), sd.clone(), ctl.clone());
+                let (sm, sd, ctl, da) = (sm.clone(), sd.clone(), ctl.clone(), da.clone());
                 prompt.present(w.as_ref(), move |name| {
                     let Some(name) = name else { return };
                     if name.is_empty() || name == current_name {
                         return;
                     }
-                    let renamed = ctl.borrow_mut().rename_sheet(idx, &name);
+                    let mut renamed = false;
+                    crate::sheet_actions::apply(&ctl, &da, |c| renamed = c.rename_sheet(idx, &name));
                     if renamed {
                         follow(&sm, &sd, &state);
                     }
@@ -1019,7 +1025,10 @@ impl TablesWindow {
                 let idx = sd.selected() as usize;
                 // `ctl`'s borrow ends at the `;`: follow() fires the
                 // switcher's selected-notify, which borrows `ctl` too.
-                let moved = idx > 0 && ctl.borrow_mut().move_sheet(idx, idx - 1);
+                let mut moved = false;
+                if idx > 0 {
+                    crate::sheet_actions::apply(&ctl, &da, |c| moved = c.move_sheet(idx, idx - 1));
+                }
                 if moved {
                     follow(&sm, &sd, &state);
                     da.queue_draw();
@@ -1036,7 +1045,8 @@ impl TablesWindow {
                 let state = controller.state.clone();
                 drop(controller);
                 let idx = sd.selected() as usize;
-                let moved = ctl.borrow_mut().move_sheet(idx, idx + 1);
+                let mut moved = false;
+                crate::sheet_actions::apply(&ctl, &da, |c| moved = c.move_sheet(idx, idx + 1));
                 if moved {
                     follow(&sm, &sd, &state);
                     da.queue_draw();
@@ -1080,7 +1090,8 @@ impl TablesWindow {
                     if resp != "delete" {
                         return;
                     }
-                    let deleted = ctl.borrow_mut().delete_sheet(idx);
+                    let mut deleted = false;
+                    crate::sheet_actions::apply(&ctl, &da, |c| deleted = c.delete_sheet(idx));
                     if deleted {
                         follow(&sm, &sd, &state);
                         da.queue_draw();
@@ -1166,7 +1177,7 @@ impl TablesWindow {
         // ── Chart dialog ──────────────────────────────────────────────
         let win_ref = Rc::new(RefCell::new(None::<adw::ApplicationWindow>));
         let show_chart_dialog = crate::chart_dialog::opener(
-            win_ref.clone(), state.clone(), controller.clone());
+            win_ref.clone(), state.clone(), controller.clone(), drawing_area.clone());
 
         let s_pdf = state.clone();
         let win_ref = Rc::new(RefCell::new(None));
@@ -1191,16 +1202,13 @@ impl TablesWindow {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, wr2.borrow().as_ref()) {
                                 let path_str = path.to_string_lossy().to_string();
-                                let mut st = s2.borrow_mut();
-                                // Sync sheet data to engine first
-                                let active = st.active_sheet;
-                                let sheet_model = st.sheets[active].borrow().clone();
-                                for r in 0..sheet_model.rows {
-                                    for c in 0..sheet_model.cols {
-                                        st.engine.put_cell_text(r, c, &sheet_model.data[r][c]);
-                                    }
-                                }
-                                st.engine.evaluate();
+                                let st = s2.borrow();
+                                // The engine is the calculation authority;
+                                // the sheet is its projection. Export reads
+                                // the engine — writing displayed values back
+                                // as inputs here used to flatten every
+                                // formula into its current result.
+                                let sheet_model = st.sheets[st.active_sheet].borrow().clone();
                                 let parent_win = wr2.borrow().clone();
                                 if let Err(err_msg) = tables_core::export::to_pdf_with_setup(&st.engine, sheet_model.print_area, &sheet_model.page_setup, &path_str).and_then(|()| suite_common::locations::commit_save(&path)) {
                                     let alert = adw::AlertDialog::builder()
@@ -1223,7 +1231,7 @@ impl TablesWindow {
             let ctl = controller.clone();
             let da = drawing_area.clone();
             Box::new(move || {
-                ctl.borrow_mut().mutate_sheet("Change Number Format", |sh| {
+                crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Change Number Format", |sh| {
                     let r = sh.selected_row;
                     let c = sh.selected_col;
                     let current = &sh.formats[r][c].kind;
@@ -1237,7 +1245,7 @@ impl TablesWindow {
                         _ => NumberFormatKind::General,
                     };
                     sh.formats[r][c] = NumberFormat::new(next);
-                });
+                }); });
                 da.queue_draw();
             })
         };
@@ -1246,7 +1254,7 @@ impl TablesWindow {
             let ctl = controller.clone();
             let da = drawing_area.clone();
             Box::new(move || {
-                ctl.borrow_mut().mutate_sheet("Change Cell Border", |sh| {
+                crate::sheet_actions::apply(&ctl, &da, |c| { c.mutate_sheet("Change Cell Border", |sh| {
                     let r = sh.selected_row;
                     let c = sh.selected_col;
                     let current = &sh.borders[r][c].top;
@@ -1258,7 +1266,7 @@ impl TablesWindow {
                         _ => BorderStyle::None,
                     };
                     sh.borders[r][c] = CellBorder::outline(next, (0.0, 0.0, 0.0));
-                });
+                }); });
                 da.queue_draw();
             })
         };
@@ -1267,7 +1275,7 @@ impl TablesWindow {
             let ctl = controller.clone();
             let da = drawing_area.clone();
             Box::new(move || {
-                ctl.borrow_mut().toggle_merge();
+                crate::sheet_actions::apply(&ctl, &da, |c| c.toggle_merge());
                 da.queue_draw();
             })
         };
@@ -1309,7 +1317,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("clear-filter", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().clear_filter();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.clear_filter());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1329,7 +1337,7 @@ impl TablesWindow {
                 let act = gtk4::gio::SimpleAction::new("set-print-area", None);
                 act.connect_activate(move |_, _| {
                     let sel = ctl.borrow().state.borrow().sheet().selection_rect();
-                    ctl.borrow_mut().set_print_area(sel);
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.set_print_area(sel));
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1339,7 +1347,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("clear-print-area", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().clear_print_area();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.clear_print_area());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1349,7 +1357,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("hide-selected-rows", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().hide_selected_rows();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.hide_selected_rows());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1359,7 +1367,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("unhide-all-rows", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().unhide_all_rows();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.unhide_all_rows());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1369,7 +1377,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("hide-selected-cols", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().hide_selected_cols();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.hide_selected_cols());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1379,7 +1387,7 @@ impl TablesWindow {
                 let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("unhide-all-cols", None);
                 act.connect_activate(move |_, _| {
-                    ctl.borrow_mut().unhide_all_cols();
+                    crate::sheet_actions::apply(&ctl, &da, |c| c.unhide_all_cols());
                     da.queue_draw();
                 });
                 app.add_action(&act);
@@ -1387,9 +1395,10 @@ impl TablesWindow {
             {
                 let ctl = controller.clone();
                 let wr = win_ref.clone();
+                let da = drawing_area.clone();
                 let act = gtk4::gio::SimpleAction::new("page-setup", None);
                 act.connect_activate(move |_, _| {
-                    show_page_setup_dialog(&ctl, wr.borrow().as_ref());
+                    show_page_setup_dialog(&ctl, &da, wr.borrow().as_ref());
                 });
                 app.add_action(&act);
             }
@@ -1537,25 +1546,10 @@ impl TablesWindow {
                     let existing_path = path_state.borrow().clone();
                     if let Some(path) = existing_path {
                         let path_str = path.to_string_lossy().into_owned();
-                        let (s2, ctl, slot, force_close, win2, target) =
-                            (s.clone(), ctl.clone(), slot.clone(), force_close.clone(), win.clone(), path_str.clone());
-                        crate::loss_ui::save_after_asking(&win, Some(&path_str), &path_str, &s.borrow(), move || {
-                        match save_engine_to_xlsx(&target, Some(&target), &s2.borrow()) {
-                            Ok(()) => {
-                                ctl.borrow_mut().mark_clean();
-                                slot.clear_or_report();
-                                force_close.set(true);
-                                win2.close();
-                            }
-                            Err(e) => {
-                                let err = adw::AlertDialog::builder()
-                                    .heading(suite_common::i18n("Could Not Save File"))
-                                    .body(&e)
-                                    .build();
-                                err.add_response("ok", &suite_common::i18n("_OK"));
-                                err.present(Some(&win2));
-                            }
-                        }
+                        let win2 = win.clone();
+                        crate::persistence::request_save(win, Some(&path_str), &path, &s, &ctl, &slot, move || {
+                            force_close.set(true);
+                            win2.close();
                         });
                         return;
                     }
@@ -1574,29 +1568,12 @@ impl TablesWindow {
                     dlg.save(Some(&win), None::<&gio::Cancellable>, move |result| {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, Some(&win2)) {
-                                let path_str = path.to_string_lossy().to_string();
-                                let (s2, ctl, slot, force_close, path_state, win3, target) = (
-                                    s.clone(), ctl.clone(), slot.clone(), force_close.clone(),
-                                    path_state.clone(), win2.clone(), path_str.clone(),
-                                );
-                                crate::loss_ui::save_after_asking(&win2, None, &path_str, &s.borrow(), move || {
-                                match save_engine_to_xlsx(&target, None, &s2.borrow()) {
-                                    Ok(()) => {
-                                        *path_state.borrow_mut() = Some(path);
-                                        ctl.borrow_mut().mark_clean();
-                                        slot.clear_or_report();
-                                        force_close.set(true);
-                                        win3.close();
-                                    }
-                                    Err(e) => {
-                                        let err = adw::AlertDialog::builder()
-                                            .heading(suite_common::i18n("Could Not Save File"))
-                                            .body(&e)
-                                            .build();
-                                        err.add_response("ok", &suite_common::i18n("_OK"));
-                                        err.present(Some(&win3));
-                                    }
-                                }
+                                let win3 = win2.clone();
+                                let save_path = path.clone();
+                                crate::persistence::request_save(win2, None, &save_path, &s, &ctl, &slot, move || {
+                                    *path_state.borrow_mut() = Some(path);
+                                    force_close.set(true);
+                                    win3.close();
                                 });
                             }
                         }
@@ -1753,32 +1730,13 @@ impl TablesWindow {
                     move |result: Result<gio::File, glib::Error>| {
                         if let Ok(file) = result {
                             if let Some(path) = crate::persistence::local_path(&file, true, Some(&w2)) {
-                                let path_str = path.to_string_lossy().to_string();
                                 let source = path_state.borrow().as_ref().map(|p| p.to_string_lossy().into_owned());
-                                let (s, ctl, slot, path_state, w3) = (s.clone(), ctl.clone(), slot.clone(), path_state.clone(), w2.clone());
-                                let target = path_str.clone();
-                                let source_for_carry = source.clone();
-                                crate::loss_ui::save_after_asking(&w2, source.as_deref(), &path_str, &s.clone().borrow(), move || {
-                                let ss = s.borrow();
-                                match save_engine_to_xlsx(&target, source_for_carry.as_deref(), &ss) {
-                                    Ok(()) => {
-                                        let settings = gtk4::gio::Settings::new("org.tunaos.tables");
-                                        suite_common::push_recent_file(&settings, &path.to_string_lossy());
-                                        drop(ss);
-                                        *path_state.borrow_mut() = Some(path);
-                                        ctl.borrow_mut().mark_clean();
-                                        slot.clear_or_report();
-                                    }
-                                    Err(e) => {
-                                        let err = adw::AlertDialog::builder()
-                                            .heading(suite_common::i18n("Could Not Save File"))
-                                            .body(&e)
-                                            .build();
-                                        err.add_response("ok", &suite_common::i18n("_OK"));
-                                        err.set_default_response(Some("ok"));
-                                        err.present(Some(&w3));
-                                    }
-                                }
+                                let save_path = path.clone();
+                                let target_name = path.to_string_lossy().to_string();
+                                crate::persistence::request_save(w2, source.as_deref(), &save_path, &s, &ctl, &slot, move || {
+                                    let settings = gtk4::gio::Settings::new("org.tunaos.tables");
+                                    suite_common::push_recent_file(&settings, &target_name);
+                                    *path_state.borrow_mut() = Some(path);
                                 });
                             }
                         }
@@ -1805,10 +1763,7 @@ impl TablesWindow {
                 // same name under a writable extension.
                 let path_str = path.to_string_lossy().to_string();
                 if !tables_core::io::is_writable_format(&path_str) {
-                    let prompt = adw::AlertDialog::builder()
-                        .heading(suite_common::i18n("Cannot Save in This Format"))
-                        .body(unsupported_save_format_message(&path_str))
-                        .build();
+                    let prompt = adw::AlertDialog::new(Some(&suite_common::i18n("Cannot Save in This Format")), Some(&unsupported_save_format_message(&path_str)));
                     prompt.add_response("cancel", &suite_common::i18n("_Cancel"));
                     prompt.add_response("save-as", &suite_common::i18n("_Save As…"));
                     prompt.set_response_appearance(
@@ -1816,35 +1771,20 @@ impl TablesWindow {
                     prompt.set_default_response(Some("save-as"));
                     prompt.set_close_response("cancel");
                     let app_for_prompt = app_for_save.clone();
-                    prompt.connect_response(None, move |_, response| {
+                    let w_for_prompt = w.clone();
+                    prompt.choose(Some(&w_for_prompt), None::<&gio::Cancellable>, move |response| {
                         if response == "save-as" {
                             app_for_prompt.activate_action("save-file-as", None);
                         }
                     });
-                    prompt.present(Some(&w));
                     return;
                 }
                 // Ask first when the save would drop content the file
                 // holds (#1272); cancelling writes nothing.
-                let (s2, ctl, slot, w2, target) = (s.clone(), ctl.clone(), slot.clone(), w.clone(), path_str.clone());
-                crate::loss_ui::save_after_asking(&w, Some(&path_str), &path_str, &s.borrow(), move || {
-                match save_engine_to_xlsx(&target, Some(&target), &s2.borrow()) {
-                    Ok(()) => {
-                        let settings = gtk4::gio::Settings::new("org.tunaos.tables");
-                        suite_common::push_recent_file(&settings, &target);
-                        ctl.borrow_mut().mark_clean();
-                        slot.clear_or_report();
-                    }
-                    Err(e) => {
-                        let err = adw::AlertDialog::builder()
-                            .heading(suite_common::i18n("Could Not Save File"))
-                            .body(&e)
-                            .build();
-                        err.add_response("ok", &suite_common::i18n("_OK"));
-                        err.set_default_response(Some("ok"));
-                        err.present(Some(&w2));
-                    }
-                }
+                let target = path_str.clone();
+                crate::persistence::request_save(w.clone(), Some(&path_str), std::path::Path::new(&path_str), &s, &ctl, &slot, move || {
+                    let settings = gtk4::gio::Settings::new("org.tunaos.tables");
+                    suite_common::push_recent_file(&settings, &target);
                 });
             });
             app.add_action(&act);
@@ -1909,12 +1849,15 @@ impl TablesWindow {
             let history_action = |name: &str, step: fn(&mut WorkbookController) -> bool| {
                 let (ctl, da) = (controller.clone(), drawing_area.clone());
                 let (sm, sd, st) = (sheet_model.clone(), sheet_switcher.clone(), state.clone());
+                let refresh = refresh_sel.clone();
                 let action = gtk4::gio::SimpleAction::new(name, None);
                 action.set_enabled(false);
                 action.connect_activate(move |_, _| {
                     let stepped = step(&mut ctl.borrow_mut());
                     if stepped {
                         crate::sheet_bar::follow(&sm, &sd, &st);
+                        refresh();
+                        crate::grid_area::refresh_grid_a11y(&da, &st);
                         da.queue_draw();
                     }
                 });
@@ -1940,7 +1883,6 @@ impl TablesWindow {
             let da = drawing_area.clone();
             let fx = fx_entry.clone();
             let refresh = refresh_sel.clone();
-            let toasts = toast_overlay.clone();
             let key = gtk4::EventControllerKey::new();
             key.connect_key_pressed(move |_, keyval, _code, mods| {
                 use gtk4::gdk::Key;
@@ -1973,7 +1915,9 @@ impl TablesWindow {
                             let sh = st.sheet();
                             (sh.selected_row, sh.selected_col)
                         };
-                        ctl2.borrow_mut().paste_fragment(row, col, &frag);
+                        if !crate::sheet_actions::apply(&ctl2, &da2, |c| c.paste_fragment(row, col, &frag)) {
+                            return;
+                        }
                         refresh2();
                         da2.queue_draw();
                     };
@@ -2037,7 +1981,7 @@ impl TablesWindow {
                             None
                         } else {
                             sh.select_cell(nr, nc);
-                            Some(sh.data[nr][nc].clone())
+                            Some(st.cell_input(nr, nc))
                         }
                     };
                     // fx.set_text() fires `changed` synchronously, and for
@@ -2060,13 +2004,10 @@ impl TablesWindow {
                     return gtk4::glib::Propagation::Stop;
                 }
                 if keyval == Key::Delete || keyval == Key::BackSpace {
-                    let (r, c) = {
-                        let st = s.borrow();
-                        let sh = st.sheet();
-                        (sh.selected_row, sh.selected_col)
-                    };
-                    if crate::sheet_actions::refuse_locked(&ctl, &toasts, r, c) { return gtk4::glib::Propagation::Stop; }
-                    ctl.borrow_mut().edit_cell(r, c, "");
+                    if !crate::sheet_actions::apply(&ctl, &da, |c| { c.clear_selection(); }) {
+                        return gtk4::glib::Propagation::Stop;
+                    }
+                    refresh();
                     da.queue_draw();
                     return gtk4::glib::Propagation::Stop;
                 }

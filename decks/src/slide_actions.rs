@@ -26,10 +26,8 @@ pub(crate) fn register(app: &adw::Application, h: EditorHandles) {
     let labels: Vec<(String, &str)> = ACTIONS.iter().map(|(n, l, _)| (format!("app.{n}"), *l)).collect();
     suite_common::actions::register_labels(&labels.iter().map(|(n, l)| (n.as_str(), *l)).collect::<Vec<_>>());
     for (name, _, accel) in ACTIONS {
-        let (ctl, cs, so, canvas, list, slides, masters, refresh) = (
+        let (ctl, canvas, list, slides, masters, refresh) = (
             h.controller.clone(),
-            h.current_slide.clone(),
-            h.selected_object.clone(),
             h.canvas.clone(),
             h.slide_list.clone(),
             h.slides.clone(),
@@ -38,15 +36,21 @@ pub(crate) fn register(app: &adw::Application, h: EditorHandles) {
         );
         let act = gio::SimpleAction::new(name, None);
         act.connect_activate(move |_, _| {
-            let at = cs.get();
-            let moved = match name {
-                "duplicate-slide" => ctl.duplicate_slide(at),
-                "move-slide-up" => ctl.move_slide_up(at),
-                _ => ctl.move_slide_down(at),
+            let Some(slide_id) = ctl.selection().slide_id else { return };
+            let to_id = match name {
+                "duplicate-slide" => ctl.duplicate_slide(slide_id),
+                _ => {
+                    let moved = match name {
+                        "move-slide-up" => ctl.move_slide_up(slide_id),
+                        _ => ctl.move_slide_down(slide_id),
+                    };
+                    if !moved { return; }
+                    Some(slide_id)
+                }
             };
-            let Some(to) = moved else { return };
-            cs.set(to);
-            so.set(None);
+            let Some(to_id) = to_id else { return };
+            ctl.select_slide(to_id);
+            let to = ctl.slide_index(to_id).unwrap_or(0);
             rebuild_slide_list(&list, &slides.borrow().clone(), &masters.borrow(), to);
             canvas.queue_draw();
             refresh();

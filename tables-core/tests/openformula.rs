@@ -21,7 +21,7 @@ fn engine_with_fixture() -> TablesEngine {
         (0, 2, "hello"), (1, 2, "WORLD"), (2, 2, " pad "),
         (0, 3, "0"),
     ] {
-        e.set_cell_text(r, c, v);
+        e.set_cell_text(r, c, v).unwrap();
     }
     e
 }
@@ -161,7 +161,7 @@ fn openformula_conformance_ratchet() {
 
     for (name, formula, expected) in &cases {
         let mut e = engine_with_fixture();
-        e.set_cell_text(9, 9, formula); // J10 keeps clear of the fixture
+        e.set_cell_text(9, 9, formula).unwrap(); // J10 keeps clear of the fixture
         e.evaluate();
         let got = e.cell(9, 9);
         let norm = |s: &str| {

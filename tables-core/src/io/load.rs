@@ -32,7 +32,7 @@ fn data_to_string(cell: &Data) -> String {
 
 /// Put a file's cell into the engine: its text as text (never parsed as a
 /// number, boolean or formula), anything else as its value.
-fn put_data(engine: &mut TablesEngine, row: usize, col: usize, cell: &Data) {
+fn put_data(engine: &mut TablesEngine, row: usize, col: usize, cell: &Data) -> Result<(), String> {
     match cell {
         Data::String(s) if !s.is_empty() => engine.put_cell_literal_text(row, col, s),
         other => engine.put_cell_text(row, col, &data_to_string(other)),
@@ -53,29 +53,38 @@ fn range_extent<T: calamine::CellType>(range: &calamine::Range<T>) -> (usize, us
     }
 }
 
+/// Import a value-only range (xls, or an xlsx without formulas) into the
+/// engine at its own coordinates. A cell the engine rejects fails the
+/// import with its coordinates rather than landing a workbook that is
+/// silently missing content.
 fn load_range_into_engine(
     range: &calamine::Range<Data>,
     engine: &mut TablesEngine,
-) -> (usize, usize) {
+) -> Result<(usize, usize), String> {
     // `rows()` yields the range's own rows, so its indices are relative to
     // `start()`. Writing them straight to the engine would shift a sheet whose
     // content begins at B2 up and left into A1.
     let (row0, col0) = range.start().unwrap_or((0, 0));
     for (r, row) in range.rows().enumerate() {
         for (c, cell) in row.iter().enumerate() {
-            put_data(engine, row0 as usize + r, col0 as usize + c, cell);
+            put_data(engine, row0 as usize + r, col0 as usize + c, cell)
+                .map_err(|e| format!("import {e}"))?;
         }
     }
     engine.evaluate();
     let (rows, cols) = range_extent(range);
-    (rows.max(1), cols.max(1))
+    Ok((rows.max(1), cols.max(1)))
 }
 
+/// Import values plus formulas into the engine: formulas (with the `=`
+/// IronCalc parses) as inputs, plain values as text. Same failure
+/// contract as [`load_range_into_engine`]: a rejected cell fails the
+/// import rather than landing partial content.
 fn load_xlsx_ranges_into_engine(
     values: &calamine::Range<Data>,
     formulas: &calamine::Range<String>,
     engine: &mut TablesEngine,
-) -> (usize, usize) {
+) -> Result<(usize, usize), String> {
     // Absolute extents, not range sizes — `get_value` below is addressed in
     // absolute sheet coordinates, so the bounds must be too.
     let (value_rows, value_cols) = range_extent(values);
@@ -93,18 +102,20 @@ fn load_xlsx_ranges_into_engine(
                     Some(cell) => put_data(engine, row, col, cell),
                     None => engine.put_cell_text(row, col, ""),
                 }
+                .map_err(|e| format!("import {e}"))?;
             } else {
                 let input = if formula.starts_with('=') {
                     formula.to_string()
                 } else {
                     format!("={formula}")
                 };
-                engine.put_cell_text(row, col, &input);
+                engine.put_cell_text(row, col, &input)
+                    .map_err(|e| format!("import {e}"))?;
             }
         }
     }
     engine.evaluate();
-    (rows.max(1), cols.max(1))
+    Ok((rows.max(1), cols.max(1)))
 }
 
 /// `.xlsb` is a binary container, not the XML package the xlsx reader
@@ -137,7 +148,7 @@ pub fn load_file_into_engine(
             let range = wb
                 .worksheet_range(&sheet_names[0])
                 .map_err(|e| format!("Cannot read sheet: {}", e))?;
-            Ok(load_range_into_engine(&range, engine))
+            load_range_into_engine(&range, engine)
         }
         "xlsb" => Err(XLSB_UNSUPPORTED.to_string()),
         "xlsx" | "xlsm" => {
@@ -153,7 +164,7 @@ pub fn load_file_into_engine(
             let range = wb
                 .worksheet_range(&sheet_names[0])
                 .map_err(|e| format!("Cannot read sheet: {}", e))?;
-            Ok(load_xlsx_ranges_into_engine(&range, &formulas, engine))
+            load_xlsx_ranges_into_engine(&range, &formulas, engine)
         }
         "ods" => {
             let mut wb: calamine::Ods<_> =
@@ -168,7 +179,7 @@ pub fn load_file_into_engine(
             let formulas = wb
                 .worksheet_formula(&sheet_names[0])
                 .map_err(|e| format!("Cannot read formulas: {}", e))?;
-            Ok(load_xlsx_ranges_into_engine(&range, &super::odf_formula::a1_formulas(&formulas), engine))
+            load_xlsx_ranges_into_engine(&range, &super::odf_formula::a1_formulas(&formulas), engine)
         }
         "csv" | "tsv" => {
             let content =
@@ -181,7 +192,8 @@ pub fn load_file_into_engine(
                 max_cols = max_cols.max(cols.len());
                 for (c, val) in cols.iter().enumerate() {
                     let trimmed = val.trim().trim_matches('"');
-                    engine.put_cell_text(r, c, trimmed);
+                    engine.put_cell_text(r, c, trimmed)
+                        .map_err(|e| format!("import {e}"))?;
                 }
                 max_rows = r + 1;
             }
@@ -257,6 +269,16 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         source.push((values, formulas));
     }
 
+    let sheet_props = read_sheet_props_from_xlsx(path, &names);
+    // Calamine's value/formula ranges omit blank styled cells. Protection
+    // on those cells still needs a model slot and an editable engine cell.
+    for props in sheet_props.values() {
+        for (r, c, _) in &props.cell_styles {
+            max_rows = max_rows.max(r + 1);
+            max_cols = max_cols.max(c + 1);
+        }
+    }
+
     // Same floor as every other load path: a small workbook must still open
     // onto a usable grid rather than one sized exactly to its content (#447).
     let max_rows = max_rows.max(crate::sheet::DEFAULT_ROWS);
@@ -267,12 +289,15 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         engine.add_sheet(name)?;
     }
 
-    let sheet_props = read_sheet_props_from_xlsx(path, &names);
-
     let mut sheets = Vec::with_capacity(names.len());
     for (index, ((values, formulas), name)) in source.into_iter().zip(names.iter()).enumerate() {
         engine.set_active_sheet(index)?;
-        let (rows, cols) = load_xlsx_ranges_into_engine(&values, &formulas, &mut engine);
+        let (rows, cols) = load_xlsx_ranges_into_engine(&values, &formulas, &mut engine)?;
+        let (rows, cols) = sheet_props.get(name).map_or((rows, cols), |props| {
+            props.cell_styles.iter().fold((rows, cols), |(rows, cols), (r, c, _)| {
+                (rows.max(r + 1), cols.max(c + 1))
+            })
+        });
         let sheet_id = engine.sheet_id_at(index).unwrap_or(index as u32);
         let mut sheet = SheetModel::new(
             name,
@@ -282,11 +307,17 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         );
         sheet.sync_from_engine(&engine);
         if let Some(props) = sheet_props.get(name) {
-            // Written back out as manually-hidden rather than reproducing
-            // filter/manual as separate concepts — a saved-then-reopened
-            // xlsx has no filter state left to restore, only hidden rows,
-            // same as real Excel/Sheets after a filter is "applied".
-            *sheet.hidden_rows_manual = props.hidden_rows.clone();
+            // An imported value filter becomes an explicit definition
+            // whose derived rows are filter hides; every other hidden row
+            // the file holds is a manual hide. Clearing the filter then
+            // restores the same semantics it had before the save, while a
+            // rangeless session filter still reopens as manual hides (the
+            // writer has no autoFilter form for it — see save.rs).
+            if let Some(raw) = &props.auto_filter {
+                sheet.filter = Some(crate::sheet::FilterDef::from_shown_values(raw.range, &raw.columns, &sheet));
+                sheet.recompute_filter();
+            }
+            *sheet.hidden_rows_manual = props.hidden_rows.difference(&sheet.hidden_rows).copied().collect();
             *sheet.hidden_cols = props.hidden_cols.clone();
             if let Some(setup) = &props.page_setup {
                 sheet.page_setup = setup.clone();
@@ -327,6 +358,7 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
                     sheet.formats[*r][*c] = x.format.clone();
                     sheet.styles[*r][*c] = x.style.clone();
                     sheet.borders[*r][*c] = x.border.clone();
+                    sheet.cell_protections[*r][*c] = x.protection.clone();
                 }
             }
             for (r, c, note) in &props.notes {
@@ -340,7 +372,7 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
                 .copied()
                 .filter(|(r, c, _, _)| *r < sheet.rows && *c < sheet.cols)
                 .collect();
-            sheet.protection.protected = props.protected;
+            sheet.protection = props.protection.clone();
         }
         sheets.push(sheet);
     }
@@ -368,15 +400,27 @@ pub fn load_xlsx_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>),
         }
         let _ = engine.model.new_defined_name(name, None, formula);
     }
-    // Charts and conditional-formatting rules. Their readers resolve the
-    // first worksheet only, so they attach there (the XLSX loss budget in
-    // tests/xlsx_loss_budget.rs declares the later sheets' as lost). They
-    // used to be attached by the GUI after this returned, so every other
-    // opener of this function (recovery's tests, the corpus tooling)
-    // silently had neither.
-    if let Some(first) = sheets.first_mut() {
-        first.charts = super::read_charts_from_xlsx(path);
-        first.cond_rules = super::read_cond_rules_from_xlsx(path);
+    // Charts resolve to their owning worksheet through the
+    // workbook→worksheet→drawing→chart relationship chain (TBL-002): a
+    // later sheet's charts land on that sheet, and unsupported content is
+    // reported by the reader and the package scan rather than silently
+    // moved or dropped. Conditional-formatting rules resolve the same way
+    // (TBL-003): each rule lands on the worksheet that owns it, with its
+    // comparison, range, threshold(s), fill and priority intact. Unknown
+    // expressions, styles and stop-if-true flags are skipped with a reader
+    // note and reported by the package scan instead of approximated.
+    for (owner, spec) in super::read_charts_detailed(path, &sheets).0 {
+        if let Some(sheet) = sheets.iter_mut().find(|s| s.name == owner) {
+            sheet.charts.push(spec);
+        }
+    }
+    for (owner, rule) in super::read_cond_rules_detailed(path).0 {
+        if let Some(sheet) = sheets.iter_mut().find(|s| s.name == owner) {
+            sheet.cond_rules.push(rule);
+        }
+    }
+    for sheet in sheets.iter_mut() {
+        sheet.cond_rules.sort_by_key(|rule| rule.priority);
     }
     Ok((engine, sheets))
 }
@@ -461,8 +505,8 @@ fn build_named_workbook_with_formulas(source: Vec<(String, calamine::Range<Data>
     for (index, (name, range, formulas)) in source.into_iter().enumerate() {
         engine.set_active_sheet(index)?;
         let (rows, cols) = match &formulas {
-            Some(f) => load_xlsx_ranges_into_engine(&range, f, &mut engine),
-            None => load_range_into_engine(&range, &mut engine),
+            Some(f) => load_xlsx_ranges_into_engine(&range, f, &mut engine)?,
+            None => load_range_into_engine(&range, &mut engine)?,
         };
         let sheet_id = engine.sheet_id_at(index).unwrap_or(index as u32);
         let mut sheet = SheetModel::new(&name, rows.max(DEFAULT_ROWS), cols.max(DEFAULT_COLS), sheet_id);
@@ -592,6 +636,130 @@ mod tests {
     use super::*;
     use calamine::Cell;
 
+    /// Build source OOXML directly so import behavior is independent of our
+    /// exporter (in particular its protection defaults and blank-cell policy).
+    fn protection_fixture(styles: &str, sheets: &[(&str, &str)]) -> tempfile::TempPath {
+        use std::io::Write;
+        let file = tempfile::Builder::new().suffix(".xlsx").tempfile().unwrap();
+        let path = file.into_temp_path();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        let mut workbook = String::from(r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>"#);
+        let mut rels = String::from(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#);
+        let mut types = String::from(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>"#);
+        for (index, (name, body)) in sheets.iter().enumerate() {
+            let id = index + 1;
+            workbook.push_str(&format!(r#"<sheet name="{name}" sheetId="{id}" r:id="s{id}"/>"#));
+            rels.push_str(&format!(r#"<Relationship Id="s{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{id}.xml"/>"#));
+            types.push_str(&format!(r#"<Override PartName="/xl/worksheets/sheet{id}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#));
+            zip.start_file(format!("xl/worksheets/sheet{id}.xml"), options).unwrap();
+            write!(zip, r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{body}</worksheet>"#).unwrap();
+        }
+        workbook.push_str("</sheets></workbook>");
+        rels.push_str("</Relationships>");
+        types.push_str("</Types>");
+        for (name, content) in [
+            ("[Content_Types].xml", types.as_str()),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="book" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#),
+            ("xl/workbook.xml", workbook.as_str()),
+            ("xl/_rels/workbook.xml.rels", rels.as_str()),
+            ("xl/styles.xml", styles),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn xlsx_imports_cell_protection_on_later_sheets_and_blank_cells() {
+        use crate::sheet::CellProtection;
+        let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <cellStyleXfs count="2"><xf/><xf><protection locked="0" hidden="1"/></xf></cellStyleXfs>
+            <cellXfs count="5">
+                <xf/>
+                <xf applyProtection="1"><protection locked="false" hidden="false"/></xf>
+                <xf applyProtection="true"><protection hidden="true"/></xf>
+                <xf xfId="1" applyProtection="0"><protection locked="1" hidden="0"/></xf>
+                <xf xfId="1" applyProtection="1"><protection/></xf>
+            </cellXfs></styleSheet>"#;
+        let blank_row = crate::sheet::DEFAULT_ROWS + 3;
+        let later = format!(r#"<sheetData><row r="1">
+            <c r="A1" s="1"><v>7</v></c><c r="B1" s="2"><f>1+1</f><v>2</v></c>
+            <c r="C1" s="3"/><c r="D1" s="4"/>
+            </row><row r="{blank_row}"><c r="B{blank_row}" s="1"/></row></sheetData>
+            <sheetProtection sheet="1"/>"#);
+        let path = protection_fixture(styles, &[
+            ("First", r#"<sheetData><row r="1"><c r="A1"><v>3</v></c></row></sheetData>"#),
+            ("Later", &later),
+        ]);
+        let (mut engine, sheets) = load_workbook(path.to_str().unwrap()).unwrap();
+        assert_eq!(sheets[0].cell_protections[0][0], CellProtection::default());
+        let later = &sheets[1];
+        assert!(later.protection.protected);
+        assert_eq!(later.cell_protections[0][0], CellProtection { locked: false, hidden_formula: false });
+        assert_eq!(later.cell_protections[0][1], CellProtection { locked: true, hidden_formula: true });
+        assert_eq!(later.cell_protections[0][2], CellProtection { locked: false, hidden_formula: true });
+        assert_eq!(later.cell_protections[0][3], CellProtection::default());
+        assert_eq!(later.cell_protections[blank_row - 1][1], CellProtection { locked: false, hidden_formula: false });
+        assert_eq!(later.cell(blank_row - 1, 1), "");
+        assert_eq!(later.cell_protections[1][0], CellProtection::default());
+        assert!(engine.rows >= blank_row);
+        engine.set_active_sheet(1).unwrap();
+        assert_eq!(engine.input_at(1, 0, 1), "=1+1");
+        engine.set_cell_text(blank_row - 1, 1, "blank input").unwrap();
+        assert_eq!(engine.cell(blank_row - 1, 1), "blank input");
+    }
+
+    #[test]
+    fn xlsx_imports_protection_from_style_zero() {
+        use crate::sheet::CellProtection;
+        let path = protection_fixture(
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2">
+                <xf applyProtection="1"><protection locked="0" hidden="1"/></xf><xf/>
+            </cellXfs></styleSheet>"#,
+            &[("Zero", r#"<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="0"/><c r="C1" s="1"/></row></sheetData>"#)],
+        );
+        let (_, sheets) = load_xlsx_workbook(path.to_str().unwrap()).unwrap();
+        let protection = CellProtection { locked: false, hidden_formula: true };
+        assert_eq!(sheets[0].cell_protections[0][0], protection);
+        assert_eq!(sheets[0].cell_protections[0][1], protection);
+        assert_eq!(sheets[0].cell_protections[0][2], CellProtection::default());
+    }
+
+    #[test]
+    fn xlsx_imports_sheet_permission_defaults_and_boolean_values_without_credentials() {
+        use crate::sheet::SheetProtection;
+        let path = protection_fixture(
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf/></cellXfs></styleSheet>"#,
+            &[
+                ("Absent", "<sheetData/>"),
+                ("Defaults", r#"<sheetData/><sheetProtection sheet="true"/>"#),
+                ("Legacy", r#"<sheetData/><sheetProtection sheet="1" password="CE4B" selectLockedCells="true" selectUnlockedCells="1" formatCells="false" insertRows="0" deleteRows="false"/>"#),
+                ("Modern", r#"<sheetData/><sheetProtection sheet="1" algorithmName="SHA-512" hashValue="aGFzaA==" saltValue="c2FsdA==" spinCount="100000" selectLockedCells="0" selectUnlockedCells="false" formatCells="1" insertRows="true" deleteRows="1"/>"#),
+                ("Disabled", r#"<sheetData/><sheetProtection sheet="false"/>"#),
+                ("NoSheetFlag", "<sheetData/><sheetProtection/>"),
+            ],
+        );
+        let (_, sheets) = load_xlsx_workbook(path.to_str().unwrap()).unwrap();
+        let protected = SheetProtection { protected: true, ..SheetProtection::default() };
+        assert_eq!(sheets[0].protection, SheetProtection::default());
+        assert_eq!(sheets[1].protection, protected);
+        assert_eq!(sheets[2].protection, SheetProtection {
+            protected: true,
+            password_hash: None,
+            allow_select_locked: false,
+            allow_select_unlocked: false,
+            allow_format_cells: true,
+            allow_insert_rows: true,
+            allow_delete_rows: true,
+        });
+        assert_eq!(sheets[3].protection, protected);
+        assert_eq!(sheets[4].protection, SheetProtection::default());
+        assert_eq!(sheets[5].protection, SheetProtection::default());
+    }
+
     // ── build_named_workbook unit tests ───────────────────────────────────
 
     /// Empty source must produce a clear error, not a panic.
@@ -653,8 +821,8 @@ mod tests {
         assert!(engine.formula_at(0, 0, 2).is_none(), "a text cell is no formula");
         assert_eq!(engine.cell(0, 4), "plain");
         // Text digits sort and count as text; the number as a number.
-        engine.put_cell_text(1, 0, "=ISTEXT(A1)");
-        engine.put_cell_text(1, 3, "=ISNUMBER(D1)");
+        engine.put_cell_text(1, 0, "=ISTEXT(A1)").unwrap();
+        engine.put_cell_text(1, 3, "=ISNUMBER(D1)").unwrap();
         engine.evaluate();
         assert_eq!(engine.cell(1, 0), "true", "ISTEXT(A1)");
         assert_eq!(engine.cell(1, 3), "true", "ISNUMBER(D1)");
@@ -985,7 +1153,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sparse.xlsx");
         let mut engine = TablesEngine::new(4, 4).unwrap();
-        engine.set_cell_text(3, 3, "e");
+        engine.set_cell_text(3, 3, "e").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 4, 0);
         sheet.sync_from_engine(&engine);
@@ -1007,9 +1175,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("offset.xlsx");
         let mut engine = TablesEngine::new(4, 4).unwrap();
-        engine.set_cell_text(1, 1, "corner");
-        engine.set_cell_text(1, 2, "right");
-        engine.set_cell_text(2, 1, "below");
+        engine.set_cell_text(1, 1, "corner").unwrap();
+        engine.set_cell_text(1, 2, "right").unwrap();
+        engine.set_cell_text(2, 1, "below").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 4, 0);
         sheet.sync_from_engine(&engine);
@@ -1110,7 +1278,7 @@ mod tests {
         let (mut engine, sheets) = load_xlsx_workbook(&path).expect("load");
         assert!(sheets[0].rows > 9, "row 10 does not exist: {} rows", sheets[0].rows);
         engine.set_active_sheet(0).unwrap();
-        engine.set_cell_text(9, 0, "typed into A10");
+        engine.set_cell_text(9, 0, "typed into A10").unwrap();
         assert_eq!(engine.cell(9, 0), "typed into A10");
     }
 

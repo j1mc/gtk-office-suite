@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:anim="urn:oasis:names:tc:opendocument:xmlns:animation:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.2">
+ <office:body><office:presentation>
+  <draw:page draw:name="Loss matrix" presentation:class="title">
+   <office:annotation><office:creator>Reviewer</office:creator><text:p xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">A review note the save would drop</text:p></office:annotation>
+   <draw:frame draw:name="Movie"><draw:plugin xlink:href="reel.mp4"><draw:param draw:name="mute" draw:value="true"/></draw:plugin></draw:frame>
+   <draw:frame draw:name="Sheet"><draw:object-ole xlink:href="./Object 2"/></draw:frame>
+   <anim:par presentation:preset-class="motion-path"><anim:par/></anim:par>
+   <draw:frame draw:name="Kept"><draw:image xlink:href="Pictures/here.png"/></draw:frame>
+   <draw:frame draw:name="Chart"><draw:object xlink:href="./Object 1"/></draw:frame>
+  </draw:page>
+ </office:presentation></office:body>
+</office:document-content>

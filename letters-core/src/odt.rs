@@ -128,8 +128,48 @@ fn para_style_props(st: &ParaStyle) -> String {
     if st.keep_with_next {
         props.push_str(" fo:keep-with-next=\"always\"");
     }
-    if (st.line_spacing - 1.0).abs() > 0.01 {
-        props.push_str(&format!(" fo:line-height=\"{:.0}%\"", st.line_spacing * 100.0));
+    if st.keep_lines {
+        props.push_str(" fo:keep-together=\"always\"");
+    }
+    match st.widow_control {
+        Some(false) => props.push_str(" fo:widows=\"1\" fo:orphans=\"1\""),
+        Some(true) => props.push_str(" fo:widows=\"2\" fo:orphans=\"2\""),
+        None => {}
+    }
+    match st.line_height {
+        // A fixed height is a length; a minimum is
+        // `style:line-height-at-least`, which Writer keeps.
+        Some(LineHeight::Exact(pt)) => props.push_str(&format!(" fo:line-height=\"{pt:.2}pt\"")),
+        Some(LineHeight::Minimum(pt)) => props.push_str(&format!(" style:line-height-at-least=\"{pt:.2}pt\"")),
+        None => {
+            if (st.line_spacing - 1.0).abs() > 0.01 {
+                props.push_str(&format!(" fo:line-height=\"{:.0}%\"", st.line_spacing * 100.0));
+            }
+        }
+    }
+    if let Some(fill) = st.shading.as_deref().filter(|f| !f.is_empty()) {
+        props.push_str(&format!(" fo:background-color=\"#{fill}\""));
+    }
+    let border = |e: &ParaBorder| {
+        let style = match e.style {
+            BorderStyle::Single => "solid",
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+        };
+        format!("{:.2}pt {style} #{}", e.width_pt, e.color)
+    };
+    if let Some(e) = &st.borders.top {
+        props.push_str(&format!(" fo:border-top=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.left {
+        props.push_str(&format!(" fo:border-left=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.bottom {
+        props.push_str(&format!(" fo:border-bottom=\"{}\"", border(e)));
+    }
+    if let Some(e) = &st.borders.right {
+        props.push_str(&format!(" fo:border-right=\"{}\"", border(e)));
     }
     // ODF spells paragraph spacing `fo:margin-top`/`fo:margin-bottom`,
     // the same XSL-FO properties the page geometry below already uses.
@@ -157,10 +197,24 @@ fn para_style_children(st: &ParaStyle) -> String {
         return String::new();
     }
     let mut out = String::from("<style:tab-stops>");
-    for pos in &st.tab_stops_pt {
-        // `style:type` defaults to left, which is the only kind the model
-        // has; a position is all a stop needs.
-        out.push_str(&format!("<style:tab-stop style:position=\"{pos:.2}pt\"/>"));
+    for stop in &st.tab_stops_pt {
+        // `style:type` defaults to left, so only other alignments are
+        // spelled out; leaders ride `style:leader-style` with their
+        // character, as Writer writes them.
+        let kind = match stop.align {
+            TabAlign::Center => " style:type=\"center\"",
+            TabAlign::Right => " style:type=\"right\"",
+            TabAlign::Decimal => " style:type=\"char\"",
+            TabAlign::Left => "",
+        };
+        let leader = match stop.leader {
+            TabLeader::Dot => " style:leader-style=\"dotted\" style:leader-text=\".\"",
+            TabLeader::Hyphen => " style:leader-style=\"dashed\" style:leader-text=\"-\"",
+            TabLeader::Underscore => " style:leader-style=\"solid\" style:leader-text=\"_\"",
+            TabLeader::MiddleDot => " style:leader-style=\"dotted\" style:leader-text=\"·\"",
+            TabLeader::None => "",
+        };
+        out.push_str(&format!("<style:tab-stop style:position=\"{:.2}pt\"{kind}{leader}/>", stop.pos_pt));
     }
     out.push_str("</style:tab-stops>");
     out
@@ -192,6 +246,36 @@ fn picture(src: &str) -> Option<(String, Vec<u8>, &'static str)> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     Some((format!("Pictures/{:016x}.{ext}", h.finish()), bytes, mime))
+}
+
+/// A picture run as a frame (picture number `n`): anchored as a character,
+/// so it stays where it is in the line, or, floating, anchored to its
+/// paragraph and placed by a graphic style of its own (`{prefix}{n}`, added
+/// to `auto`). Its bytes are in Pictures/ (#1292). None when its source
+/// can't be read.
+fn picture_frame(r: &Run, n: usize, prefix: &str, auto: &mut String) -> Option<String> {
+    let (name, bytes, _) = picture(r.style.image.as_deref()?)?;
+    let (w, h) = picture_extent(r, &bytes);
+    let title = if r.text.trim().is_empty() { String::new() } else { format!("<svg:title>{}</svg:title>", esc(&r.text)) };
+    let anchoring = match r.style.image_anchor {
+        Some(a) => {
+            let style = format!("{prefix}{n}");
+            auto.push_str(&floating_style(&style, &a));
+            format!(
+                "draw:style-name=\"{style}\" text:anchor-type=\"paragraph\" svg:x=\"{:.6}in\" svg:y=\"{:.6}in\"",
+                a.x_emu as f64 / EMU_PER_INCH,
+                a.y_emu as f64 / EMU_PER_INCH,
+            )
+        }
+        None => "text:anchor-type=\"as-char\"".to_string(),
+    };
+    Some(format!(
+        "<draw:frame draw:name=\"Picture {n}\" {anchoring} svg:width=\"{:.6}in\" svg:height=\"{:.6}in\">\
+         <draw:image xlink:href=\"{name}\" xlink:type=\"simple\" xlink:show=\"embed\" xlink:actuate=\"onLoad\"/>\
+         {title}</draw:frame>",
+        w as f64 / EMU_PER_INCH,
+        h as f64 / EMU_PER_INCH,
+    ))
 }
 
 /// EMU per inch (OOXML's unit, which the model keeps image sizes in).
@@ -308,15 +392,32 @@ struct OpenTable {
     filled: bool,
     /// Each row's style attribute (empty for a row without a height).
     row_styles: Vec<String>,
+    /// The table's merged cells.
+    spans: Vec<CellSpan>,
     /// Each shaded cell's style attribute, by (row, col).
     cell_styles: std::collections::HashMap<(u32, u32), String>,
 }
 
 impl OpenTable {
-    /// Open the cell at the current (row, col), with its fill's style.
-    fn open_cell(&self, body: &mut String) {
+    /// Whether the current cell is one a merged cell covers.
+    fn covered(&self) -> bool {
+        self.spans.iter().any(|s| s.contains(self.row, self.col) && (s.row, s.col) != (self.row, self.col))
+    }
+
+    /// Open the current cell: a merged cell says how far it spans, and a
+    /// position one covers is a `table:covered-table-cell`.
+    fn open_cell(&mut self, body: &mut String) {
+        self.filled = false;
+        if self.covered() {
+            body.push_str("<table:covered-table-cell>");
+            return;
+        }
+        let span = self.spans.iter().find(|s| (s.row, s.col) == (self.row, self.col));
+        let attrs = span.map_or(String::new(), |s| {
+            format!(" table:number-columns-spanned=\"{}\" table:number-rows-spanned=\"{}\"", s.cols, s.rows)
+        });
         let style = self.cell_styles.get(&(self.row, self.col)).map_or("", String::as_str);
-        body.push_str(&format!("<table:table-cell office:value-type=\"string\"{style}>"));
+        body.push_str(&format!("<table:table-cell office:value-type=\"string\"{style}{attrs}>"));
     }
 
     fn open_row(&self, body: &mut String) {
@@ -325,6 +426,10 @@ impl OpenTable {
     }
 
     fn close_cell(&mut self, body: &mut String) {
+        if self.covered() {
+            body.push_str("</table:covered-table-cell>");
+            return;
+        }
         if !self.filled {
             body.push_str("<text:p/>");
         }
@@ -348,7 +453,6 @@ impl OpenTable {
                 self.open_row(body);
             }
             self.open_cell(body);
-            self.filled = false;
         }
     }
 
@@ -625,7 +729,8 @@ fn content_xml(doc: &Document) -> String {
                         });
                         ((f.row, f.col), format!(" table:style-name=\"{name}\""))
                     }).collect();
-                    let t = OpenTable { id: c.table, rows, cols, row: 0, col: 0, filled: false, row_styles, cell_styles };
+                    let spans = doc.table_spans.get(&c.table).cloned().unwrap_or_default();
+                    let mut t = OpenTable { id: c.table, rows, cols, row: 0, col: 0, filled: false, row_styles, cell_styles, spans };
                     t.open_row(&mut body);
                     t.open_cell(&mut body);
                     table = Some(t);
@@ -705,34 +810,11 @@ fn content_xml(doc: &Document) -> String {
             }
             // A picture is a frame anchored as a character, so it stays
             // where it is in the line; its bytes are in Pictures/ (#1292).
-            if let Some(src) = &r.style.image {
-                match picture(src) {
-                    Some((name, bytes, _)) => {
+            if r.style.image.is_some() {
+                match picture_frame(r, pictures_written + 1, "fr", &mut auto) {
+                    Some(frame) => {
                         pictures_written += 1;
-                        let (w, h) = picture_extent(r, &bytes);
-                        let title = if r.text.trim().is_empty() { String::new() } else { format!("<svg:title>{}</svg:title>", esc(&r.text)) };
-                        // A floating picture is anchored to its paragraph
-                        // and placed by a graphic style of its own.
-                        let anchoring = match r.style.image_anchor {
-                            Some(a) => {
-                                let name = format!("fr{pictures_written}");
-                                auto.push_str(&floating_style(&name, &a));
-                                format!(
-                                    "draw:style-name=\"{name}\" text:anchor-type=\"paragraph\" svg:x=\"{:.6}in\" svg:y=\"{:.6}in\"",
-                                    a.x_emu as f64 / EMU_PER_INCH,
-                                    a.y_emu as f64 / EMU_PER_INCH,
-                                )
-                            }
-                            None => "text:anchor-type=\"as-char\"".to_string(),
-                        };
-                        inner.push_str(&format!(
-                            "<draw:frame draw:name=\"Picture {pictures_written}\" {anchoring} \
-                             svg:width=\"{:.6}in\" svg:height=\"{:.6}in\">\
-                             <draw:image xlink:href=\"{name}\" xlink:type=\"simple\" xlink:show=\"embed\" xlink:actuate=\"onLoad\"/>\
-                             {title}</draw:frame>",
-                            w as f64 / EMU_PER_INCH,
-                            h as f64 / EMU_PER_INCH,
-                        ));
+                        inner.push_str(&frame);
                     }
                     None => inner.push_str(&esc(&r.text)),
                 }
@@ -992,18 +1074,41 @@ fn styles_xml(doc: &Document) -> String {
         None => "<style:page-layout-properties/>".to_string(),
     };
     let mut hf = String::new();
-    if doc.header.is_some() || doc.footer.is_some() {
+    // A header's or footer's pictures are frames at the start of its
+    // paragraph, a floating one placed by a graphic style of styles.xml's.
+    let mut graphic = String::new();
+    let mut para_styles = String::new();
+    let mut frames = |pictures: &[Run], prefix: &str| -> String {
+        pictures.iter().enumerate().filter_map(|(k, r)| picture_frame(r, k + 1, prefix, &mut graphic)).collect()
+    };
+    let has = |text: &Option<String>, pictures: &[Run]| text.is_some() || !pictures.is_empty();
+    if has(&doc.header, &doc.header_pictures) || has(&doc.footer, &doc.footer_pictures) {
         hf.push_str("<office:master-styles><style:master-page style:name=\"Standard\" style:page-layout-name=\"pm1\">");
-        if let Some(h) = &doc.header {
+        // An aligned header's or footer's paragraph names a style of its own.
+        let aligned = |name: &str, a: Alignment, styles: &mut String| -> String {
+            let align = match a {
+                Alignment::Left => return String::new(),
+                Alignment::Center => "center",
+                Alignment::Right => "end",
+                Alignment::Justify => "justify",
+            };
+            styles.push_str(&format!("<style:style style:name=\"{name}\" style:family=\"paragraph\"><style:paragraph-properties fo:text-align=\"{align}\"/></style:style>"));
+            format!(" text:style-name=\"{name}\"")
+        };
+        let header_style = aligned("LettersHeader", doc.header_alignment, &mut para_styles);
+        let footer_style = aligned("LettersFooter", doc.footer_alignment, &mut para_styles);
+        if has(&doc.header, &doc.header_pictures) {
+            let pics = frames(&doc.header_pictures, "hfr");
             hf.push_str(&format!(
-                "<style:header><text:p>{}</text:p></style:header>",
-                page_fields(&esc(h))
+                "<style:header><text:p{header_style}>{pics}{}</text:p></style:header>",
+                page_fields(&esc(doc.header.as_deref().unwrap_or("")))
             ));
         }
-        if let Some(f) = &doc.footer {
+        if has(&doc.footer, &doc.footer_pictures) {
+            let pics = frames(&doc.footer_pictures, "ffr");
             hf.push_str(&format!(
-                "<style:footer><text:p>{}</text:p></style:footer>",
-                page_fields(&esc(f))
+                "<style:footer><text:p{footer_style}>{pics}{}</text:p></style:footer>",
+                page_fields(&esc(doc.footer.as_deref().unwrap_or("")))
             ));
         }
         hf.push_str("</style:master-page></office:master-styles>");
@@ -1017,11 +1122,14 @@ fn styles_xml(doc: &Document) -> String {
          xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" \
          xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" \
          xmlns:fo=\"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0\" \
+         xmlns:draw=\"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0\" \
+         xmlns:svg=\"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
          office:version=\"1.2\">\
          <office:styles>{contents}</office:styles>\
          <office:automatic-styles>\
          <style:page-layout style:name=\"pm1\">{layout}\
-         </style:page-layout></office:automatic-styles>{hf}\
+         </style:page-layout>{graphic}{para_styles}</office:automatic-styles>{hf}\
          </office:document-styles>",
         contents = CODE_STYLES.to_string()
             + &heading_styles(doc)
@@ -1086,7 +1194,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     let opt = zip::write::SimpleFileOptions::default();
     // Every readable picture once, in the order the document uses them.
     let mut pictures: Vec<(String, Vec<u8>, &'static str)> = Vec::new();
-    for src in doc.paragraphs.iter().flat_map(|p| &p.runs).filter_map(|r| r.style.image.as_deref()) {
+    let runs = doc.paragraphs.iter().flat_map(|p| &p.runs).chain(&doc.header_pictures).chain(&doc.footer_pictures);
+    for src in runs.filter_map(|r| r.style.image.as_deref()) {
         if let Some(pic) = picture(src).filter(|pic| !pictures.iter().any(|seen| seen.0 == pic.0)) {
             pictures.push(pic);
         }
@@ -1111,10 +1220,19 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
 
 /// Write an ODT while preserving package members captured by
 /// [`read_with_report`].
+///
+/// The merge is a single atomic replace (LET-002): the writer writes a
+/// staging file beside `path`, the parts are merged into those staged bytes,
+/// and only the merged bytes ever replace `path` — there is no moment on
+/// disk with the edit but without the carried parts.
+///
+/// The live save path carries only the admitted safe subset
+/// (`DocumentSession::carried_for_save` — custom XML, thumbnail, ODF
+/// settings, per `suite_common_core::carry`); anything else the model cannot
+/// keep routes to the LET-001 loss dialog instead of being passed through.
 pub fn write_with_opaque(doc: &Document, path: impl AsRef<std::path::Path>, opaque: &suite_common_core::interop::OpaquePackage) -> Result<(), String> {
     let path = path.as_ref();
-    write(doc, path)?;
-    opaque.append_to(path)
+    crate::save::opaque_single_write(path, |p| write(doc, p), opaque)
 }
 
 // ── Reading ──────────────────────────────────────────────────────────
@@ -1161,17 +1279,36 @@ struct AutoParaStyle {
     alignment: Alignment,
     page_break_before: bool,
     keep_with_next: bool,
+    keep_lines: bool,
+    widow_control: Option<bool>,
     line_spacing: f32,
+    line_height: Option<LineHeight>,
+    shading: Option<String>,
+    borders: ParaBorders,
     space_before_pt: f64,
     space_after_pt: f64,
     left_indent_pt: f64,
     right_indent_pt: f64,
     first_line_indent_pt: f64,
-    /// Positions of `style:tab-stops` children, in document order.
-    tab_stops_pt: Vec<f64>,
+    /// `style:tab-stops` children, in document order.
+    tab_stops_pt: Vec<TabStop>,
     /// Whether the style itself sets its space before, space after and
     /// line height; what it leaves unset comes from its parent style.
     sets: [bool; 3],
+}
+
+/// Note the merged cell `e` opens at the current cell of `table` (id,
+/// row, column, …), if it spans more than one row or column. A covered
+/// cell spans nothing.
+fn note_span(spans: &mut std::collections::BTreeMap<u32, Vec<CellSpan>>, e: &quick_xml::events::BytesStart, table: &(u32, i64, i64, usize, bool)) {
+    if e.name().as_ref() != "table:table-cell" {
+        return;
+    }
+    let n = |a: &str| attr_val(e, a).and_then(|v| v.parse::<u32>().ok()).unwrap_or(1).clamp(1, 1024);
+    let (cols, rows) = (n("table:number-columns-spanned"), n("table:number-rows-spanned"));
+    if (cols > 1 || rows > 1) && table.1 >= 0 && table.2 >= 0 {
+        spans.entry(table.0).or_default().push(CellSpan { row: table.1 as u32, col: table.2 as u32, rows, cols });
+    }
 }
 
 /// Each `text:list-style` in `xml`: the label of each numbered level that
@@ -1398,7 +1535,45 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 alignment: align,
                                 page_break_before: brk,
                                 keep_with_next: attr_val(&e, "fo:keep-with-next").as_deref() == Some("always"),
+                                keep_lines: attr_val(&e, "fo:keep-together").as_deref() == Some("always"),
+                                widow_control: {
+                                    let widows = attr_val(&e, "fo:widows").and_then(|v| v.parse::<u32>().ok());
+                                    let orphans = attr_val(&e, "fo:orphans").and_then(|v| v.parse::<u32>().ok());
+                                    match (widows, orphans) {
+                                        (None, None) => None,
+                                        (w, o) => Some(w.unwrap_or(2) > 1 || o.unwrap_or(2) > 1),
+                                    }
+                                },
                                 line_spacing: spacing,
+                                line_height: attr_val(&e, "style:line-height-at-least")
+                                    .and_then(|v| parse_length_pt(&v))
+                                    .map(LineHeight::Minimum)
+                                    .or_else(|| {
+                                        attr_val(&e, "fo:line-height")
+                                            .filter(|v| !v.trim_end().ends_with('%'))
+                                            .and_then(|v| parse_length_pt(&v))
+                                            .map(LineHeight::Exact)
+                                    }),
+                                shading: attr_val(&e, "fo:background-color").and_then(|c| {
+                                    let c = c.trim_start_matches('#').to_uppercase();
+                                    if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) {
+                                        Some(c)
+                                    } else {
+                                        None
+                                    }
+                                }),
+                                borders: {
+                                    let all = attr_val(&e, "fo:border").as_deref().and_then(parse_para_border);
+                                    let side = |name: &str| {
+                                        attr_val(&e, name).as_deref().and_then(parse_para_border).or_else(|| all.clone())
+                                    };
+                                    ParaBorders {
+                                        top: side("fo:border-top"),
+                                        left: side("fo:border-left"),
+                                        bottom: side("fo:border-bottom"),
+                                        right: side("fo:border-right"),
+                                    }
+                                },
                                 // `fo:space-before` is what this writer
                                 // used to emit; still accepted so a
                                 // document saved by an older build keeps
@@ -1432,8 +1607,29 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             if let Some(pos) =
                                 attr_val(&e, "style:position").and_then(|v| parse_length_pt(&v))
                             {
+                                let align = match attr_val(&e, "style:type").as_deref() {
+                                    Some("center") => TabAlign::Center,
+                                    Some("right") => TabAlign::Right,
+                                    Some("char") => TabAlign::Decimal,
+                                    _ => TabAlign::Left,
+                                };
+                                let text = attr_val(&e, "style:leader-text")
+                                    .or_else(|| attr_val(&e, "style:leader-char"));
+                                let leader = match (
+                                    attr_val(&e, "style:leader-style").as_deref(),
+                                    text.as_deref(),
+                                ) {
+                                    (_, Some(".")) => TabLeader::Dot,
+                                    (_, Some("·")) => TabLeader::MiddleDot,
+                                    (_, Some("-")) => TabLeader::Hyphen,
+                                    (_, Some("_")) => TabLeader::Underscore,
+                                    (Some("dotted"), _) => TabLeader::Dot,
+                                    (Some("dashed"), _) => TabLeader::Hyphen,
+                                    (Some("solid"), _) => TabLeader::Underscore,
+                                    _ => TabLeader::None,
+                                };
                                 if let Some(st) = out.para.get_mut(&name) {
-                                    st.tab_stops_pt.push(pos);
+                                    st.tab_stops_pt.push(TabStop { pos_pt: pos, align, leader });
                                 }
                             }
                         }
@@ -1461,6 +1657,29 @@ fn parse_length_pt(v: &str) -> Option<f64> {
         "in" => n * 72.0,
         _ => return None,
     })
+}
+
+/// One `fo:border-*` value ("0.75pt solid #000000") as a modelled
+/// border, if its look is one the model keeps. `none` (and anything
+/// else unmodelled: groove, ridge, inset, wave) reads as no border
+/// here, and the save dialog names it (`loss`), never a silent
+/// restyle.
+fn parse_para_border(v: &str) -> Option<ParaBorder> {
+    let mut parts = v.split_whitespace();
+    let (width, style, color) = (parts.next()?, parts.next()?, parts.next()?);
+    let style = match style {
+        "solid" => BorderStyle::Single,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "double" => BorderStyle::Double,
+        _ => return None,
+    };
+    let width_pt = parse_length_pt(width)?;
+    let color = color.trim_start_matches('#').to_uppercase();
+    if color.len() != 6 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(ParaBorder { style, color, width_pt })
 }
 
 /// A list that continues the numbering of the one before it with its
@@ -1668,6 +1887,86 @@ fn inherited_spacing(name: &str, auto: &AutoStyles, named: &AutoStyles) -> (Opti
     (before, after, line)
 }
 
+/// What paragraph style `name` inherits from its parent chain for the
+/// keep and decoration properties: the nearest style up the chain
+/// (automatic styles in `auto`, named ones in `named`) that sets each
+/// one. Writer keeps these on the named style — a Heading's
+/// keep-with-next, a quote's border — while the automatic style on the
+/// paragraph carries only what that paragraph overrides.
+#[derive(Default)]
+struct InheritedPara {
+    keep_with_next: bool,
+    keep_lines: bool,
+    widow_control: Option<bool>,
+    line_height: Option<LineHeight>,
+    shading: Option<String>,
+    borders: ParaBorders,
+}
+
+fn inherited_para(name: &str, auto: &AutoStyles, named: &AutoStyles) -> InheritedPara {
+    let mut out = InheritedPara::default();
+    let mut cur = Some(name.to_string());
+    for _ in 0..16 {
+        let Some(n) = cur else { break };
+        if let Some(st) = auto.para.get(&n).or_else(|| named.para.get(&n)) {
+            out.keep_with_next |= st.keep_with_next;
+            out.keep_lines |= st.keep_lines;
+            if out.widow_control.is_none() {
+                out.widow_control = st.widow_control;
+            }
+            if out.line_height.is_none() {
+                out.line_height = st.line_height;
+            }
+            if out.shading.is_none() {
+                out.shading.clone_from(&st.shading);
+            }
+            if out.borders.top.is_none() {
+                out.borders.top.clone_from(&st.borders.top);
+            }
+            if out.borders.left.is_none() {
+                out.borders.left.clone_from(&st.borders.left);
+            }
+            if out.borders.bottom.is_none() {
+                out.borders.bottom.clone_from(&st.borders.bottom);
+            }
+            if out.borders.right.is_none() {
+                out.borders.right.clone_from(&st.borders.right);
+            }
+        }
+        cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
+    }
+    out
+}
+
+/// How a paragraph style's text looks: its own text properties, then what
+/// it leaves unset from the named styles it is based on, as Writer draws a
+/// form's "Coloured Box Headline" (bold, 14pt, based on Normal). The base
+/// paragraph style (Standard, Word's Normal, or one based on nothing) is
+/// the document's base font (`read_base_font`), not its runs'.
+fn para_text_style(name: &str, auto: &AutoStyles, named: &AutoStyles) -> RunStyle {
+    let mut cur = auto.para_parent.get(name).or_else(|| named.para_parent.get(name)).cloned();
+    let base = cur.is_none() || matches!(name, "Standard" | "Normal");
+    let own = auto.para_text.get(name).or_else(|| named.para_text.get(name).filter(|_| !base));
+    let mut style = own.cloned().unwrap_or_default();
+    let mut depth = 0;
+    while let Some(n) = cur {
+        let parent = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
+        if depth >= 8 || parent.is_none() || matches!(n.as_str(), "Standard" | "Normal") {
+            break;
+        }
+        if let Some(own) = auto.para_text.get(&n).or_else(|| named.para_text.get(&n)) {
+            style.bold |= own.bold;
+            style.italic |= own.italic;
+            style.font_size_hp = style.font_size_hp.or(own.font_size_hp);
+            style.color = style.color.clone().or_else(|| own.color.clone());
+            style.font_family = style.font_family.clone().or_else(|| own.font_family.clone());
+        }
+        cur = parent;
+        depth += 1;
+    }
+    style
+}
+
 fn read_heading_styles(styles: &str) -> Vec<RunStyle> {
     let defs = parse_auto_styles(styles);
     let names = heading_style_names(styles);
@@ -1769,7 +2068,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_fills: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -1865,6 +2164,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     // Each outermost table's column widths; None once a column has none.
     let mut column_widths: std::collections::BTreeMap<u32, Option<Vec<f64>>> = Default::default();
     let mut row_heights: std::collections::BTreeMap<u32, Vec<Option<crate::model::RowHeight>>> = Default::default();
+    // Each table's merged cells (`table:number-columns-spanned`,
+    // `table:number-rows-spanned`).
+    let mut cell_spans: std::collections::BTreeMap<u32, Vec<CellSpan>> = Default::default();
     let mut cell_fills: std::collections::BTreeMap<u32, Vec<crate::model::CellFill>> = Default::default();
     // A shaded cell's fill, at the cell just counted.
     let note_fill = |fills: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellFill>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
@@ -2069,6 +2371,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     if let Some(t) = table.as_mut().filter(|t| t.3 == table_depth) {
                         t.2 += 1;
                         t.4 = false;
+                        note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
                     }
                 }
@@ -2139,7 +2442,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             style.alignment = auto_para.alignment;
                             style.page_break_before = auto_para.page_break_before;
                             style.keep_with_next = auto_para.keep_with_next;
+                            style.keep_lines = auto_para.keep_lines;
+                            style.widow_control = auto_para.widow_control;
                             style.line_spacing = auto_para.line_spacing;
+                            style.line_height = auto_para.line_height;
+                            style.shading = auto_para.shading.clone();
+                            style.borders = auto_para.borders.clone();
                             style.space_before_pt = auto_para.space_before_pt;
                             style.space_after_pt = auto_para.space_after_pt;
                             style.left_indent_pt = auto_para.left_indent_pt;
@@ -2160,6 +2468,31 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                         if let Some(v) = line {
                             style.line_spacing = v;
+                        }
+                        let inh = inherited_para(&name, &auto, &named);
+                        style.keep_with_next |= inh.keep_with_next;
+                        style.keep_lines |= inh.keep_lines;
+                        if style.widow_control.is_none() {
+                            style.widow_control = inh.widow_control;
+                        }
+                        if style.line_height.is_none() {
+                            style.line_height = inh.line_height;
+                        }
+                        if style.shading.is_none() {
+                            style.shading = inh.shading;
+                        }
+                        let borders = &mut style.borders;
+                        if borders.top.is_none() {
+                            borders.top = inh.borders.top;
+                        }
+                        if borders.left.is_none() {
+                            borders.left = inh.borders.left;
+                        }
+                        if borders.bottom.is_none() {
+                            borders.bottom = inh.borders.bottom;
+                        }
+                        if borders.right.is_none() {
+                            borders.right = inh.borders.right;
                         }
                         // Direct built-in name, or an automatic style
                         // inheriting from one (LO's rewrite pattern).
@@ -2196,7 +2529,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     // The paragraph style's own text properties are how
                     // its text looks where no span says otherwise: a title
                     // written straight into a bold, 12pt paragraph.
-                    let text_base = attr_val(&e, "text:style-name").and_then(|n| auto.para_text.get(&n).cloned()).unwrap_or_default();
+                    let text_base = match attr_val(&e, "text:style-name") {
+                        // A heading looks as its level's style says
+                        // (`heading_styles`); only its own automatic
+                        // style's text properties are its runs'.
+                        Some(n) if para.as_ref().is_some_and(|p| p.style.heading.is_some()) => auto.para_text.get(&n).cloned().unwrap_or_default(),
+                        Some(n) => para_text_style(&n, &auto, &named),
+                        None => RunStyle::default(),
+                    };
                     span_stack.push(text_base);
                     paragraph_bases += 1;
                 }
@@ -2293,6 +2633,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 "table:table-cell" | "table:covered-table-cell" => {
                     if let Some(t) = table.as_mut().filter(|t| t.3 == table_depth) {
                         t.2 += 1;
+                        note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
                         doc.paragraphs.push(Paragraph { style: ParaStyle { table_cell: cell_of(&table), ..Default::default() }, runs: Vec::new() });
                     }
@@ -2507,6 +2848,26 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut in_alt = false;
         // Inside a page number or count field: its shown value is skipped.
         let mut in_field = false;
+        // A picture of the header or footer being read: in the header or
+        // not, its size, placement, image and alt text.
+        let mut hf_frame: Option<(bool, FrameReading)> = None;
+        // The style of the header's or footer's paragraph being read: the
+        // first one with text gives the part its alignment.
+        let mut hf_para_style: Option<String> = None;
+        // Inside a text box of the header or footer: its own paragraphs'
+        // styles are not the part's.
+        let mut hf_box_depth = 0usize;
+        let para_alignment = |name: &str| -> Alignment {
+            let mut cur = Some(name.to_string());
+            for _ in 0..8 {
+                let Some(n) = cur else { break };
+                if let Some(a) = named.para.get(&n).map(|st| st.alignment).filter(|a| *a != Alignment::Left) {
+                    return a;
+                }
+                cur = named.para_parent.get(&n).cloned();
+            }
+            Alignment::Left
+        };
         // Returns the geometry instead of writing to `doc` so the borrow ends
         // with the call; `style:columns` needs `doc.page` mutably right after.
         let read_page_layout = |e: &quick_xml::events::BytesStart| -> Option<PageGeometry> {
@@ -2555,14 +2916,57 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                 }
                 Ok(Event::End(e)) if e.name().as_ref() == "style:master-page" => in_master = false,
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:frame" && (in_header || in_footer) => {
+                    let size = |a: &str| attr_val(&e, a).as_deref().and_then(length_emu);
+                    let floating = attr_val(&e, "text:anchor-type").is_some_and(|t| matches!(t.as_str(), "paragraph" | "char" | "page"));
+                    let anchor = floating.then(|| {
+                        let offset = |a: &str| attr_val(&e, a).as_deref().and_then(offset_emu).unwrap_or(0);
+                        crate::model::ImageAnchor {
+                            x_emu: offset("svg:x"),
+                            y_emu: offset("svg:y"),
+                            ..attr_val(&e, "draw:style-name").and_then(|n| named.graphic.get(&n).copied()).unwrap_or_default()
+                        }
+                    });
+                    hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), anchor, href: None, alt: String::new(), in_alt: false, depth: 0 }));
+                }
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:image" => {
+                    if let Some((_, f)) = hf_frame.as_mut().filter(|(_, f)| f.href.is_none()) {
+                        f.href = attr_val(&e, "xlink:href");
+                    }
+                }
+                Ok(Event::End(e)) if e.name().as_ref() == "draw:frame" => {
+                    // A picture whose bytes are in the package, kept in the
+                    // media cache like a body picture's.
+                    if let Some((header, f)) = hf_frame.take() {
+                        let href = f.href.filter(|h| !h.contains("://"));
+                        let path = href.as_deref().and_then(|h| {
+                            let bytes = zip.part_to_bytes(h.trim_start_matches("./"), &mut budget).ok()?;
+                            suite_common_core::media_cache::persist(&bytes).ok()
+                        });
+                        if let Some(path) = path {
+                            consumed.push(href.expect("read from it").trim_start_matches("./").to_string());
+                            let run = Run {
+                                text: f.alt.trim().to_string(),
+                                style: RunStyle { image: Some(path.to_string_lossy().into_owned()), image_extent_emu: f.extent, image_anchor: f.anchor, ..Default::default() },
+                            };
+                            if header { doc.header_pictures.push(run) } else { doc.footer_pictures.push(run) }
+                        }
+                    }
+                }
                 Ok(Event::Start(e)) => match e.name().as_ref() {
                     "style:page-layout" => layout_name = attr_val(&e, "style:name").unwrap_or_default(),
                     "style:header" => in_header = in_master,
                     "style:footer" => in_footer = in_master,
+                    "text:p" | "text:h" if (in_header || in_footer) && hf_box_depth == 0 => hf_para_style = attr_val(&e, "text:style-name"),
+                    "draw:text-box" if in_header || in_footer => hf_box_depth += 1,
                     "svg:title" | "svg:desc" => in_alt = true,
                     "text:page-number" | "text:page-count" if in_header || in_footer => {
                         let placeholder = if e.name().as_ref() == "text:page-number" { "{page}" } else { "{total}" };
-                        let target = if in_header { &mut doc.header } else { &mut doc.footer };
+                        let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
+                        let (target, alignment) = if in_header { (&mut doc.header, &mut doc.header_alignment) } else { (&mut doc.footer, &mut doc.footer_alignment) };
+                        if target.is_none() {
+                            *alignment = align;
+                        }
                         target.get_or_insert_with(String::new).push_str(placeholder);
                         in_field = true;
                     }
@@ -2575,19 +2979,32 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     _ => {}
                 },
                 Ok(Event::End(e)) => match e.name().as_ref() {
+                    "draw:text-box" => hf_box_depth = hf_box_depth.saturating_sub(1),
                     "style:header" => in_header = false,
                     "style:footer" => in_footer = false,
                     "svg:title" | "svg:desc" => in_alt = false,
                     "text:page-number" | "text:page-count" => in_field = false,
                     _ => {}
                 },
-                Ok(Event::Text(_)) if in_field || in_alt => {}
+                Ok(Event::Text(t)) if in_alt => {
+                    if let Some((_, f)) = hf_frame.as_mut().filter(|(_, f)| f.alt.is_empty()) {
+                        f.alt = unescape_text(&t);
+                    }
+                }
+                Ok(Event::Text(_)) if in_field => {}
                 Ok(Event::Text(t)) => {
                     let txt = unescape_text(&t);
+                    let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
                     if in_header && !txt.trim().is_empty() {
+                        if doc.header.is_none() {
+                            doc.header_alignment = align;
+                        }
                         doc.header.get_or_insert_with(String::new).push_str(&txt);
                     }
                     if in_footer && !txt.trim().is_empty() {
+                        if doc.footer.is_none() {
+                            doc.footer_alignment = align;
+                        }
                         doc.footer.get_or_insert_with(String::new).push_str(&txt);
                     }
                 }
@@ -2615,6 +3032,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.ensure_non_empty();
     doc.table_columns = column_widths.into_iter().filter_map(|(t, w)| Some((t, w.filter(|w| !w.is_empty())?))).collect();
     doc.table_rows = row_heights;
+    doc.table_spans = cell_spans;
     doc.table_fills = cell_fills;
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
@@ -2746,6 +3164,51 @@ mod tests {
         assert!(opaque.is_empty(), "a picture we read is not an opaque part: {:?}", opaque.part_names().collect::<Vec<_>>());
     }
 
+    /// A letterhead's logo comes back in the header, before its text, and a
+    /// footer's floating picture keeps its place; the bytes are stored in
+    /// Pictures/ once with the body's.
+    #[test]
+    fn header_and_footer_pictures_round_trip() {
+        use crate::model::{AnchorAlign, AnchorFrame, ImageAnchor};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("logo.png");
+        std::fs::write(&src, PNG).unwrap();
+        let picture = |alt: &str, anchor| Run {
+            text: alt.into(),
+            style: RunStyle { image: Some(src.to_string_lossy().into_owned()), image_extent_emu: Some((1_343_025, 933_450)), image_anchor: anchor, ..Default::default() },
+        };
+        let seal = ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, ..Default::default() };
+        let mut d = Document::from_plain_text("body");
+        d.header = Some("Page {page}".into());
+        d.header_pictures = vec![picture("Department for Education", None)];
+        d.footer_pictures = vec![picture("seal", Some(seal))];
+        let out = dir.path().join("hf.odt");
+        write(&d, &out).unwrap();
+        let rt = read(out.to_str().unwrap()).unwrap();
+        assert_eq!(rt.header.as_deref(), Some("Page {page}"));
+        assert_eq!(rt.footer, None, "a footer of a picture alone has no text");
+        let logo = &rt.header_pictures;
+        assert_eq!(logo.len(), 1, "{:?}", rt.header_pictures);
+        assert_eq!((logo[0].text.as_str(), logo[0].style.image_anchor), ("Department for Education", None));
+        let (w, h) = logo[0].style.image_extent_emu.unwrap();
+        assert!(w.abs_diff(1_343_025) < 10 && h.abs_diff(933_450) < 10, "{:?}", (w, h));
+        assert_eq!(std::fs::read(logo[0].style.image.as_ref().unwrap()).unwrap(), PNG);
+        assert_eq!(rt.footer_pictures.iter().map(|r| r.style.image_anchor).collect::<Vec<_>>(), [Some(seal)]);
+    }
+
+    /// A header's and footer's alignment survive a save and reopen.
+    #[test]
+    fn header_and_footer_alignment_round_trip() {
+        let mut d = Document::from_plain_text("body");
+        d.header = Some("FINANCE BILL".into());
+        d.header_alignment = Alignment::Right;
+        d.footer = Some("Page {page}".into());
+        d.footer_alignment = Alignment::Center;
+        let rt = round_trip(&d);
+        assert_eq!((rt.header.as_deref(), rt.header_alignment), (Some("FINANCE BILL"), Alignment::Right));
+        assert_eq!((rt.footer.as_deref(), rt.footer_alignment), (Some("Page {page}"), Alignment::Center));
+    }
+
     /// A floating picture is a frame anchored to its paragraph, placed by
     /// a graphic style of its own, and reads back placed the same.
     #[test]
@@ -2839,6 +3302,30 @@ mod tests {
         let path = dir.path().join("t.odt");
         write(doc, path.to_str().unwrap()).expect("write odt");
         read(path.to_str().unwrap()).expect("read odt")
+    }
+
+    /// Merged cells survive a save: `table:number-columns-spanned` and
+    /// `-rows-spanned` on the cell, and a `table:covered-table-cell` at
+    /// each position it covers.
+    #[test]
+    fn merged_cells_survive() {
+        let mut d = Document::from_plain_text("after");
+        let table = d.insert_table_at(0, 3, 3);
+        for p in d.paragraphs.iter_mut() {
+            if let Some(c) = p.style.table_cell {
+                if (c.row, c.col) == (0, 0) || c.row > 0 && c.col > 0 || (c.row, c.col) == (1, 0) {
+                    p.runs = vec![Run::plain(format!("r{}c{}", c.row, c.col))];
+                }
+            }
+        }
+        let spans = vec![CellSpan { row: 0, col: 0, rows: 1, cols: 3 }, CellSpan { row: 1, col: 0, rows: 2, cols: 1 }];
+        d.table_spans.insert(table, spans.clone());
+        let rt = round_trip(&d);
+        assert_eq!(rt.table_spans.values().collect::<Vec<_>>(), [&spans]);
+        let texts = |d: &Document| -> Vec<(u32, u32, String)> {
+            d.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| (c.row, c.col, p.text()))).filter(|(_, _, t)| !t.is_empty()).collect()
+        };
+        assert_eq!(texts(&rt), texts(&d));
     }
 
     /// A numbered item's label survives a save: each set of level labels
@@ -3154,12 +3641,14 @@ mod tests {
     #[test]
     fn tab_stops_survive() {
         let mut d = Document::from_plain_text("tabbed");
-        d.paragraphs[0].style.tab_stops_pt = vec![36.0, 108.0];
+        d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0), TabStop { pos_pt: 108.0, align: TabAlign::Right, leader: TabLeader::Dot }];
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].style.tab_stops_pt.len(), 2, "stops lost");
         for (got, want) in rt.paragraphs[0].style.tab_stops_pt.iter().zip([36.0, 108.0]) {
-            assert!((got - want).abs() < 0.01, "stop {got} != {want}");
+            assert!((got.pos_pt - want).abs() < 0.01, "stop {} != {want}", got.pos_pt);
         }
+        assert_eq!(rt.paragraphs[0].style.tab_stops_pt[1].align, TabAlign::Right);
+        assert_eq!(rt.paragraphs[0].style.tab_stops_pt[1].leader, TabLeader::Dot);
     }
 
     /// Stops belong to the paragraph that declared them.
@@ -3171,14 +3660,14 @@ mod tests {
     #[test]
     fn different_tab_stops_do_not_share_one_style() {
         let mut d = Document::from_plain_text("first\nsecond");
-        d.paragraphs[0].style.tab_stops_pt = vec![36.0];
-        d.paragraphs[1].style.tab_stops_pt = vec![144.0];
+        d.paragraphs[0].style.tab_stops_pt = vec![TabStop::left(36.0)];
+        d.paragraphs[1].style.tab_stops_pt = vec![TabStop::left(144.0)];
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].style.tab_stops_pt.len(), 1);
         assert_eq!(rt.paragraphs[1].style.tab_stops_pt.len(), 1);
-        assert!((rt.paragraphs[0].style.tab_stops_pt[0] - 36.0).abs() < 0.01);
+        assert!((rt.paragraphs[0].style.tab_stops_pt[0].pos_pt - 36.0).abs() < 0.01);
         assert!(
-            (rt.paragraphs[1].style.tab_stops_pt[0] - 144.0).abs() < 0.01,
+            (rt.paragraphs[1].style.tab_stops_pt[0].pos_pt - 144.0).abs() < 0.01,
             "second paragraph got the first one's stops: {:?}",
             rt.paragraphs[1].style.tab_stops_pt
         );
@@ -3425,6 +3914,32 @@ mod tests {
         assert_eq!((named.color.as_deref(), named.bold), (Some("114f75"), true), "the named style and its parent");
         let auto = run("Deadline");
         assert_eq!((auto.color.as_deref(), auto.bold, auto.italic), (Some("114f75"), true, true), "an automatic style over it");
+    }
+
+    /// A paragraph named after a style in styles.xml takes its text
+    /// properties and the ones its parents set: the form's "Coloured Box
+    /// Headline" is bold and 14pt. Normal, the base, is the document's base
+    /// font, not its runs'; a heading keeps its level's look.
+    #[test]
+    fn a_named_paragraph_style_styles_its_text() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Normal\" style:family=\"paragraph\"><style:text-properties fo:font-size=\"10pt\" fo:color=\"#222222\"/></style:style>\
+             <style:style style:name=\"Box\" style:family=\"paragraph\" style:parent-style-name=\"Normal\"><style:text-properties fo:color=\"#114F75\"/></style:style>\
+             <style:style style:name=\"BoxHeadline\" style:family=\"paragraph\" style:parent-style-name=\"Box\"><style:text-properties fo:font-weight=\"bold\" fo:font-size=\"14pt\"/></style:style>\
+             <style:style style:name=\"H\" style:family=\"paragraph\" style:parent-style-name=\"Box\"><style:text-properties fo:font-weight=\"bold\"/></style:style>\
+             </office:styles></office:document-styles>";
+        let content = "<office:document-content><office:body><office:text>\
+             <text:p text:style-name=\"BoxHeadline\">Important</text:p>\
+             <text:p text:style-name=\"Normal\">Body</text:p>\
+             <text:h text:style-name=\"H\" text:outline-level=\"2\">Heading</text:h>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        let first = |i: usize| d.paragraphs[i].runs[0].style.clone();
+        let head = first(0);
+        assert_eq!((head.bold, head.font_size_hp, head.color.as_deref()), (true, Some(28), Some("114f75")), "its own and its parent's");
+        let body = first(1);
+        assert_eq!((body.bold, body.font_size_hp, body.color.as_deref()), (false, None, None), "the base style is the base font");
+        assert_eq!(first(2).color, None, "a heading looks as its level says");
     }
 
     #[test]

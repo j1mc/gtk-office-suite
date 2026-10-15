@@ -8,6 +8,7 @@
 // from one saves and reopens like any other.
 
 use crate::engine::shape::{Color, GradientStop, LinearGradient, ShapeKind, ShapeStyle};
+use crate::engine::theme::{ColorRef, FillSrc, StrokeSrc};
 use crate::engine::text_body::{Anchor, Bullet, ParaAlign, ParaStyle, TextBody};
 use crate::engine::{MasterSlide, Slide, SlideObject};
 use crate::layouts::Placeholder;
@@ -35,7 +36,11 @@ struct Theme {
 }
 
 fn filled(kind: ShapeKind, (x, y, w, h): (f64, f64, f64, f64), fill: Color) -> SlideObject {
-    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None } }
+    // An authored fill is an explicit local, kept as a literal reference;
+    // an authored shape has no outline, and the writer materialises that
+    // as an explicit no-line, so the source states it too (DCK-006).
+    let fill_src = Some(FillSrc::Color(ColorRef::Rgb(fill.to_hex())));
+    SlideObject::Shape { kind, x, y, w, h, rotation: 0.0, style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None, fill_src, stroke_src: Some(StrokeSrc::NoLine) } }
 }
 
 fn none() -> Vec<SlideObject> {
@@ -53,7 +58,7 @@ fn ocean() -> Vec<SlideObject> {
         w: 960.0,
         h: 540.0,
         rotation: 0.0,
-        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None },
+        style: ShapeStyle { fill, gradient: Some(gradient), stroke: None, fill_src: None, stroke_src: Some(StrokeSrc::NoLine) },
     }]
 }
 
@@ -152,18 +157,20 @@ fn bullet() -> ParaStyle {
     ParaStyle { bullet: Bullet::Char("\u{2022}".into()), margin_left: 36.0, indent: -28.0, ..Default::default() }
 }
 
-fn slide(title: &str, layout: usize, objects: Vec<SlideObject>) -> Slide {
+fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
     Slide {
         title: title.into(),
         // White is "unset": the slide shows its master's background.
         background: "#ffffff".into(),
+        background_picture: None,
         objects,
         notes: String::new(),
-        master_idx: Some(0),
+        // Stamped with the template master's id below, once it has one.
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: Some(layout),
+        layout_id: None,
     }
 }
 
@@ -171,35 +178,46 @@ fn slide(title: &str, layout: usize, objects: Vec<SlideObject>) -> Slide {
 /// the last template.
 pub fn deck(index: usize) -> Option<(Vec<Slide>, Vec<MasterSlide>)> {
     let theme = themes().into_iter().nth(index)?;
-    let master = MasterSlide {
+    let mut masters = vec![MasterSlide {
+        // Stamped with a session id below, once, with everything else.
+        id: 0,
         name: theme.template.name.into(),
         background: theme.background.into(),
         default_font: theme.font.into(),
         shapes: (theme.decorations)(),
-        // Our default 16:9 slide.
-        page_emu: None,
+        // Authored without a theme part: resolves against the default.
+        theme_id: None,
+        color_map: Default::default(),
         // The standard six: the title slide is on the first, the bulleted
         // one on Title and Content, in exactly their places.
         layouts: crate::layouts::standard(),
-    };
-    let title_slide = slide(
-        "Title",
-        0,
-        vec![
-            text(Placeholder::Title, "Presentation Title", (80.0, 150.0, 800.0, 130.0), theme.title, 48, true, vec![centred()], Anchor::Bottom),
-            text(Placeholder::Subtitle, "Subtitle", (80.0, 300.0, 800.0, 60.0), theme.body, 24, false, vec![centred()], Anchor::Top),
-        ],
-    );
+    }];
     let points = "First point\nSecond point\nThird point";
-    let bullets_slide = slide(
-        "Title & Bullets",
-        1,
-        vec![
-            text(Placeholder::Title, "Slide Title", (80.0, 40.0, 800.0, 90.0), theme.title, 36, true, vec![ParaStyle::default()], Anchor::Bottom),
-            text(Placeholder::Body, points, (80.0, 150.0, 800.0, 320.0), theme.body, 24, false, vec![bullet()], Anchor::Top),
-        ],
-    );
-    Some((vec![title_slide, bullets_slide], vec![master]))
+    let mut slides = vec![
+        slide(
+            "Title",
+            vec![
+                text(Placeholder::Title, "Presentation Title", (80.0, 150.0, 800.0, 130.0), theme.title, 48, true, vec![centred()], Anchor::Bottom),
+                text(Placeholder::Subtitle, "Subtitle", (80.0, 300.0, 800.0, 60.0), theme.body, 24, false, vec![centred()], Anchor::Top),
+            ],
+        ),
+        slide(
+            "Title & Bullets",
+            vec![
+                text(Placeholder::Title, "Slide Title", (80.0, 40.0, 800.0, 90.0), theme.title, 36, true, vec![ParaStyle::default()], Anchor::Bottom),
+                text(Placeholder::Body, points, (80.0, 150.0, 800.0, 320.0), theme.body, 24, false, vec![bullet()], Anchor::Top),
+            ],
+        ),
+    ];
+    crate::ops::ensure_all_ids(&mut slides, &mut masters);
+    // The title slide is on the first layout, the bulleted one on Title
+    // and Content: stable ids, not the positions above.
+    let master_id = masters[0].id;
+    for (s, j) in slides.iter_mut().zip([0, 1]) {
+        s.master_id = Some(master_id);
+        s.layout_id = masters[0].layouts.get(j).map(|l| l.id);
+    }
+    Some((slides, masters))
 }
 
 #[cfg(test)]
@@ -231,7 +249,7 @@ mod tests {
             let (slides, masters) = deck(i).unwrap();
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("t.pptx");
-            let d = crate::engine::Deck { slides, masters };
+            let d = crate::engine::Deck { slides, masters, page_size: None, themes: Vec::new() };
             crate::engine::write_pptx(path.to_str().unwrap(), &d).unwrap();
             let back = crate::engine::read_pptx(path.to_str().unwrap()).unwrap();
             assert_eq!(back.slides.len(), 2, "template {i}");

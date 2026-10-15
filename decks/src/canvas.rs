@@ -4,7 +4,7 @@
 use gtk4::cairo;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use decks_core::engine::{Slide, SlideObject, MasterSlide};
+use decks_core::engine::{BackgroundPicture, Slide, SlideObject, MasterSlide};
 use decks_core::engine::Run;
 
 // ── Image loading with cache ─────────────────────────────────────────
@@ -12,6 +12,72 @@ use decks_core::engine::Run;
 thread_local! {
     static IMAGE_CACHE: RefCell<HashMap<String, cairo::ImageSurface>> =
         RefCell::new(HashMap::new());
+    /// Each background picture's mean colour, by path: what text drawn
+    /// over it contrasts with. Read once from a small resample.
+    static MEAN_CACHE: RefCell<HashMap<String, (f64, f64, f64)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// A picture's mean colour, 0..1 per channel, from a 16×16 resample of
+/// it composited over white (a transparent picture shows the slide).
+fn mean_rgb(path: &str, surf: &cairo::ImageSurface) -> Option<(f64, f64, f64)> {
+    if let Some(m) = MEAN_CACHE.with(|c| c.borrow().get(path).copied()) {
+        return Some(m);
+    }
+    const N: i32 = 16;
+    let (iw, ih) = (f64::from(surf.width()), f64::from(surf.height()));
+    if iw < 1.0 || ih < 1.0 {
+        return None;
+    }
+    let mut small = cairo::ImageSurface::create(cairo::Format::ARgb32, N, N).ok()?;
+    {
+        let cr = cairo::Context::new(&small).ok()?;
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.paint().ok()?;
+        cr.scale(f64::from(N) / iw, f64::from(N) / ih);
+        cr.set_source_surface(surf, 0.0, 0.0).ok()?;
+        cr.paint().ok()?;
+    }
+    let stride = small.stride() as usize;
+    let data = small.data().ok()?;
+    let mut sum = (0.0, 0.0, 0.0);
+    for y in 0..N as usize {
+        for x in 0..N as usize {
+            // Opaque ARGB32: BGRA in memory on little-endian.
+            let px = &data[y * stride + x * 4..y * stride + x * 4 + 4];
+            let (b, g, r) = if cfg!(target_endian = "little") { (px[0], px[1], px[2]) } else { (px[3], px[2], px[1]) };
+            sum = (sum.0 + f64::from(r), sum.1 + f64::from(g), sum.2 + f64::from(b));
+        }
+    }
+    let n = f64::from(N * N) * 255.0;
+    let mean = (sum.0 / n, sum.1 / n, sum.2 / n);
+    MEAN_CACHE.with(|c| c.borrow_mut().insert(path.to_string(), mean));
+    Some(mean)
+}
+
+/// Draw `picture` stretched over the slide frame (`ox`, `oy`, `w`, `h`),
+/// at its `a:fillRect` and clipped to the slide, as PowerPoint and
+/// Impress stretch a background picture. Returns its mean colour, which
+/// text over it contrasts with; `None` when the picture cannot be loaded
+/// (the background colour under it then stays what is seen).
+pub fn draw_background_picture(cr: &cairo::Context, picture: &BackgroundPicture, (ox, oy, w, h): (f64, f64, f64, f64)) -> Option<(f64, f64, f64)> {
+    let surf = load_image(&picture.path)?;
+    let (iw, ih) = (f64::from(surf.width()).max(1.0), f64::from(surf.height()).max(1.0));
+    let (px, py, pw, ph) = picture.fill.place(ox, oy, w, h);
+    cr.save().ok()?;
+    cr.rectangle(ox, oy, w, h);
+    cr.clip();
+    cr.translate(px, py);
+    cr.scale(pw / iw, ph / ih);
+    let painted = cr.set_source_surface(&surf, 0.0, 0.0).is_ok() && {
+        // Edge pixels reach the edge: scaled up, the picture would
+        // otherwise fade into what lies beyond it.
+        cr.source().set_extend(cairo::Extend::Pad);
+        cr.rectangle(0.0, 0.0, iw, ih);
+        cr.fill().is_ok()
+    };
+    cr.restore().ok()?;
+    if painted { mean_rgb(&picture.path, &surf) } else { None }
 }
 
 pub fn load_image(path: &str) -> Option<cairo::ImageSurface> {
@@ -257,26 +323,26 @@ pub fn accent_rgb(widget: &impl gtk4::prelude::WidgetExt) -> (f64, f64, f64) {
 
 /// The master a slide is drawn against, if it has one that exists.
 ///
-/// `master_idx` is an index into a list that a reader, an undo step or a
-/// snapshot may have changed, so it can point past the end; every caller
-/// has to handle that. Before this existed `draw_slide_multi` resolved the
-/// master three separate times — twice as `masters.get(mi)` and once as a
-/// hand-written `mi < masters.len()` bounds check — which is three chances
-/// for the styles applied to one slide to disagree about which master it
-/// even has.
-///
-/// A slide on a layout with a look of its own gets the master with that
+/// `master_id` is a stable id a reader, an undo step or a snapshot may
+/// have removed, so an unknown id resolves to no master rather than a
+/// positional guess; a slide naming none inherits the first master
+/// (what a fresh slide gets) — the same policy as `Deck::master_of`,
+/// mirrored here on slices because the renderer only has those. A slide
+/// on a layout with a look of its own gets the master with that
 /// layout's background and decorations over it (`layouts::effective_master`).
 pub fn master_for<'a>(
     slides: &[Slide],
-    current_slide: usize,
+    slide: usize,
     masters: &'a [MasterSlide],
 ) -> Option<std::borrow::Cow<'a, MasterSlide>> {
-    let slide = slides.get(current_slide)?;
-    let m = slide.master_idx.and_then(|mi| masters.get(mi))?;
-    let own_look = slide.layout.and_then(|l| m.layouts.get(l)).is_some_and(|l| l.background.is_some() || !l.shapes.is_empty());
+    let slide = slides.get(slide)?;
+    let m = match slide.master_id {
+        Some(id) => masters.iter().find(|m| m.id == id)?,
+        None => masters.first()?,
+    };
+    let own_look = slide.layout_id.and_then(|lid| m.layouts.iter().find(|l| l.id == lid)).is_some_and(|l| l.background.is_some() || !l.shapes.is_empty());
     Some(if own_look {
-        std::borrow::Cow::Owned(decks_core::layouts::effective_master(m, slide.layout))
+        std::borrow::Cow::Owned(decks_core::layouts::effective_master(m, slide.layout_id))
     } else {
         std::borrow::Cow::Borrowed(m)
     })
@@ -427,10 +493,10 @@ pub fn master_decoration_layout(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slide(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, selected: Option<usize>,
+    slides: &[Slide], slide: usize, selected: Option<usize>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
 ) {
-    draw_slide_multi(cr, width, height, slides, current_slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent);
+    draw_slide_multi(cr, width, height, slides, slide, &selected.into_iter().collect::<std::collections::HashSet<_>>(), None, masters, accent);
 }
 
 /// What surrounds a slide: the editor's (grey, a shadow and a border, a
@@ -527,7 +593,7 @@ pub type SlideFrame = ((f64, f64, f64, f64), (f64, f64, f64));
 /// colour text contrasts with. Shared by the editor and Magic Move frames.
 pub fn draw_slide_base(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, masters: &[MasterSlide], chrome: Chrome,
+    slides: &[Slide], slide: usize, masters: &[MasterSlide], chrome: Chrome,
 ) -> SlideFrame {
     suite_common::use_ui_font_rendering(cr);
     let (ox, oy, slide_w, slide_h) = slide_frame(width, height, chrome);
@@ -543,23 +609,19 @@ pub fn draw_slide_base(
         cr.fill().unwrap();
     }
 
-    // Slide background — an unset (white) slide inherits its master's.
+    // Slide background: the slide's own when it states one, else its
+    // layout's and master's (folded into the effective master above),
+    // else the documented fallback. An explicit white slide on a coloured
+    // master stays white (DCK-006).
     // Captured for the text-color contrast check below
     // (tuna-os/gtk-office-suite#78).
     let mut slide_bg_rgb: (f64, f64, f64) = (1.0, 1.0, 1.0);
-    if current_slide < slides.len() {
-        let slide_bg = &slides[current_slide].background;
-        let master = master_for(slides, current_slide, masters);
-        let master_bg = master
-            .as_deref()
-            .map(|m| m.background.as_str())
-            .filter(|b| !b.is_empty() && *b != "#ffffff");
-        let bg: &str = if slide_bg == "#ffffff" || slide_bg.is_empty() {
-            master_bg.unwrap_or(slide_bg)
-        } else {
-            slide_bg
-        };
-        let resolved_bg = if bg == "#ffffff" || bg.is_empty() {
+    if slide < slides.len() {
+        let slide_bg = &slides[slide].background;
+        let master = master_for(slides, slide, masters);
+        let master_bg = master.as_deref().map(|m| m.background.as_str()).unwrap_or("");
+        let bg: &str = decks_core::layouts::resolve_background(slide_bg, None, master_bg);
+        let resolved_bg = if bg == "#ffffff" {
             (1.0, 1.0, 1.0)
         } else if bg.starts_with('#') && bg.len() >= 7 {
             let r = u8::from_str_radix(&bg[1..3], 16).unwrap_or(255) as f64 / 255.0;
@@ -572,6 +634,12 @@ pub fn draw_slide_base(
     } else { cr.set_source_rgb(1.0, 1.0, 1.0); }
     cr.rectangle(ox, oy, slide_w, slide_h);
     cr.fill().unwrap();
+    // A picture the slide's background is filled with, over its colour.
+    if let Some(picture) = slides.get(slide).and_then(|s| s.background_picture.as_ref()) {
+        if let Some(mean) = draw_background_picture(cr, picture, (ox, oy, slide_w, slide_h)) {
+            slide_bg_rgb = mean;
+        }
+    }
 
     if chrome == Chrome::Editor || chrome == Chrome::Preview {
         // Border
@@ -582,7 +650,7 @@ pub fn draw_slide_base(
     }
 
     // Draw master slide shapes (background pattern, logos, headers)
-    if let Some(master) = master_for(slides, current_slide, masters) {
+    if let Some(master) = master_for(slides, slide, masters) {
         let master: &MasterSlide = &master;
         for obj in &master.shapes {
             cr.save().unwrap();
@@ -607,8 +675,9 @@ pub fn draw_slide_base(
                     pangocairo::functions::show_layout(cr, &layout);
                 }
                 // A styled shape (an odp master's, a theme's decoration)
-                // carries its own paint: drawn as on a slide.
-                SlideObject::Shape { .. } => {
+                // carries its own paint, and a picture (a logo, a band of
+                // colour) is itself: drawn as on a slide.
+                SlideObject::Shape { .. } | SlideObject::Image { .. } => {
                     draw_object(cr, obj, (ox, oy, slide_w, slide_h), slide_bg_rgb, Some(master));
                 }
                 _ => {}
@@ -652,20 +721,20 @@ fn draw_placeholder_prompt(cr: &cairo::Context, obj: &SlideObject, rect: (f64, f
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slide_multi(
     cr: &cairo::Context, width: f64, height: f64,
-    slides: &[Slide], current_slide: usize, selected_indices: &std::collections::HashSet<usize>,
+    slides: &[Slide], slide: usize, selected_indices: &std::collections::HashSet<usize>,
     marquee: Option<(f64, f64, f64, f64)>,
     masters: &[MasterSlide], accent: (f64, f64, f64),
 ) {
     suite_common::use_ui_font_rendering(cr);
     let (ar, ag, ab) = accent;
-    let ((ox, oy, slide_w, slide_h), slide_bg_rgb) = draw_slide_base(cr, width, height, slides, current_slide, masters, Chrome::Editor);
+    let ((ox, oy, slide_w, slide_h), slide_bg_rgb) = draw_slide_base(cr, width, height, slides, slide, masters, Chrome::Editor);
 
     // Draw objects
-    if current_slide < slides.len() {
-        let master = master_for(slides, current_slide, masters);
+    if slide < slides.len() {
+        let master = master_for(slides, slide, masters);
         let master = master.as_deref();
         let frame = (ox, oy, slide_w, slide_h);
-        for (oi, obj) in slides[current_slide].objects.iter().enumerate() {
+        for (oi, obj) in slides[slide].objects.iter().enumerate() {
             let rect = draw_object(cr, obj, frame, slide_bg_rgb, master);
             draw_placeholder_prompt(cr, obj, rect, slide_w / 960.0, slide_bg_rgb);
             if selected_indices.contains(&oi) {
@@ -693,19 +762,19 @@ pub fn draw_slide_multi(
     }
 
     // Empty slide indicator
-    if current_slide < slides.len() && slides[current_slide].objects.is_empty() {
+    if slide < slides.len() && slides[slide].objects.is_empty() {
         cr.set_source_rgba(0.5, 0.5, 0.5, 0.5);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         cr.set_font_size(14.0);
-        let text = format!("Slide {}", current_slide + 1);
+        let text = format!("Slide {}", slide + 1);
         let extents = cr.text_extents(&text).unwrap();
         cr.move_to(ox + (slide_w - extents.width()) / 2.0, oy + slide_h - 20.0);
         cr.show_text(&text).unwrap();
     }
 
     // Slide number badge
-    if current_slide < slides.len() {
-        let badge = format!("{}", current_slide + 1);
+    if slide < slides.len() {
+        let badge = format!("{}", slide + 1);
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.4);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
         cr.set_font_size(11.0);
@@ -744,6 +813,10 @@ pub fn draw_object(
 
     match obj {
         SlideObject::TextBox { text, runs, body, .. } => {
+            // The shape the text sits in, under it.
+            if let Some(frame) = &body.frame {
+                draw_shape(cr, &frame.kind, &frame.style, (sx, sy, sw, sh), slide_w / 960.0);
+            }
             // The colour for runs that name none; runs read from a
             // file carry the colour their styles resolve to.
             let luminance = 0.299 * slide_bg_rgb.0 + 0.587 * slide_bg_rgb.1 + 0.114 * slide_bg_rgb.2;
@@ -895,10 +968,10 @@ pub fn draw_shape(
     (x, y, w, h): (f64, f64, f64, f64),
     scale: f64,
 ) {
-    use decks_core::engine::shape::{polygon, ShapeKind};
+    use decks_core::engine::shape::{is_elliptical, polygon, ShapeKind};
     cr.new_path();
     match kind {
-        ShapeKind::Ellipse => {
+        k if is_elliptical(k) => {
             if w <= 0.0 || h <= 0.0 {
                 return;
             }
@@ -972,10 +1045,26 @@ pub fn draw_table(
     let (cols, rows) = table.fitted(w, h);
     let (mx, my) = table.margins();
     let (pad_x, pad_y) = (mx * scale, my * scale);
+    // A merged cell is drawn once, over every column and row it spans; a
+    // cell it covers draws nothing of its own.
+    let owners = table.owners();
+    let owner = |r: usize, c: usize| owners.get(r).and_then(|o| o.get(c)).copied().unwrap_or((r, c));
+    let spanned = |r: usize, c: usize| {
+        let (cs, rs) = table.rows.get(r).and_then(|row| row.get(c)).map_or((1, 1), |cell| cell.span());
+        let w: f64 = cols.iter().skip(c).take(cs).sum();
+        let h: f64 = rows.iter().skip(r).take(rs).sum();
+        (w, h)
+    };
     let mut cy = y;
-    for (r, rh) in rows.iter().enumerate() {
+    for (r, row_h) in rows.iter().enumerate() {
         let mut cx = x;
-        for (c, cw) in cols.iter().enumerate() {
+        for (c, col_w) in cols.iter().enumerate() {
+            if owner(r, c) != (r, c) {
+                cx += col_w;
+                continue;
+            }
+            let (cw, rh) = spanned(r, c);
+            let (cw, rh) = (&cw, &rh);
             let paint = table.cell_paint(r, c);
             if let Some(fill) = paint.fill {
                 let (fr, fg, fb) = fill.to_f64();
@@ -1003,24 +1092,27 @@ pub fn draw_table(
                 pangocairo::functions::show_layout(cr, &layout);
                 cr.restore().unwrap();
             }
-            cx += cw;
+            cx += col_w;
         }
-        cy += rh;
+        cy += row_h;
     }
-    // "Medium Style 2" separates cells with white 1 pt rules.
+    // "Medium Style 2" separates cells with white 1 pt rules: between two
+    // grid positions only where they are different cells.
     cr.set_source_rgb(1.0, 1.0, 1.0);
     cr.set_line_width((1.0 * 960.0 / 720.0 * scale).max(1.0));
-    let mut cx = x;
-    for cw in &cols[..cols.len().saturating_sub(1)] {
-        cx += cw;
-        cr.move_to(cx, y);
-        cr.line_to(cx, y + h);
-    }
-    let mut cy = y;
-    for rh in &rows[..rows.len().saturating_sub(1)] {
-        cy += rh;
-        cr.move_to(x, cy);
-        cr.line_to(x + w, cy);
+    let col_x: Vec<f64> = std::iter::once(x).chain(cols.iter().scan(x, |at, cw| { *at += cw; Some(*at) })).collect();
+    let row_y: Vec<f64> = std::iter::once(y).chain(rows.iter().scan(y, |at, rh| { *at += rh; Some(*at) })).collect();
+    for r in 0..rows.len() {
+        for c in 0..cols.len() {
+            if c + 1 < cols.len() && owner(r, c) != owner(r, c + 1) {
+                cr.move_to(col_x[c + 1], row_y[r]);
+                cr.line_to(col_x[c + 1], row_y[r + 1]);
+            }
+            if r + 1 < rows.len() && owner(r, c) != owner(r + 1, c) {
+                cr.move_to(col_x[c], row_y[r + 1]);
+                cr.line_to(col_x[c + 1], row_y[r + 1]);
+            }
+        }
     }
     cr.stroke().unwrap();
 }
@@ -1116,21 +1208,22 @@ mod font_tests {
             w: 200.0,
             h: 100.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let slide = Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![sq(400.0, 100.0, Color(220, 0, 0)), sq(400.0, 300.0, Color(0, 0, 220))],
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Default::default(),
             builds: vec![
-                Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-                Build { object: 1, effect: BuildEffect::Dissolve, out: false },
+                Build { object: 10, effect: BuildEffect::Move(Edge::Left), out: false },
+                Build { object: 11, effect: BuildEffect::Dissolve, out: false },
             ],
-            ids: Default::default(),
-            layout: None,
+            ids: decks_core::ops::SlideIds { slide: 1, objects: vec![10, 11], deleted: vec![] },
+            layout_id: None,
         };
         let slides = [slide];
         let (w, h) = (960, 540);
@@ -1168,15 +1261,15 @@ mod font_tests {
     /// per slide at the model slide's size, with the slide's text in it.
     #[test]
     fn the_pdf_export_has_one_sized_page_per_slide() {
-        let mut two = slide(Some(0));
+        let mut two = slide(Some(7));
         two.objects.push(SlideObject::TextBox {
             text: "Hello export".into(),
             x: 100.0, y: 100.0, w: 400.0, h: 100.0, rotation: 0.0,
             runs: vec![decks_core::engine::Run::plain("Hello export")],
             body: Default::default(),
         });
-        let slides = [slide(Some(0)), two];
-        let masters = [master("Sans")];
+        let slides = [slide(Some(7)), two];
+        let masters = [master(7, "Sans")];
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.pdf");
@@ -1196,33 +1289,103 @@ mod font_tests {
     fn exporting_no_slides_is_an_error_not_an_empty_pdf() {
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = render_slides_pdf(&[], &[master("Sans")], &dir.join("out.pdf")).unwrap_err();
+        let err = render_slides_pdf(&[], &[master(7, "Sans")], &dir.join("out.pdf")).unwrap_err();
         assert!(err.contains("no slides"), "{err}");
     }
 
-    fn master(font: &str) -> MasterSlide {
+    fn master(id: u64, font: &str) -> MasterSlide {
         MasterSlide {
+            id,
             name: "M".into(),
             background: "#ffffff".into(),
             default_font: font.into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: Vec::new(),
         }
     }
 
-    fn slide(master_idx: Option<usize>) -> Slide {
+    fn slide(master_id: Option<u64>) -> Slide {
         Slide {
             title: "S".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
-            master_idx,
+            master_id,
             transition: Default::default(),
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         }
+    }
+
+    /// A navy-left, yellow-right picture saved as a PNG in `dir`.
+    fn two_tone_png(dir: &std::path::Path) -> String {
+        let path = dir.join("bg.png");
+        let pic = cairo::ImageSurface::create(cairo::Format::Rgb24, 8, 4).unwrap();
+        {
+            let cr = cairo::Context::new(&pic).unwrap();
+            cr.set_source_rgb(23.0 / 255.0, 42.0 / 255.0, 69.0 / 255.0);
+            cr.rectangle(0.0, 0.0, 4.0, 4.0);
+            cr.fill().unwrap();
+            cr.set_source_rgb(1.0, 0.85, 0.0);
+            cr.rectangle(4.0, 0.0, 4.0, 4.0);
+            cr.fill().unwrap();
+        }
+        pic.write_to_png(&mut std::fs::File::create(&path).unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// The pixels at `at` of a slide drawn for export, and the colour its
+    /// text contrasts with.
+    fn export_pixels(slide: Slide, at: &[(usize, usize)]) -> (Vec<[u8; 3]>, (f64, f64, f64)) {
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 540).unwrap();
+        let bg = {
+            let cr = cairo::Context::new(&surface).unwrap();
+            draw_slide_base(&cr, 960.0, 540.0, &[slide], 0, &[], Chrome::Export).1
+        };
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = at.iter().map(|&(x, y)| {
+            let p = &data[y * stride + x * 4..y * stride + x * 4 + 4];
+            [p[2], p[1], p[0]]
+        });
+        (px.collect(), bg)
+    }
+
+    fn near(px: [u8; 3], rgb: [u8; 3]) -> bool {
+        px.iter().zip(rgb).all(|(a, b)| a.abs_diff(b) < 6)
+    }
+
+    /// DCK-004 (#1397): the pay centre title slide is a picture under white
+    /// text. The picture fills the slide over its colour, and text over it
+    /// contrasts with the picture, not the white slide colour beneath.
+    #[test]
+    fn a_background_picture_fills_the_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = slide(None);
+        s.background_picture = Some(BackgroundPicture { path: two_tone_png(dir.path()), fill: Default::default() });
+        let (px, bg) = export_pixels(s, &[(20, 20), (200, 270), (760, 270), (940, 520)]);
+        let (navy, yellow) = ([23, 42, 69], [255, 217, 0]);
+        assert!(near(px[0], navy) && near(px[1], navy), "left half navy: {px:?}");
+        assert!(near(px[2], yellow) && near(px[3], yellow), "right half yellow: {px:?}");
+        assert!(bg.2 < 0.5, "the contrast colour is the picture's mean, not white: {bg:?}");
+    }
+
+    /// `a:fillRect` places the stretched picture: a left inset of -100%
+    /// doubles its width leftwards, so only its yellow half is on the slide.
+    /// (Sampled clear of the slide's left edge, where the navy half's
+    /// last column is filtered into the first yellow one.)
+    #[test]
+    fn a_background_picture_honours_its_fill_rect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = slide(None);
+        let fill = decks_core::engine::FillRect { left: -1.0, ..Default::default() };
+        s.background_picture = Some(BackgroundPicture { path: two_tone_png(dir.path()), fill });
+        let (px, _) = export_pixels(s, &[(300, 20), (940, 520)]);
+        assert!(px.iter().all(|p| near(*p, [255, 217, 0])), "all yellow: {px:?}");
     }
 
     /// Pictures imported from a pptx live in extensionless temp files
@@ -1290,45 +1453,47 @@ mod font_tests {
 
     #[test]
     fn a_slide_resolves_the_master_it_points_at() {
-        let masters = vec![master("A"), master("B")];
-        let slides = vec![slide(Some(1))];
+        let masters = vec![master(7, "A"), master(8, "B")];
+        let slides = vec![slide(Some(8))];
         assert_eq!(
             master_for(&slides, 0, &masters).map(|m| m.default_font.clone()).as_deref(),
             Some("B")
         );
     }
 
-    // A master_idx can outlive the list it indexes — a reader, an undo step
-    // or a recovered snapshot can all leave one pointing past the end. The
-    // three hand-rolled resolutions this replaced each had to get that
-    // right separately; now there is one place to be wrong.
+    // A master id can outlive the list it names — a reader, an undo step
+    // or a recovered snapshot can all leave one naming nothing. There is
+    // one place to get that right now, not three hand-rolled resolutions.
     #[test]
-    fn a_master_idx_past_the_end_resolves_to_no_master() {
-        let masters = vec![master("A")];
-        let slides = vec![slide(Some(7))];
+    fn an_unknown_master_id_resolves_to_no_master() {
+        let masters = vec![master(7, "A")];
+        let slides = vec![slide(Some(99))];
         assert!(master_for(&slides, 0, &masters).is_none());
-        // ...and the font falls back rather than panicking on the index.
+        // ...and the font falls back rather than panicking on the id.
         assert_eq!(master_font_family(master_for(&slides, 0, &masters).as_deref()), "Sans");
     }
 
     #[test]
     fn a_slide_index_past_the_end_resolves_to_no_master() {
-        let masters = vec![master("A")];
-        let slides = vec![slide(Some(0))];
+        let masters = vec![master(7, "A")];
+        let slides = vec![slide(Some(7))];
         assert!(master_for(&slides, 4, &masters).is_none());
         assert!(master_for(&[], 0, &masters).is_none());
     }
 
     #[test]
-    fn a_slide_with_no_master_idx_resolves_to_no_master() {
-        let masters = vec![master("A")];
+    fn a_slide_with_no_master_inherits_the_first() {
+        let masters = vec![master(7, "A")];
         let slides = vec![slide(None)];
-        assert!(master_for(&slides, 0, &masters).is_none());
+        assert_eq!(
+            master_for(&slides, 0, &masters).map(|m| m.default_font.clone()).as_deref(),
+            Some("A")
+        );
     }
 
     #[test]
     fn a_master_that_names_a_font_gets_it() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         assert_eq!(master_font_family(Some(&m)), "Liberation Serif");
     }
 
@@ -1345,7 +1510,7 @@ mod font_tests {
     #[test]
     fn a_master_whose_font_is_blank_falls_back_rather_than_asking_for_nothing() {
         for blank in ["", "   ", "\t"] {
-            let m = master(blank);
+            let m = master(7, blank);
             assert_eq!(
                 master_font_family(Some(&m)),
                 "Sans",
@@ -1360,7 +1525,7 @@ mod font_tests {
     // back the family it was asked for whether or not it can resolve it.
     #[test]
     fn the_masters_font_reaches_the_description_the_renderer_draws_with() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         let desc = document_font_description(Some(&m), 18.0);
         assert_eq!(desc.family().map(|f| f.to_string()).as_deref(), Some("Liberation Serif"));
     }
@@ -1456,7 +1621,7 @@ mod font_tests {
     /// reachable without depending on which fonts are installed.
     #[test]
     fn a_master_decorations_emphasis_reaches_the_layout_it_is_drawn_from() {
-        let m = master("Cantarell");
+        let m = master(7, "Cantarell");
         let l = master_decoration_layout(
             &ctx(),
             &m,
@@ -1487,7 +1652,7 @@ mod font_tests {
     /// also responsible for.
     #[test]
     fn a_master_decoration_is_drawn_in_the_masters_font() {
-        let m = master("Liberation Serif");
+        let m = master(7, "Liberation Serif");
         let l = master_decoration_layout(&ctx(), &m, "plain", &[], 1.0);
         assert_eq!(
             l.font_description()

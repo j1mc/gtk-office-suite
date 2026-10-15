@@ -42,9 +42,9 @@ pub(crate) fn effect_of(preset: &str, sub_type: Option<&str>) -> BuildEffect {
     BuildEffect::Dissolve
 }
 
-/// A page's `anim:par` timing tree, or `None` without builds. `id(i)` is
-/// the xml:id the writer gave object `i`.
-pub(crate) fn animations_xml(builds: &[Build], id: impl Fn(usize) -> String) -> Option<String> {
+/// A page's `anim:par` timing tree, or `None` without builds. `id(object)`
+/// is the xml:id the writer gave the object with stable id `object`.
+pub(crate) fn animations_xml(builds: &[Build], id: impl Fn(u64) -> String) -> Option<String> {
     if builds.is_empty() {
         return None;
     }
@@ -149,13 +149,13 @@ impl BuildReader {
         self.effect = None;
     }
 
-    /// The builds, with targets mapped to object indices by `ids` (each
-    /// object's xml:id, as read).
-    pub(crate) fn builds(&self, ids: &[Option<String>]) -> Vec<Build> {
+    /// The builds, with targets mapped to stable object ids by `ids`
+    /// (each object's xml:id paired with its stable id, as read).
+    pub(crate) fn builds(&self, ids: &[(String, u64)]) -> Vec<Build> {
         self.found
             .iter()
             .filter_map(|(out, effect, target)| {
-                let object = ids.iter().position(|i| i.as_deref() == Some(target.as_str()))?;
+                let object = ids.iter().find(|(xml, _)| xml == target)?.1;
                 Some(Build { object, effect: *effect, out: *out })
             })
             .collect()
@@ -184,16 +184,18 @@ mod tests {
 
     #[test]
     fn builds_round_trip_through_the_animation_tree() {
+        // Builds name stable object ids; the writer maps those to xml:ids
+        // and the reader maps them back.
         let builds = vec![
-            Build { object: 1, effect: BuildEffect::Dissolve, out: false },
-            Build { object: 0, effect: BuildEffect::Move(Edge::Left), out: false },
-            Build { object: 2, effect: BuildEffect::Appear, out: false },
-            Build { object: 1, effect: BuildEffect::Move(Edge::Bottom), out: true },
-            Build { object: 0, effect: BuildEffect::Dissolve, out: true },
+            Build { object: 21, effect: BuildEffect::Dissolve, out: false },
+            Build { object: 20, effect: BuildEffect::Move(Edge::Left), out: false },
+            Build { object: 22, effect: BuildEffect::Appear, out: false },
+            Build { object: 21, effect: BuildEffect::Move(Edge::Bottom), out: true },
+            Build { object: 20, effect: BuildEffect::Dissolve, out: true },
         ];
-        let xml = animations_xml(&builds, |i| format!("o{i}")).unwrap();
+        let xml = animations_xml(&builds, |id| format!("o{id}")).unwrap();
         let found = read(&xml);
-        let ids: Vec<Option<String>> = (0..3).map(|i| Some(format!("o{i}"))).collect();
+        let ids: Vec<(String, u64)> = [20, 21, 22].map(|id| (format!("o{id}"), id)).to_vec();
         let r = BuildReader { found, ..Default::default() };
         assert_eq!(r.builds(&ids), builds);
         assert_eq!(animations_xml(&[], |_| String::new()), None);

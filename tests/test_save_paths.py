@@ -29,7 +29,7 @@ DOC = os.path.join(ROOT, "docs", "SAVE-PATHS.md")
 GUARDS = {
     "letters": ["save_asking_about_loss"],
     "tables": ["save_after_asking"],
-    "decks": ["save_after_asking"],
+    "decks": ["save_after_asking", "save_after_asking_with_context"],
 }
 SINKS = {
     "letters": [

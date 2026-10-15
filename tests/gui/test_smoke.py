@@ -1536,6 +1536,57 @@ class DecksRecoveryIsItselfProtectedSmoke(BaseGUITestCase):
         self.eventually(_settled)
 
 
+class DecksRichRecoverySmoke(BaseGUITestCase):
+    """Decks: a kill between autosave and save loses nothing the snapshot
+    promised (DCK-003). Two different objects go in through the same
+    actions every other Decks journey uses, the deck is snapshotted, and
+    after a kill and relaunch the recovered window shows the same slides
+    and object kinds — the versioned payload's end-to-end shape, with the
+    semantic richness (notes, styles, masters, assets) held by
+    decks-core/tests/snapshot_fidelity.rs instead of AT-SPI scraping."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self._state_dir = self.isolate_autosave_state(prefix="decks-rich-recovery-state-")
+        self._snapshot_path = self.isolate_snapshot(prefix="decks-rich-recovery-")
+        super().setUp()
+
+    def _snapshot_files(self):
+        snap_dir = os.path.join(self._state_dir, "decks")
+        if not os.path.isdir(snap_dir):
+            return []
+        return [f for f in os.listdir(snap_dir) if f.endswith(".snapshot")]
+
+    def _kinds(self, snap):
+        return sorted(o["kind"] for s in snap["slides"] for o in s["objects"])
+
+    def test_kill_then_relaunch_keeps_every_object(self):
+        aid = "org.tunaos.decks"
+        self.gapplication_action(aid, "new-document")
+        self.gapplication_action(aid, "add-text-box")
+        self.gapplication_action(aid, "add-shape")
+        self.gapplication_action(aid, "autosave-now")
+        def _settled():
+            self.assertEqual(len(self._snapshot_files()), 1, "precondition: one snapshot to recover")
+        self.eventually(_settled)
+        before = self.trigger_snapshot(aid)
+        self.assertEqual(before["slide_count"], 1)
+        self.assertIn("TextBox", self._kinds(before))
+        self.assertIn("Shape", self._kinds(before))
+
+        self.relaunch_app(crash=True)
+        def _settled():
+            frame = self.app.child(roleName="frame")
+            self.assertIn("Recovered", frame.name, f"relaunch did not recover: {frame.name!r}")
+        self.eventually(_settled)
+
+        after = self.trigger_snapshot(aid)
+        self.assertEqual(after["slide_count"], before["slide_count"], "recovery lost a slide")
+        self.assertEqual(self._kinds(after), self._kinds(before), "recovery lost or changed an object")
+        self.assertIsNone(self.process.poll(), "decks crashed rendering the recovered deck")
+
+
 class LettersRecoveryIsItselfProtectedSmoke(BaseGUITestCase):
     """Letters: a recovered tab must survive a second crash.
 
@@ -3053,6 +3104,18 @@ class TablesFormatSafeSaveMixin(TablesCellEntryMixin):
         name_entry.text = out_path
         self.wait_until(lambda: self._showing("push button", "Save"), bool,
                         description="the dialog's Save button").do_action(0)
+        if self.fixture.endswith(".xls"):
+            # TBL-001: the binary original cannot be enumerated, so Save As
+            # asks first. The confirmation names the target loss and that
+            # the original stays untouched; Save Anyway writes the copy.
+            self.wait_for_node(name="Save Without This Content?")
+            self.wait_until(
+                lambda: self.app.findChild(
+                    lambda n: n.roleName == "label" and n.name and "keeps them untouched" in n.name,
+                    retry=False, requireResult=False),
+                bool, description="Save As to say the original stays untouched")
+            self.wait_until(lambda: self._showing("push button", "Save Anyway"), bool,
+                            description="the Save Anyway button").do_action(0)
 
         def saved():
             try:
@@ -3230,6 +3293,14 @@ class TablesLossQuestionSmoke(TablesCellEntryMixin, BaseGUITestCase):
 
         rawinput.keyCombo("<Control>s")
         self.wait_for_node(name="Save Without This Content?")
+        # TBL-001: the question names the affected part and what happens
+        # to it, not just the kind of content.
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.roleName == "label" and n.name
+                and "xl/vbaProject.bin" in n.name and "macros aren't kept" in n.name,
+                retry=False, requireResult=False),
+            bool, description="the question to name the affected part and consequence")
         self._button("Cancel").do_action(0)
         self.wait_until(lambda: self._showing("push button", "Save Anyway"), lambda n: n is None,
                         description="the question to close")
@@ -3253,6 +3324,118 @@ class TablesLossQuestionSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed saving")
 
 
+class TablesProtectionPersistenceSmoke(TablesCellEntryMixin, BaseGUITestCase):
+    """An imported blank unlocked cell remains editable after protected XLSX save."""
+
+    app_name = "tables"
+
+    def setUp(self):
+        import io
+        import zipfile
+        self._dir = self.temp_dir(prefix="tables-protection-persistence-")
+        self._path = os.path.join(self._dir, "protected.xlsx")
+        source = minimal_xlsx_bytes(7, '<sheetProtection sheet="1" objects="1" scenarios="1"/>')
+        with zipfile.ZipFile(io.BytesIO(source)) as book:
+            parts = {name: book.read(name).decode() for name in book.namelist()}
+        parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+            "</Types>", '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
+        parts["xl/_rels/workbook.xml.rels"] = parts["xl/_rels/workbook.xml.rels"].replace(
+            "</Relationships>", '<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+        parts["xl/styles.xml"] = (
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+            '<borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs>'
+            '<cellXfs count="2"><xf xfId="0"/><xf xfId="0" applyProtection="1">'
+            '<protection locked="0"/></xf></cellXfs></styleSheet>')
+        parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+            "</row>", '<c r="B1" s="1"/></row>')
+        with zipfile.ZipFile(self._path, "w", zipfile.ZIP_DEFLATED) as book:
+            for name, content in parts.items():
+                book.writestr(name, content)
+        self.launch_args = [self._path]
+        self.isolate_autosave_state()
+        self.isolate_snapshot()
+        super().setUp()
+
+    def test_unlocked_blank_cell_remains_editable_after_save_and_reopen(self):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from dogtail import rawinput
+        self.wait_until(self._grid, lambda text: "cell A1: 7" in text,
+                        description="the protected source workbook")
+        self._put("B1", "42")
+        rawinput.keyCombo("<Control>s")
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._path) as book:
+                    sheet = ET.fromstring(book.read("xl/worksheets/sheet1.xml"))
+                    cell = sheet.find(".//s:c[@r='B1']", ns)
+                    if cell is None or cell.findtext("s:v", namespaces=ns) != "42":
+                        return False
+                    styles = ET.fromstring(book.read("xl/styles.xml"))
+                    xf = styles.find("s:cellXfs", ns)[int(cell.get("s", "0"))]
+                    protection = xf.find("s:protection", ns)
+                    return (sheet.find("s:sheetProtection", ns) is not None
+                            and protection is not None
+                            and protection.get("locked") == "0")
+            except (OSError, zipfile.BadZipFile, ET.ParseError):
+                return False
+        self.wait_until(saved, bool, description="the protected workbook with unlocked B1 to save")
+        self.relaunch_app(launch_args=[self._path])
+        self._wait_for_a_new_document()
+        rawinput.keyCombo("<Control>g")
+        self.wait_until(lambda: self._focused("Cell reference"), bool,
+                        description="the reopened workbook's name box")
+        rawinput.typeText("B1")
+        rawinput.keyCombo("Return")
+        self.wait_until(self._grid, lambda text: "cell B1: 42" in text,
+                        description="the unlocked edit to reopen")
+        self._put("B1", "84")
+        self.gapplication_action("org.tunaos.tables", "undo")
+        self.wait_until(self._grid, lambda text: "cell B1: 42" in text,
+                        description="undo on the reopened unlocked cell")
+
+    def test_password_loss_requires_consent_and_cancel_preserves_source(self):
+        import zipfile
+        from dogtail import rawinput
+        with zipfile.ZipFile(self._path) as book:
+            parts = {name: book.read(name) for name in book.namelist()}
+        parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(
+            b'<sheetProtection ', b'<sheetProtection password="ABCD" ')
+        with zipfile.ZipFile(self._path, "w", zipfile.ZIP_DEFLATED) as book:
+            for name, content in parts.items():
+                book.writestr(name, content)
+        with open(self._path, "rb") as source:
+            original = source.read()
+        self.relaunch_app(launch_args=[self._path])
+        self._wait_for_a_new_document()
+        self._put("B1", "42")
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing,
+                                       retry=False, requireResult=False),
+            lambda n: n is None, description="the password-loss warning to close")
+        with open(self._path, "rb") as source:
+            self.assertEqual(source.read(), original, "Cancel replaced the protected source")
+        assert_close_guard_asks(self)
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._path) as book:
+                    xml = book.read("xl/worksheets/sheet1.xml")
+                    return b'password=' not in xml and b'<v>42</v>' in xml and b'<sheetProtection ' in xml
+            except (OSError, zipfile.BadZipFile):
+                return False
+        self.wait_until(saved, bool, description="the explicitly approved save without the password hash")
+
+
 class TablesCsvSaveSmoke(TablesFormatSafeSaveMixin, BaseGUITestCase):
     fixture = "budget.csv"
 
@@ -3269,12 +3452,14 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
     """Two sheets through the whole sheet bar (tables-readiness.md row 3,
     #1204): a value on Sheet1 and a formula on Sheet2 that reads it; rename
     Sheet2, move it first, delete it and undo the delete; switch sheets
-    through the switcher; save, read the workbook's parts, then reopen it
-    in a fresh process and walk both sheets again. Nothing may cross sheets
-    on the way: the formula keeps its reference through the rename, the
-    delete's undo brings back the sheet with its formula, and the saved
-    file has both sheets, in the new order, under their new names, each
-    with its own content, in its parts and in the app that reopens it."""
+    through the switcher; edit the precedent on Sheet1 and save without
+    visiting the dependent sheet first (TBL-006); read the workbook's
+    parts, then reopen it in a fresh process and walk both sheets again.
+    Nothing may cross sheets on the way: the formula keeps its reference
+    through the rename, the delete's undo brings back the sheet with its
+    formula, and the saved file has both sheets, in the new order, under
+    their new names, each with its own content, in its parts and in the
+    app that reopens it."""
 
     app_name = "tables"
 
@@ -3333,6 +3518,11 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
             return self.app.child(roleName="combo box").name
         self.wait_until(step, lambda got: got == name, interval=0.6,
                         description=f"the sheet switcher to select {name}")
+        # The popup is invisible to AT-SPI, so a retry can land the
+        # selection while leaving it open; an open popup holds the
+        # keyboard and every later Ctrl+G misses. Escape dismisses it,
+        # and in the grid it only hands focus back to the grid.
+        rawinput.keyCombo("Escape")
 
     def test_rename_reorder_delete_undo_save_and_reopen(self):
         import re
@@ -3384,6 +3574,17 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         self._switch_to("Sheet1")
         self._wait_state((["Totals", "Sheet1"], 1, ("5", None)), "the switcher to show Sheet1's own value")
 
+        # TBL-006: edit the precedent on Sheet1, then save WITHOUT
+        # visiting Totals first. The saved Totals sheet must still carry
+        # the formula and the freshly recalculated cached value.
+        # Escape first: focus may still sit in the sheet switcher after
+        # the keyboard-driven switch above, and Ctrl+G only reaches the
+        # name box from the grid — without this the jump below has nowhere
+        # to go.
+        rawinput.keyCombo("Escape")
+        self._put("A1", "7")
+        self._wait_state((["Totals", "Sheet1"], 1, ("7", None)), "Sheet1's edited precedent to land")
+
         # Save, then read the workbook back.
         out_path = os.path.join(self._dir, "two-sheets.xlsx")
         subprocess.run(["gapplication", "action", aid, "save-file-as"])
@@ -3404,8 +3605,8 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertEqual(len(sheets), 2, sheets)
         totals, sheet1 = parts[sheets[0]], parts[sheets[1]]
         self.assertRegex(totals, r"<f>Sheet1!A1\*2</f>", "Totals lost its formula")
-        self.assertRegex(totals, r"<v>10</v>", "Totals' formula has no cached 10")
-        self.assertRegex(sheet1, r"<v>5</v>", "Sheet1 lost its value")
+        self.assertRegex(totals, r"<v>14</v>", "Totals' formula has no recalculated cached 14")
+        self.assertRegex(sheet1, r"<v>7</v>", "Sheet1 lost its edited value")
         self.assertNotRegex(sheet1, r"<f>", "a formula crossed onto Sheet1")
 
         # Reopen it in a fresh process, as `tables two-sheets.xlsx` from a
@@ -3415,9 +3616,9 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         names = self.wait_until(lambda: self._state()[0], lambda got: got == ["Totals", "Sheet1"],
                                 interval=0.3, description="the reopened workbook's sheets")
         self._switch_to("Totals")
-        self._wait_state((names, 0, ("10", "Sheet1!A1*2")), "Totals to reopen with its formula and value")
+        self._wait_state((names, 0, ("14", "Sheet1!A1*2")), "Totals to reopen with its formula and recalculated value")
         self._switch_to("Sheet1")
-        self._wait_state((names, 1, ("5", None)), "Sheet1 to reopen with its own value")
+        self._wait_state((names, 1, ("7", None)), "Sheet1 to reopen with its edited value")
         self.assertIsNone(self.process.poll(), "tables crashed in the sheet journey")
 
 
@@ -3499,6 +3700,26 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIn("Min 10", line)
         self.assertIn("Max 30", line)
         self.assertIn("Count 2", line)
+
+        # TBL-003: the menu offers clearing this column only — the row
+        # comes back and the summary counts three again.
+        self._to_grid("A1")
+        rawinput.keyCombo("<Alt>Down")
+        self.wait_until(lambda: self._button("Clear Filter in This Column"), bool,
+                        description="the per-column clear button")
+        self._button("Clear Filter in This Column").do_action(0)
+        # Make sure the menu is dismissed before driving the grid again:
+        # Escape closes any lingering popover and otherwise hands focus
+        # back to the grid, where Ctrl+G is heard.
+        rawinput.keyCombo("Escape")
+        self._to_grid("A1")
+        rawinput.keyCombo("<Shift>Down")
+        rawinput.keyCombo("<Shift>Down")
+        stats = self.wait_until(labels, lambda ls: any("Count 3" in l for l in ls),
+                                description="the quick summary to count every row again")
+        line = next(l for l in stats if "Sum" in l)
+        self.assertIn("Sum 60", line)
+        self.assertIn("Count 3", line)
         self.assertIsNone(self.process.poll(), "tables crashed in the column menu")
 
 
@@ -4841,6 +5062,68 @@ class TablesFilterSmoke(TablesCellEntryMixin, BaseGUITestCase):
         )
         self.assertIsNone(self.process.poll(), "tables crashed during filter/clear-filter")
 
+    def test_clear_filter_keeps_manual_hides(self):
+        # TBL-003: filter hides and manual hides are independent — clearing
+        # the filter brings back only what the filter hid.
+        import json
+        import subprocess
+        from dogtail import rawinput, tree
+
+        aid = "org.tunaos.tables"
+        subprocess.run(["gapplication", "action", aid, "new-document"])
+        self._wait_for_a_new_document()
+
+        for row, value in enumerate(["apple", "banana", "apple", "cherry"]):
+            self._put(f"A{row + 1}", value)
+
+        def snapshot():
+            subprocess.run(["gapplication", "action", aid, "test-snapshot"])
+            with open(self._snapshot_path) as f:
+                return json.load(f)
+
+        subprocess.run(["gapplication", "action", aid, "filter-by-column"])
+        value_entry = self.wait_until(
+            lambda: tree.root.findChild(
+                lambda n: n.name == "Filter value" and n.roleName == "text"),
+            lambda node: node is not None,
+            description="the Filter by Column dialog",
+        )
+        value_entry.text = "apple"
+        tree.root.findChild(
+            lambda n: n.name == "Filter" and n.roleName == "push button").do_action(0)
+        self.wait_until(
+            snapshot,
+            lambda snap: set(snap["sheet"]["hidden_rows"]) == {1, 3},
+            interval=0.3,
+            description="the filter to hide the non-matching rows",
+        )
+
+        # Manually hide A3, a row the filter leaves visible.
+        rawinput.keyCombo("<Control>g")
+        self.wait_until(lambda: self._focused("Cell reference"), bool,
+                        description="the name box to take focus")
+        rawinput.typeText("A3")
+        rawinput.keyCombo("Return")
+        self.wait_until(lambda: self._focused("Formula input"), bool,
+                        description="the jump to A3")
+        rawinput.keyCombo("Escape")
+        subprocess.run(["gapplication", "action", aid, "hide-selected-rows"])
+        self.wait_until(
+            snapshot,
+            lambda snap: set(snap["sheet"]["hidden_rows"]) == {1, 2, 3},
+            interval=0.3,
+            description="the manual hide to join the filter hides",
+        )
+
+        subprocess.run(["gapplication", "action", aid, "clear-filter"])
+        self.wait_until(
+            snapshot,
+            lambda snap: snap["sheet"]["hidden_rows"] == [2],
+            interval=0.3,
+            description="clear-filter to bring back only the filtered rows",
+        )
+        self.assertIsNone(self.process.poll(), "tables crashed during filter/clear-filter")
+
 
 class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
     """Rows and columns inserted and deleted, a sort under a frozen header,
@@ -5004,6 +5287,151 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.wait_until(lambda: not self._cells()[1]["sheet"]["protected"], bool, description="the sheet to be unprotected")
         self._put("A1", "changed")
         self.assertIsNone(self.process.poll(), "tables crashed under protection")
+
+    def _grid_selection(self, ref, extend=()):
+        from dogtail import rawinput
+        self._select(ref)
+        rawinput.keyCombo("Escape")
+        self.wait_until(lambda: not self._focused("Formula input"), bool,
+                        description="the grid to take focus")
+        for direction in extend:
+            rawinput.keyCombo(f"<Shift>{direction}")
+
+    def _protection_notice(self):
+        message = "This sheet is protected. Unprotect it to make changes."
+        notice = lambda: self.app.findChild(
+            lambda n: n.name == message and n.showing,
+            retry=False, requireResult=False)
+        label = self.wait_until(notice, bool, description="the protected operation's native refusal")
+        # Explicitly dismiss: libadwaita pauses expiry while the toast has focus.
+        # The next operation must produce its own notice, not reuse this one.
+        label.parent.parent.findChild(
+            lambda n: n.roleName == "push button" and n.showing,
+            retry=False).do_action(0)
+        self.wait_until(notice, lambda n: not n, description="the refusal notice to close")
+
+    def test_protected_range_paste_is_atomic_and_unprotect_restores_editing(self):
+        from dogtail import rawinput
+        for ref, value in (("A1", "30"), ("B1", "31"), ("A2", "10"), ("B2", "11"),
+                           ("D1", "kept"), ("E1", "still"), ("D2", "intact"), ("E2", "unchanged")):
+            self._put(ref, value)
+        original = self._cells()[0]
+        self._grid_selection("A1", ("Right", "Down"))
+        self.wait_until(lambda: self._cells()[1]["sheet"]["selection"],
+                        lambda s: s == [0, 0, 1, 1], description="the two-by-two source selection")
+        rawinput.keyCombo("<Control>c")
+        self._grid_selection("D1")
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="the paste destination to be protected")
+        rawinput.keyCombo("<Control>v")
+        self._protection_notice()
+        self.assertEqual(self._cells()[0], original, "a refused range paste partly changed the workbook")
+        for name in ("D1: kept", "E1: still", "D2: intact", "E2: unchanged"):
+            self.wait_until(
+                lambda: self.app.findChildren(lambda n: n.roleName == "table cell" and n.name == name),
+                bool, description=f"AT-SPI to retain {name}")
+
+        # Rejection creates no undo entry: the next undo is protection itself.
+        self._act("undo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="undo to reach the protection toggle, not a rejected paste")
+        self.assertEqual(self._cells()[0], original)
+        self._act("redo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="redo to restore protection")
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="Unprotect Sheet to allow the same paste")
+        self._grid_selection("D1")
+        rawinput.keyCombo("<Control>v")
+        expected = dict(original)
+        for row in range(2):
+            for col in range(2):
+                expected[(row, col + 3)] = original[(row, col)]
+        self._wait_cells(lambda c: c == expected, "the complete range paste after unprotect")
+        self._act("undo")
+        self._wait_cells(lambda c: c == original, "one undo to restore every pasted destination")
+        self._put("D1", "editable")
+        self.assertIsNone(self.process.poll(), "tables crashed during protected range paste")
+
+    def test_protected_clear_sort_and_structural_actions_leave_no_history(self):
+        from dogtail import rawinput
+        for ref, value in (("A1", "30"), ("A2", "10"), ("B1", "row-one"), ("B2", "row-two")):
+            self._put(ref, value)
+        original = self._cells()[0]
+        self._act("toggle-sheet-protection")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], bool,
+                        description="the compound operation targets to be protected")
+        self._grid_selection("A1", ("Right", "Down"))
+        self.wait_until(lambda: self._cells()[1]["sheet"]["selection"],
+                        lambda s: s == [0, 0, 1, 1], description="the range selected for clearing")
+        rawinput.keyCombo("Delete")
+        self._protection_notice()
+        self.assertEqual(self._cells()[0], original, "protected Delete cleared part of the selection")
+
+        self._grid_selection("A1")
+        rawinput.keyCombo("<Alt>Down")
+        button = self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.roleName == "push button" and n.name == "Sort Ascending" and n.showing,
+                retry=False, requireResult=False),
+            bool, description="the protected column's sort menu")
+        button.do_action(0)
+        self._protection_notice()
+        cells, snap = self._cells()
+        self.assertEqual(cells, original, "a refused sort moved cells")
+        self.assertIsNone(snap["sheet"]["sorted_col"], "a refused sort changed its header indicator")
+        for action in ("insert-rows", "delete-rows", "insert-cols", "delete-cols"):
+            self._act(action)
+            self._protection_notice()
+            self.assertEqual(self._cells()[0], original, f"{action} changed a protected sheet")
+
+        self._act("undo")
+        self.wait_until(lambda: self._cells()[1]["sheet"]["protected"], lambda p: not p,
+                        description="one undo to unprotect after every rejected compound operation")
+        self.assertEqual(self._cells()[0], original)
+        self._grid_selection("A1", ("Right", "Down"))
+        rawinput.keyCombo("Delete")
+        self._wait_cells(lambda c: not c, "unprotected Delete to clear the entire selection")
+        self._act("undo")
+        self._wait_cells(lambda c: c == original, "one undo to restore the complete cleared range")
+        self.assertIsNone(self.process.poll(), "tables crashed during protected compound operations")
+
+    def test_filter_undo_and_redo_restore_visibility(self):
+        # TBL-003: the Filter by Column dialog hides non-matching rows as
+        # one undo step; undo brings them back and redo hides them again.
+        from dogtail import tree
+        self._put("A1", "apple")
+        self._put("A2", "banana")
+        self._act("filter-by-column")
+        value_entry = self.wait_until(
+            lambda: tree.root.findChild(
+                lambda n: n.name == "Filter value" and n.roleName == "text"),
+            lambda node: node is not None,
+            description="the Filter by Column dialog",
+        )
+        value_entry.text = "apple"
+        tree.root.findChild(
+            lambda n: n.name == "Filter" and n.roleName == "push button").do_action(0)
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [1],
+            description="the filter to hide the non-matching row",
+        )
+        self._act("undo")
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [],
+            description="one undo to unhide every row",
+        )
+        self._act("redo")
+        self.wait_until(
+            lambda: self._cells()[1]["sheet"]["hidden_rows"],
+            lambda hidden: hidden == [1],
+            description="redo to hide the non-matching row again",
+        )
+        self.assertIsNone(self.process.poll(), "tables crashed during filter undo/redo")
 
 
 class TablesNamedRangeSmoke(BaseGUITestCase):
@@ -5407,6 +5835,63 @@ class DecksMagicMovePreviewSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "decks crashed previewing Magic Move")
 
 
+class DecksMissingMediaPreflightSmoke(BaseGUITestCase):
+    """A real inserted image disappears before presenting: no show window
+    opens without explicit consent. Only file selection uses the existing
+    test picker; the warning and its responses are exercised through AT-SPI."""
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-missing-media-")
+        directory = self.temp_dir(prefix="decks-missing-media-")
+        self._picture = os.path.join(directory, "missing-artwork.png")
+        picker = os.path.join(directory, "pick")
+        from PIL import Image
+        Image.new("RGB", (40, 20), (200, 40, 40)).save(self._picture, "PNG")
+        with open(picker, "w") as f:
+            f.write(self._picture)
+        self.launch_env = {**getattr(self, "launch_env", {}),
+                           "GTK_OFFICE_TEST_MODE": "1", "GTK_OFFICE_TEST_PICK": picker}
+        super().setUp()
+        self.gapplication_action(self.AID, "new-document")
+        self.gapplication_action(self.AID, "add-image")
+        self.wait_until(
+            lambda: self.trigger_snapshot(self.AID)["slides"][0]["objects"],
+            lambda objects: len(objects) == 1 and objects[0]["kind"] == "Image"
+            and "picture:missing" not in objects[0]["detail"],
+            description="the real image to be inserted before its file disappears")
+        os.unlink(self._picture)
+
+    def _texts(self):
+        return [n.name for n in self.app.findChildren(lambda n: n.roleName == "label")]
+
+    def _frames(self):
+        return [n.name for n in self.app.findChildren(lambda n: n.roleName == "frame")]
+
+    def test_cancel_keeps_show_closed_and_continue_opens_it(self):
+        for attempt in range(2):
+            self.gapplication_action(self.AID, "present")
+            self.wait_until(self._texts,
+                            lambda texts: any("Slide 1: " + self._picture in (t or "") for t in texts),
+                            description="the missing image warning with its slide and path")
+            self.assertNotIn("Slide Show", self._frames(), "audience opened before consent")
+            if attempt == 0:
+                self.app.child(name="Cancel", roleName="push button").do_action(0)
+                self.wait_until(self._texts,
+                                lambda texts: not any(self._picture in (t or "") for t in texts),
+                                description="Cancel to dismiss the preflight")
+                self.assertNotIn("Slide Show", self._frames(), "Cancel opened the audience")
+                self.assertEqual(self.trigger_snapshot(self.AID)["slides"][0]["objects"][0]["kind"], "Image",
+                                 "Cancel must not remove the missing image from the document")
+            else:
+                self.app.child(name="Continue Anyway", roleName="push button").do_action(0)
+                self.wait_until(self._frames, lambda frames: "Slide Show" in frames,
+                                description="explicit consent to open the audience")
+        self.assertIsNone(self.process.poll(), "decks crashed during missing-image preflight")
+
+
 class DecksPresenterDisplaySmoke(BaseGUITestCase):
     """The presenter display (DESIGN-UI.md, "Presenter display"): rehearsing
     a two-slide deck opens it on the one monitor the test display has, with
@@ -5778,7 +6263,7 @@ class DecksMasterViewSmoke(BaseGUITestCase):
         self.app.child(name="Format", roleName="toggle button").do_action(0)
         self.wait_until(lambda: self.app.child(name="Edit Master", roleName="push button"), lambda b: b is not None and b.showing,
                         description="Edit Master in the inspector").do_action(0)
-        self.wait_until(snap, lambda s: s["editing_master"] == 0, interval=0.5, description="the master view to open")
+        self.wait_until(snap, lambda s: s["editing_master"] == before["masters"][0]["id"], interval=0.5, description="the master view to open")
         self.wait_until(lambda: self.app.findChild(lambda n: "Editing the master" in (n.name or ""), retry=False, requireResult=False),
                         lambda n: n is not None and n.showing, description="the banner")
         subprocess.run(["gapplication", "action", aid, "insert-shape", "uint32 3"], check=True, timeout=5)
@@ -5803,6 +6288,84 @@ class DecksMasterViewSmoke(BaseGUITestCase):
                 return ""
         self.wait_until(master_xml, lambda x: 'prst="triangle"' in x, interval=0.5, description="the triangle in the saved master")
         self.assertIsNone(self.process.poll(), "decks crashed editing the master")
+
+
+class DecksCanonicalSelectionSmoke(BaseGUITestCase):
+    """Stable identities (DCK-005): the selection names slides and objects
+    by id, so inserting, reordering, undoing and saving never retarget it.
+    Two shapes are added (each insert selects what it made), the slide is
+    duplicated and moved (the same ids in a new order), undo and redo keep
+    the ids while moving the order back and forth, and after Save the deck
+    reopens with every slide_id and object id intact and the selection
+    naming the slide it left."""
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self.isolate_snapshot("decks-canonical-snapshot-")
+        self._dir = self.temp_dir(prefix="decks-canonical-")
+        self._doc = os.path.join(self._dir, "stable.pptx")
+        with open(self._doc, "wb") as f:
+            f.write(minimal_pptx_bytes("a slide"))
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def test_stable_ids_survive_reorder_undo_and_save_reopen(self):
+        snap = lambda: self.trigger_snapshot(self.AID)
+        before = self.wait_until(snap, lambda s: s and s["slide_count"] == 1, interval=0.5, description="the deck to open")
+        slide_id = before["slides"][0]["id"]
+        self.assertEqual(before["slide_id"], slide_id, "the selection names the open slide")
+        # Each insert selects what it made: the primary object is the new shape.
+        # (The deck opens with the file's own text box, so the first shape
+        # brings the count to two.)
+        self.gapplication_action(self.AID, "add-shape")
+        one = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 2, interval=0.5,
+                              description="the first shape")
+        first_id = one["slides"][0]["objects"][1]["id"]
+        self.assertEqual(one["primary_object_id"], first_id, "the insert is selected")
+        self.assertEqual(one["selected_ids"], [first_id], one)
+        self.gapplication_action(self.AID, "add-shape")
+        two = self.wait_until(snap, lambda s: len(s["slides"][0]["objects"]) == 3, interval=0.5,
+                              description="the second shape")
+        ids = [o["id"] for o in two["slides"][0]["objects"]]
+        self.assertEqual(len(set(ids)), 3, f"objects have distinct ids: {ids}")
+        self.assertEqual(two["primary_object_id"], ids[2], "the second insert is selected")
+        # Reorder via slide ops: duplicate, then move the copy up. The same
+        # slide ids come back in a new order, and the selection follows the copy.
+        self.gapplication_action(self.AID, "duplicate-slide")
+        dup = self.wait_until(snap, lambda s: s["slide_count"] == 2, interval=0.5, description="the duplicated slide")
+        order = [s["id"] for s in dup["slides"]]
+        self.assertEqual(order[0], slide_id, "the original slide keeps its id")
+        self.assertEqual(dup["slide_id"], order[1], "the selection follows the copy")
+        self.gapplication_action(self.AID, "move-slide-up")
+        moved = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == [order[1], order[0]], interval=0.5,
+                                description="the copy moved up")
+        self.assertEqual(moved["slide_id"], order[1], "the selection stays on the moved slide")
+        self.assertEqual([o["id"] for o in moved["slides"][1]["objects"]], ids, "the objects keep their ids")
+        # Undo takes the order back, redo returns it; the ids never change.
+        self.gapplication_action(self.AID, "undo")
+        back = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == order, interval=0.5,
+                               description="undo of the move")
+        self.assertEqual(back["slide_id"], order[1], "undo keeps the selection on its slide")
+        self.gapplication_action(self.AID, "redo")
+        forth = self.wait_until(snap, lambda s: [x["id"] for x in s["slides"]] == [order[1], order[0]], interval=0.5,
+                                description="redo of the move")
+        self.assertEqual(forth["slide_id"], order[1], forth)
+        # Save and reopen: numeric ids are session-local (interchange
+        # formats carry no id column; readers mint them once at import),
+        # so what must survive is the order, the content and a valid
+        # selection — not the numbers themselves.
+        self.gapplication_action(self.AID, "save")
+        self.wait_until(lambda: os.path.getsize(self._doc) > 0, bool, interval=0.25, description="the save to land")
+        self.relaunch_app(launch_args=[self._doc])
+        reopened = self.wait_until(snap, lambda s: s and s["slide_count"] == 2, interval=0.5, description="the deck to reopen")
+        self.assertEqual([len(s["objects"]) for s in reopened["slides"]], [3, 3], "both slides keep their objects")
+        live = [s["id"] for s in reopened["slides"]]
+        self.assertEqual(len(set(live)), 2, "reopened slides have distinct ids")
+        self.assertIn(reopened["slide_id"], live, "the selection names a surviving slide")
+        self.assertIsNone(self.process.poll(), "decks crashed keeping identities stable")
+
 
 
 class DecksLayoutsSmoke(BaseGUITestCase):
@@ -6103,6 +6666,420 @@ class DecksUnsupportedContentSmoke(BaseGUITestCase):
         self.assertNotEqual(self._bytes(), self._original, "Save Anyway wrote the file")
 
 
+class DecksLossDetailsSmoke(BaseGUITestCase):
+    """The save question names the affected slide/part and the reason
+    (DCK-001 loss matrix), not just a feature label — and consent is scoped
+    to that report: Cancel writes nothing and keeps the edit.
+
+    A pptx with a comment part and an emphasis build on slide 1: Ctrl+S
+    asks; the dialog names ppt/slides/slide1.xml for the animation and the
+    comments part; Cancel leaves the file's bytes as they were; Save Anyway
+    writes the edit without the comment."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        import io
+        import zipfile
+        self._dir = self.temp_dir(prefix="decks-loss-details-")
+        self.isolate_snapshot(prefix="decks-loss-details-snap-")
+        self.isolate_autosave_state()
+        self._doc = os.path.join(self._dir, "talk.pptx")
+        buf = io.BytesIO(minimal_pptx_bytes("kept"))
+        timing = (
+            '<p:timing><p:tnLst><p:par><p:cTn id="1" presetID="1" '
+            'presetClass="emph" presetSubtype="0" fill="hold" '
+            'nodeType="clickEffect"><p:childTnLst/></p:cTn></p:par></p:tnLst></p:timing></p:sld>'
+        )
+        out = io.BytesIO()
+        with zipfile.ZipFile(buf, "r") as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name in zin.namelist():
+                data = zin.read(name)
+                if name == "ppt/slides/slide1.xml":
+                    data = data.decode("utf-8").replace("</p:sld>", timing).encode("utf-8")
+                zout.writestr(name, data)
+            zout.writestr("ppt/comments/comment1.xml", '<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>')
+        with open(self._doc, "wb") as f:
+            f.write(out.getvalue())
+        self._original = out.getvalue()
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _bytes(self):
+        with open(self._doc, "rb") as f:
+            return f.read()
+
+    def test_the_question_names_slide_part_and_reason(self):
+        aid = "org.tunaos.decks"
+        self.wait_until(lambda: self.app.child(name="Slide canvas"), lambda c: c is not None, description="the deck to open")
+        self.gapplication_action(aid, "add-shape")
+        self.gapplication_action(aid, "save-file")
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "ppt/slides/slide1.xml" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the affected slide named in the question")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "ppt/comments" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the comments part named in the question")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        time.sleep(1.0)  # settling: a Cancel that wrote would have by now
+        self.assertEqual(self._bytes(), self._original, "Cancel wrote the file")
+        assert_close_guard_asks(self)
+
+        self.gapplication_action(aid, "save-file")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+        self.wait_until(self._bytes, lambda b: b != self._original, description="Save Anyway to write the file")
+        self.assertIsNone(self.process.poll(), "decks crashed saving")
+
+
+class DecksSourceInspectionSmoke(BaseGUITestCase):
+    """Failed source inspection must not silently authorize destructive saves.
+
+    Save and close-guard Save preserve source bytes and dirty edits; Save As
+    can recover the edits to a fresh file only with explicit unverified-copy
+    consent, including when the original is permanently missing.
+    """
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix="decks-source-inspection-")
+        self.isolate_snapshot(prefix="decks-source-inspection-snap-")
+        self.isolate_autosave_state()
+        self._doc = os.path.join(self._dir, "source.pptx")
+        self._original = minimal_pptx_bytes("keep my work")
+        with open(self._doc, "wb") as f:
+            f.write(self._original)
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _objects(self):
+        return self.trigger_snapshot(self.AID)["slides"][0]["objects"]
+
+    def _source_bytes(self):
+        if not os.path.exists(self._doc):
+            return None
+        with open(self._doc, "rb") as f:
+            return f.read()
+
+    def _exercise_blocked_save(self, entry):
+        self.wait_for_node(name="Slide canvas")
+        original_count = len(self._objects())
+        self.gapplication_action(self.AID, "add-shape")
+        edited = self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                                 description="the unsaved shape")
+        for missing in (False, True):
+            with self.subTest(missing=missing, entry=entry):
+                if missing:
+                    os.unlink(self._doc)
+                    expected = None
+                else:
+                    expected = b"damaged source: do not overwrite"
+                    with open(self._doc, "wb") as f:
+                        f.write(expected)
+                if entry == "close":
+                    self.app.child(name="Close", roleName="push button").do_action(0)
+                    self.wait_for_node(name="Save", roleName="push button").do_action(0)
+                else:
+                    self.gapplication_action(self.AID, "save-file")
+                self.wait_for_node(name="Could Not Save File")
+                self.wait_until(
+                    lambda: self.app.findChild(
+                        lambda n: n.showing and "Decks could not check the original file" in n.name,
+                        retry=False, requireResult=False),
+                    lambda n: n is not None, description="the source inspection failure explanation")
+                self.assertIsNone(self.app.findChild(
+                    lambda n: n.name == "Save Anyway" and n.showing, retry=False, requireResult=False),
+                    "an incomplete inspection must not offer a destructive override")
+                self.assertEqual(self._source_bytes(), expected, "the blocked save changed the source")
+                self.wait_for_node(name="OK", roleName="push button").do_action(0)
+                self.wait_until(
+                    lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                                retry=False, requireResult=False),
+                    lambda n: n is None, description="the error dialog to close")
+                self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+                assert_close_guard_asks(self)
+        with open(self._doc, "wb") as f:
+            f.write(self._original)
+        self.gapplication_action(self.AID, "save-file")
+        saved = self.wait_until(self._source_bytes, lambda data: data != self._original,
+                                description="the retained edit to save after source restoration")
+        self.assertEqual(DecksUnsupportedContentSmoke._shape_count(saved),
+                         DecksUnsupportedContentSmoke._shape_count(self._original) + 1)
+
+    def test_save_blocks_an_uninspectable_source(self):
+        self._exercise_blocked_save("save")
+
+    def _save_as(self, path):
+        from dogtail import tree
+        self.gapplication_action(self.AID, "save-file-as")
+        name = self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text",
+                                        retry=False, requireResult=False),
+            lambda n: n is not None, description="the Save As filename")
+        name.text = path
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+    def _recover_unverified_copy(self, missing):
+        self.wait_for_node(name="Slide canvas")
+        original_count = len(self._objects())
+        self.gapplication_action(self.AID, "add-shape")
+        edited = self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                                 description="the edit to recover")
+        if missing:
+            os.unlink(self._doc)
+            expected = None
+        else:
+            expected = b"damaged source: keep unchanged"
+            with open(self._doc, "wb") as f:
+                f.write(expected)
+        copy = os.path.join(self._dir, "recovered.pptx")
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Copy" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the recovery question to close")
+        self.assertFalse(os.path.exists(copy), "Cancel created an unverified copy")
+        self.assertEqual(self._source_bytes(), expected)
+        self.assertEqual(self._objects(), edited)
+        assert_close_guard_asks(self)
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy) and os.path.getsize(copy) > 0, bool,
+                        description="the explicitly approved recovery copy")
+        self.assertEqual(self._source_bytes(), expected, "recovery changed the original")
+        with open(copy, "rb") as f:
+            self.assertEqual(DecksUnsupportedContentSmoke._shape_count(f.read()),
+                             DecksUnsupportedContentSmoke._shape_count(self._original) + 1)
+        self.relaunch_app(launch_args=[copy])
+        self.wait_for_node(name="Slide canvas")
+        self.wait_until(self._objects, lambda objects: len(objects) == len(edited),
+                        description="the recovered edits to reopen")
+
+    def test_save_as_recovers_missing_source_only_with_consent(self):
+        self._recover_unverified_copy(missing=True)
+
+    def test_save_as_recovers_corrupt_source_without_replacing_it(self):
+        self._recover_unverified_copy(missing=False)
+
+    def test_recovery_rechecks_destination_after_confirmation(self):
+        self.wait_for_node(name="Slide canvas")
+        self.gapplication_action(self.AID, "add-shape")
+        os.unlink(self._doc)
+        copy = os.path.join(self._dir, "claimed.pptx")
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        claimed = b"another file appeared while confirmation was open"
+        with open(copy, "wb") as f:
+            f.write(claimed)
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
+        self.wait_for_node(name="Could Not Save File")
+        with open(copy, "rb") as f:
+            self.assertEqual(f.read(), claimed, "recovery overwrote a newly existing destination")
+        self.assertIsNone(self._source_bytes(), "recovery recreated the original")
+        self.wait_for_node(name="OK", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the error dialog to close")
+        assert_close_guard_asks(self)
+
+    def test_close_guard_save_blocks_an_uninspectable_source(self):
+        self._exercise_blocked_save("close")
+
+
+class OpaquePartsSurviveMixin:
+    """A package holding parts the app doesn't model, a custom XML data
+    part and a thumbnail, is opened, edited and saved with Ctrl+S
+    (#1274). The edit is written; the parts are still there, byte for
+    byte; and the saved package's parts, content types and relationships
+    agree. Each app writes its document from its model, so before #1274
+    every save dropped them."""
+
+    corpus = None  # a callable returning the package's bytes
+    file_name = None
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix=f"{self.app_name}-opaque-")
+        self.isolate_autosave_state()
+        self.isolate_snapshot(prefix=f"{self.app_name}-opaque-snap-")
+        source = self.corpus()
+        self._doc = os.path.join(self._dir, self.file_name)
+        with open(self._doc, "wb") as f:
+            f.write(with_opaque_parts(source))
+        with open(self._doc, "rb") as f:
+            self._original = f.read()
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def _read(self, name):
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(self._original)) as z:
+            return z.read(name)
+
+    def _assert_parts_survived(self, edited):
+        """Wait for the save to write `edited` into some part, then check
+        the carried parts and the package's consistency."""
+        import zipfile
+
+        def written():
+            try:
+                with open(self._doc, "rb") as f:
+                    if f.read() == self._original:
+                        return False
+                with zipfile.ZipFile(self._doc) as z:
+                    return any(edited.encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
+            except (OSError, zipfile.BadZipFile, KeyError):
+                return False
+        self.wait_until(written, bool, interval=0.25, description=f"the save to write {edited!r}")
+        with zipfile.ZipFile(self._doc) as z:
+            for name in ("customXml/item1.xml", "customXml/itemProps1.xml",
+                         "customXml/_rels/item1.xml.rels", "docProps/thumbnail.jpeg"):
+                self.assertIn(name, z.namelist(), f"the save dropped {name}")
+                self.assertEqual(z.read(name), self._read(name), f"the save changed {name}")
+            self.assertIn("docProps/thumbnail.jpeg", z.read("_rels/.rels").decode(),
+                          "the thumbnail's package relationship")
+        self.assertEqual(ooxml_package_problems(self._doc), [])
+        self.assertIsNone(self.process.poll(), f"{self.app_name} crashed saving")
+
+
+class DecksSourceContextSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
+    """Session-owned provenance (DCK-002): the carried parts and the loss
+    question belong to the opened revision, not to whatever the source
+    path holds now.
+
+    Deleting or replacing the source while it is open must never silently
+    carry the opened revision's parts into the change, and must never
+    overwrite the original on a plain Save: the save blocks, the edit
+    stays unsaved, and a Save As elsewhere asks about the opened
+    revision's content before writing a model-only copy."""
+
+    app_name = "decks"
+    corpus = staticmethod(lambda: minimal_pptx_bytes("context deck"))
+    file_name = "context.pptx"
+
+    def _objects(self):
+        return self.trigger_snapshot("org.tunaos.decks")["slides"][0]["objects"]
+
+    def _edit(self):
+        aid = "org.tunaos.decks"
+        self.wait_until(lambda: self.app.child(name="Slide canvas"), lambda c: c is not None,
+                        description="the deck to open")
+        original_count = len(self._objects())
+        self.gapplication_action(aid, "add-text-box")
+        return self.wait_until(self._objects, lambda objects: len(objects) == original_count + 1,
+                               description="the unsaved text box")
+
+    def _dismiss_error(self):
+        self.wait_for_node(name="OK", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "OK" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the error dialog to close")
+
+    def _save_as(self, path):
+        from dogtail import tree
+        self.gapplication_action("org.tunaos.decks", "save-file-as")
+        name = self.wait_until(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text",
+                                        retry=False, requireResult=False),
+            lambda n: n is not None, description="the Save As filename")
+        name.text = path
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+    def test_deleted_source_blocks_overwrite_and_keeps_the_edit(self):
+        edited = self._edit()
+        os.unlink(self._doc)
+        self.gapplication_action("org.tunaos.decks", "save-file")
+        self.wait_for_node(name="Could Not Save File")
+        self.assertIsNone(self.app.findChild(
+            lambda n: n.name == "Save Copy" and n.showing, retry=False, requireResult=False),
+            "a missing source must not offer to replace itself")
+        self.assertFalse(os.path.exists(self._doc), "the blocked save recreated the file")
+        self._dismiss_error()
+        self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+        assert_close_guard_asks(self)
+        self.assertIsNone(self.process.poll(), "decks crashed on a blocked save")
+
+    def test_replaced_source_blocks_overwrite_and_leaves_the_replacement(self):
+        edited = self._edit()
+        replacement = minimal_pptx_bytes("entirely different")
+        with open(self._doc, "wb") as f:
+            f.write(replacement)
+        self.gapplication_action("org.tunaos.decks", "save-file")
+        self.wait_for_node(name="Could Not Save File")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the blocked save touched the replacement")
+        self._dismiss_error()
+        self.assertEqual(self._objects(), edited, "the blocked save discarded the edit")
+        assert_close_guard_asks(self)
+        self.assertIsNone(self.process.poll(), "decks crashed on a blocked save")
+
+    def test_save_as_elsewhere_after_replacement_writes_model_only(self):
+        import zipfile
+        self._edit()
+        replacement = minimal_pptx_bytes("entirely different")
+        with open(self._doc, "wb") as f:
+            f.write(replacement)
+        copy = os.path.join(self._dir, "elsewhere.pptx")
+        self._save_as(copy)
+        # A replaced source makes every write an unverified copy: the copy
+        # question names the changed-on-disk stake, not the generic loss
+        # list.
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "changed on disk" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the changed-on-disk explanation")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Save Copy" and n.showing,
+                                        retry=False, requireResult=False),
+            lambda n: n is None, description="the copy question to close")
+        self.assertFalse(os.path.exists(copy), "Cancel wrote the copy anyway")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the blocked save touched the replacement")
+        self._save_as(copy)
+        self.wait_for_node(name="Save an Unverified Copy?")
+        self.wait_for_node(name="Save Copy", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy) and os.path.getsize(copy) > 0, bool,
+                        description="the approved model-only copy")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "the copy touched the replacement")
+        with zipfile.ZipFile(copy) as z:
+            names = z.namelist()
+            self.assertFalse([n for n in names if n.startswith("customXml/")], names)
+            self.assertTrue(any(b"TextBox 2" in z.read(n) for n in names if n.endswith(".xml")),
+                            "the copy lost the edit")
+        self.assertEqual(ooxml_package_problems(copy), [])
+        self.assertIsNone(self.process.poll(), "decks crashed saving the copy")
+
+    def test_cross_format_save_as_names_the_dropped_parts(self):
+        self._edit()
+        copy = os.path.join(self._dir, "elsewhere.odp")
+        self._save_as(copy)
+        self.wait_for_node(name="Save Without This Content?")
+        self.wait_until(
+            lambda: self.app.findChild(
+                lambda n: n.showing and n.name is not None and "customXml/item1.xml" in n.name,
+                retry=False, requireResult=False),
+            lambda n: n is not None, description="the dropped carried part named in the question")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(lambda: os.path.exists(copy), lambda exists: not exists,
+                        description="no cross-format copy without consent")
+        self.assertIsNone(self.process.poll(), "decks crashed on a cross-format question")
+
+
 class DecksExportSmoke(BaseGUITestCase):
     """Export (Keynote's File > Export To, Google Slides' Download): Export
     as PDF writes a page per
@@ -6185,6 +7162,155 @@ class DecksExportSmoke(BaseGUITestCase):
         self.assertEqual(self.trigger_snapshot("org.tunaos.decks")["slides"], slides, "the deck changed")
         with open(self._doc, "rb") as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), before, "the source file changed")
+
+
+def dual_theme_pptx_bytes():
+    """A two-slide deck whose masters name different themes (DCK-006).
+
+    Hand-built rather than produced by Decks itself, because the point is
+    a deck that exists *before* the app starts: master 1 is navy with a
+    red accent theme, master 2 states no background with a blue accent
+    theme, and both slides state no background and fill one box with
+    their own theme's accent1. What the app must keep: both theme parts
+    with their own accents, the token (not frozen) fills, and the absent
+    backgrounds (never white smuggled in at import).
+    """
+    import io
+    import zipfile
+
+    ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+
+    def theme(name, accent, font):
+        slots = [("dk1", "000000"), ("lt1", "FFFFFF"), ("dk2", "44546A"), ("lt2", "E7E6E6"),
+                 ("accent1", accent), ("accent2", "ED7D31"), ("accent3", "A5A5A5"), ("accent4", "FFC000"),
+                 ("accent5", "5B9BD5"), ("accent6", "70AD47"), ("hlink", "0563C1"), ("folHlink", "954F72")]
+        scheme = "".join(f'<a:{s}><a:srgbClr val="{v}"/></a:{s}>' for s, v in slots)
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="{name}"><a:themeElements>
+<a:clrScheme name="Office">{scheme}</a:clrScheme>
+<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Heading Face"/></a:majorFont>
+<a:minorFont><a:latin typeface="{font}"/></a:minorFont></a:fontScheme>
+<a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>
+<a:lnStyleLst><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>
+<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
+<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
+</a:fmtScheme></a:themeElements></a:theme>"""
+
+    clr_map = ('<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" '
+               'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>')
+
+    def master(name, bg, layout_id):
+        bg_xml = (f'<p:bg><p:bgPr><a:solidFill><a:srgbClr val="{bg}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>'
+                  if bg else '')
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {ns}><p:cSld name="{name}">{bg_xml}<p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld>{clr_map}<p:sldLayoutIdLst><p:sldLayoutId id="2147484648" r:id="rId1"/></p:sldLayoutIdLst></p:sldMaster>"""
+
+    def layout(name):
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {ns} type="obj" preserve="1"><p:cSld name="{name}"><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"""
+
+    def slide(text):
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {ns}><p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld></p:sld>"""
+
+    def rels(targets):
+        body = "".join(
+            f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{k}" Target="{t}"/>'
+            for i, (k, t) in enumerate(targets, 1))
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + body + '</Relationships>')
+
+    parts = {
+        "[Content_Types].xml": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+<Override PartName="/ppt/slideMasters/slideMaster2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+<Override PartName="/ppt/slideLayouts/slideLayout2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+<Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+</Types>""",
+        "_rels/.rels": rels([("officeDocument", "ppt/presentation.xml")]),
+        "ppt/presentation.xml": f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation {ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="9144000" cy="5143500"/></p:presentation>""",
+        "ppt/_rels/presentation.xml.rels": rels([("slide", "slides/slide1.xml"), ("slide", "slides/slide2.xml")]),
+        "ppt/slides/slide1.xml": slide("Red box"),
+        "ppt/slides/slide2.xml": slide("Blue box"),
+        "ppt/slides/_rels/slide1.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout1.xml")]),
+        "ppt/slides/_rels/slide2.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout2.xml")]),
+        "ppt/slideLayouts/slideLayout1.xml": layout("Red layout"),
+        "ppt/slideLayouts/slideLayout2.xml": layout("Blue layout"),
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": rels([("slideMaster", "../slideMasters/slideMaster1.xml")]),
+        "ppt/slideLayouts/_rels/slideLayout2.xml.rels": rels([("slideMaster", "../slideMasters/slideMaster2.xml")]),
+        "ppt/slideMasters/slideMaster1.xml": master("Red master", "0B3D6B", 1),
+        "ppt/slideMasters/slideMaster2.xml": master("Blue master", "", 2),
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout1.xml"), ("theme", "../theme/theme1.xml")]),
+        "ppt/slideMasters/_rels/slideMaster2.xml.rels": rels([("slideLayout", "../slideLayouts/slideLayout2.xml"), ("theme", "../theme/theme2.xml")]),
+        "ppt/theme/theme1.xml": theme("Red theme", "FF0000", "Body Face"),
+        "ppt/theme/theme2.xml": theme("Blue theme", "0000FF", "Body Face"),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as deck:
+        for name, content in parts.items():
+            deck.writestr(name, content)
+    return buffer.getvalue()
+
+
+class DecksThemeInheritanceSmoke(BaseGUITestCase):
+    """Theme/layout/master inheritance (DCK-006): a two-master deck whose
+    masters name different themes opens with both designs, and a save
+    keeps both theme parts with their own accents, the token (not frozen)
+    fills, and the absent backgrounds — never white smuggled in."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self._dir = self.temp_dir(prefix="decks-theme-")
+        self.isolate_snapshot(prefix="decks-theme-snap-")
+        self._doc = os.path.join(self._dir, "two-themes.pptx")
+        with open(self._doc, "wb") as f:
+            f.write(dual_theme_pptx_bytes())
+        self.launch_args = [self._doc]
+        super().setUp()
+
+    def test_two_themes_survive_a_save_with_relationships_intact(self):
+        import zipfile
+        aid = "org.tunaos.decks"
+        snap = lambda: self.trigger_snapshot(aid)
+        opened = self.wait_until(snap, lambda s: s and s["slide_count"] == 2, interval=0.5, description="both slides to open")
+        self.assertEqual(len(opened["masters"]), 2, "both masters are kept")
+        self.gapplication_action(aid, "save")
+
+        def saved():
+            try:
+                with zipfile.ZipFile(self._doc) as z:
+                    return {n: z.read(n).decode() for n in z.namelist() if n.endswith(".xml")}
+            except (OSError, zipfile.BadZipFile):
+                return {}
+        out = self.wait_until(saved, lambda p: "ppt/theme/theme2.xml" in p, interval=0.5, description="the save to land")
+        self.assertIn('val="FF0000"', out["ppt/theme/theme1.xml"], "theme 1 keeps its red accent")
+        self.assertIn('val="0000FF"', out["ppt/theme/theme2.xml"], "theme 2 keeps its blue accent")
+        self.assertIn('val="accent1"', out["ppt/slides/slide1.xml"], "the fill is still a token, not a frozen colour")
+        self.assertNotIn("<p:bg>", out["ppt/slides/slide1.xml"], "the absent slide background was not frozen white")
+        self.assertIn("0B3D6B", out["ppt/slideMasters/slideMaster1.xml"], "the navy master background survived")
+        self.assertIsNone(self.process.poll(), "decks crashed saving two themes")
 
 
 def presenter_button(test, name):
@@ -6469,6 +7595,62 @@ class DecksCanvasGeometry:
         ox = (cw - 960.0 * scale) / 2.0
         oy = (ch - 540.0 * scale) / 2.0
         return lambda sx, sy: (cx + ox + sx * scale, cy + oy + sy * scale)
+
+
+class DecksInlineTextSmoke(DecksCanvasGeometry, BaseGUITestCase):
+    """Double-click editing commits multiline text as one undoable operation."""
+
+    app_name = "decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-inline-text-")
+        super().setUp()
+
+    def _object(self):
+        return self.trigger_snapshot("org.tunaos.decks")["slides"][0]["objects"][0]
+
+    def _open_editor(self):
+        from dogtail import rawinput
+
+        obj = self._object()
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2,
+                                       obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        return self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Slide text editor",
+                                       retry=False, requireResult=False),
+            lambda n: n is not None and n.showing,
+            description="the double-click slide text editor",
+        )
+
+    def test_multiline_commit_undo_and_cancel(self):
+        from dogtail import rawinput
+
+        aid = "org.tunaos.decks"
+        self.gapplication_action(aid, "new-document")
+        self.gapplication_action(aid, "add-text-box")
+        before = self._object()["text"]
+        self._open_editor()
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("First line")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("Second line")
+        rawinput.keyCombo("<Control>Return")
+        expected = "First line\nSecond line"
+        self.wait_until(lambda: self._object()["text"], lambda t: t == expected,
+                        description="multiline text committed to the slide")
+        self.gapplication_action(aid, "undo")
+        self.wait_until(lambda: self._object()["text"], lambda t: t == before,
+                        description="one undo restoring the original text")
+        self.gapplication_action(aid, "redo")
+        self.wait_until(lambda: self._object()["text"], lambda t: t == expected,
+                        description="redo restoring the complete edit")
+        self._open_editor()
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Discard this draft")
+        rawinput.keyCombo("Escape")
+        self.assertEqual(self._object()["text"], expected)
+        self.assertIsNone(self.process.poll(), "decks crashed editing slide text")
 
 
 class DecksCanvasDragSmoke(DecksCanvasGeometry, BaseGUITestCase):
@@ -7211,6 +8393,38 @@ class LettersLineSpacingSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "letters crashed changing line spacing")
 
 
+class LettersKeepLinesSmoke(BaseGUITestCase):
+    """Keep Lines Together toggles the caret's paragraph and no other.
+
+    The toggle is a model op on the caret's paragraph; the snapshot is
+    the document model.
+    """
+
+    app_name = "letters"
+
+    def setUp(self):
+        self._snapshot_path = self.isolate_snapshot(prefix="letters-keep-")
+        super().setUp()
+
+    def _paras(self):
+        s = self.trigger_snapshot("org.tunaos.letters")
+        return [("".join(r["text"] for r in p["runs"]), p.get("style", {}).get("keep_lines", False)) for p in s["paragraphs"]]
+
+    def test_keep_lines_together_toggles_only_the_caret_paragraph(self):
+        from dogtail import rawinput
+
+        aid = "org.tunaos.letters"
+        self.new_letters_document()
+        rawinput.typeText("one")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("two")
+        self.wait_until(self._paras, lambda p: [t for t, _ in p] == ["one", "two"], description="two paragraphs")
+        self.gapplication_action(aid, "keep-lines-together")
+        self.wait_until(self._paras, lambda p: [k for _, k in p] == [False, True],
+                        description="'two' kept together, 'one' untouched")
+        self.assertIsNone(self.process.poll(), "letters crashed toggling keep-lines")
+
+
 class LettersMarkdownShortcutSmoke(BaseGUITestCase):
     """"**hi**" and a space makes "hi" bold, keeping the formatting it was
     typed with (#1202 stage 3).
@@ -7888,7 +9102,9 @@ class LettersPrintLayoutEditingSmoke(BaseGUITestCase):
         self.wait_for_node(name="New Document", roleName="push button").do_action(0)
         page_view = self.wait_for_node(name="Print Layout", roleName="text")
         zoom = lambda: self.trigger_snapshot("org.tunaos.letters")["view"]["zoom"]
+        pages = lambda: self.trigger_snapshot("org.tunaos.letters")["view"]["pages"]
         before = zoom()
+        before_pages = pages()
         (x, y), (w, h) = page_view.position, page_view.size
         # The view's extents are its whole scrolled size, wider than a
         # narrow window: its middle was off the window's right edge at
@@ -7900,6 +9116,9 @@ class LettersPrintLayoutEditingSmoke(BaseGUITestCase):
                         "keydown", "ctrl", "click", "4", "keyup", "ctrl"],
                        capture_output=True, timeout=5)
         self.wait_until(zoom, lambda z: z > before, description=f"the zoom to grow past {before}")
+        # Zoom only scales the display (LET-004): the laid-out pages — and
+        # their breaks — are unchanged.
+        self.assertEqual(pages(), before_pages, "zoom moved the page breaks")
         self.assertIsNone(self.process.poll(), "letters crashed zooming")
 
 
@@ -8152,6 +9371,46 @@ class LettersLossWarningCancelSmoke(BaseGUITestCase):
 
         with open(self._doc, "rb") as f:
             self.assertEqual(f.read(), self.ORIGINAL, "Cancel wrote the file anyway")
+        self.assertIsNone(self.process.poll(), "letters exited on Cancel")
+
+        # Still unsaved: closing asks about the edit instead of closing.
+        self.app.child(name="Close", roleName="push button").do_action(0)
+        self.wait_for_node(name="Discard", roleName="push button").do_action(0)
+        self.assertIsNotNone(self.wait_for_process_exit(), "Discard must close the window")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), self.ORIGINAL, "Discard wrote the file")
+
+    def test_cancel_on_a_save_as_loss_warning_writes_nothing(self):
+        """Save As across formats recomputes the loss report for the target
+        (LET-001): bold warns for `.txt`, and Cancel writes nothing — no
+        copy, no touched original — while the tab stays dirty.
+        """
+        from dogtail import rawinput, tree
+
+        self.wait_for_node(roleName="text")
+        rawinput.keyCombo("<Control>End")
+        rawinput.typeText("more")
+        rawinput.keyCombo("<Control>a")
+        self.app.child(name="Bold (Ctrl+B)", roleName="push button").do_action(0)
+        time.sleep(0.5)  # pacing: no state to wait on before the next input
+
+        target = os.path.join(self._dir, "copy.txt")
+        self.gapplication_action("org.tunaos.letters", "save-file-as")
+        entry = self.wait_for_condition(
+            lambda: tree.root.findChild(lambda n: n.name == "Name:" and n.roleName == "text"),
+            description="the Save As name entry",
+        )
+        entry.text = target
+        time.sleep(0.3)  # pacing: no state to wait on before the next input
+        tree.root.findChild(lambda n: n.name == "Save" and n.roleName == "push button").do_action(0)
+
+        self.wait_for_node(name="Save as Plain Text?")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        time.sleep(1.0)  # pacing: no state to wait on before the next input
+
+        self.assertFalse(os.path.exists(target), "Cancel wrote the copy anyway")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), self.ORIGINAL, "Cancel touched the original")
         self.assertIsNone(self.process.poll(), "letters exited on Cancel")
 
         # Still unsaved: closing asks about the edit instead of closing.
@@ -8653,62 +9912,6 @@ def ooxml_package_problems(path):
     return found
 
 
-class OpaquePartsSurviveMixin:
-    """A package holding parts the app doesn't model, a custom XML data
-    part and a thumbnail, is opened, edited and saved with Ctrl+S
-    (#1274). The edit is written; the parts are still there, byte for
-    byte; and the saved package's parts, content types and relationships
-    agree. Each app writes its document from its model, so before #1274
-    every save dropped them."""
-
-    corpus = None  # a callable returning the package's bytes
-    file_name = None
-
-    def setUp(self):
-        self._dir = self.temp_dir(prefix=f"{self.app_name}-opaque-")
-        self.isolate_autosave_state()
-        self.isolate_snapshot(prefix=f"{self.app_name}-opaque-snap-")
-        source = self.corpus()
-        self._doc = os.path.join(self._dir, self.file_name)
-        with open(self._doc, "wb") as f:
-            f.write(with_opaque_parts(source))
-        with open(self._doc, "rb") as f:
-            self._original = f.read()
-        self.launch_args = [self._doc]
-        super().setUp()
-
-    def _read(self, name):
-        import io
-        import zipfile
-        with zipfile.ZipFile(io.BytesIO(self._original)) as z:
-            return z.read(name)
-
-    def _assert_parts_survived(self, edited):
-        """Wait for the save to write `edited` into some part, then check
-        the carried parts and the package's consistency."""
-        import zipfile
-
-        def written():
-            try:
-                with open(self._doc, "rb") as f:
-                    if f.read() == self._original:
-                        return False
-                with zipfile.ZipFile(self._doc) as z:
-                    return any(edited.encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
-            except (OSError, zipfile.BadZipFile, KeyError):
-                return False
-        self.wait_until(written, bool, interval=0.25, description=f"the save to write {edited!r}")
-        with zipfile.ZipFile(self._doc) as z:
-            for name in ("customXml/item1.xml", "customXml/itemProps1.xml",
-                         "customXml/_rels/item1.xml.rels", "docProps/thumbnail.jpeg"):
-                self.assertIn(name, z.namelist(), f"the save dropped {name}")
-                self.assertEqual(z.read(name), self._read(name), f"the save changed {name}")
-            self.assertIn("docProps/thumbnail.jpeg", z.read("_rels/.rels").decode(),
-                          "the thumbnail's package relationship")
-        self.assertEqual(ooxml_package_problems(self._doc), [])
-        self.assertIsNone(self.process.poll(), f"{self.app_name} crashed saving")
-
-
 class LettersOpaquePartsSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
     app_name = "letters"
     corpus = staticmethod(lambda: minimal_docx_bytes("plain words"))
@@ -8793,6 +9996,54 @@ class LettersUnreadContentSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
         self._assert_parts_survived("macroedit")
         with zipfile.ZipFile(self._doc) as z:
             self.assertNotIn("word/vbaProject.bin", z.namelist(), "Save Anyway kept the macro it said it would drop")
+
+
+class LettersSourceReplacedSmoke(OpaquePartsSurviveMixin, BaseGUITestCase):
+    """Replacing the source file while it is open must never silently carry
+    the opened revision's parts into the replacement (LET-001).
+
+    Ctrl+S warns that the file changed on disk instead of saving quietly:
+    Cancel leaves the replacement bytes alone, and Save Anyway writes the
+    edit from the model without resurrecting the old carried parts.
+    """
+
+    app_name = "letters"
+    corpus = staticmethod(lambda: minimal_docx_bytes("plain words"))
+    file_name = "plain.docx"
+
+    def test_replaced_source_warns_and_never_carries_the_old_bytes(self):
+        import zipfile
+        from dogtail import rawinput
+        self.wait_until(lambda: self.app.child(roleName="text").text, bool, description="plain.docx to open")
+        replacement = minimal_docx_bytes("entirely different")
+        with open(self._doc, "wb") as f:
+            f.write(replacement)
+        rawinput.keyCombo("<Control>End")
+        rawinput.typeText(" replacededit")
+        self.wait_until(lambda: self.app.child(roleName="text").text, lambda t: "replacededit" in t,
+                        description="the typed text in the editor")
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="File Changed on Disk")
+        self.wait_for_node(name="Cancel", roleName="push button").do_action(0)
+        self.wait_until(lambda: self.app.findChild(lambda n: n.name == "Save Anyway" and n.showing, retry=False, requireResult=False),
+                        lambda n: n is None, description="the question to close")
+        with open(self._doc, "rb") as f:
+            self.assertEqual(f.read(), replacement, "Cancel wrote the file anyway")
+
+        rawinput.keyCombo("<Control>s")
+        self.wait_for_node(name="Save Anyway", roleName="push button").do_action(0)
+
+        def written():
+            try:
+                with zipfile.ZipFile(self._doc) as z:
+                    return any("replacededit".encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
+            except (OSError, zipfile.BadZipFile, KeyError):
+                return False
+        self.wait_until(written, bool, description="the save to write the edit")
+        with zipfile.ZipFile(self._doc) as z:
+            self.assertNotIn("customXml/item1.xml", z.namelist(),
+                             "the save carried parts from the replaced revision")
+        self.assertIsNone(self.process.poll(), "letters crashed saving over a replaced source")
 
 
 class OpenPathsMixin:

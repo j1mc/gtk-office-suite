@@ -179,13 +179,14 @@ fn blank_slide() -> Slide {
     Slide {
         title: String::new(),
         background: String::new(),
+        background_picture: None,
         objects: Vec::new(),
         notes: String::new(),
-        master_idx: None,
+        master_id: None,
         transition: Default::default(),
         builds: Vec::new(),
         ids: Default::default(),
-        layout: None,
+        layout_id: None,
     }
 }
 
@@ -212,71 +213,97 @@ fn object_at(controller: &DecksController, slide: usize, index: usize) -> Option
 }
 
 fn apply(controller: &DecksController, command: &Command) -> Result<(), String> {
+    // The driver names slides and objects by view position, as hit
+    // testing does; the controller resolves them to stable ids.
+    let sid = |slide: usize| controller.slide_id_at(slide);
+    let oid = |slide: usize, index: usize| controller.object_id_at(slide, index);
     match command {
         Command::AddSlide(index) => {
             controller.add_slide(*index, blank_slide());
         }
         Command::DeleteSlide(index) => {
-            controller.delete_slide(*index);
+            if let Some(id) = sid(*index) {
+                controller.delete_slide(id);
+            }
         }
         Command::MoveSlideUp(index) => {
-            controller.move_slide_up(*index);
+            if let Some(id) = sid(*index) {
+                controller.move_slide_up(id);
+            }
         }
         Command::MoveSlideDown(index) => {
-            controller.move_slide_down(*index);
+            if let Some(id) = sid(*index) {
+                controller.move_slide_down(id);
+            }
         }
         Command::AddTextBox { slide, text } => {
-            controller.add_object(*slide, text_box(text, 10.0, 10.0));
+            if let Some(id) = sid(*slide) {
+                controller.add_object(id, text_box(text, 10.0, 10.0));
+            }
         }
         Command::AddRect { slide } => {
-            controller.add_object(
-                *slide,
-                SlideObject::Rect { x: 20.0, y: 20.0, w: 100.0, h: 80.0, rotation: 0.0 },
-            );
+            if let Some(id) = sid(*slide) {
+                controller.add_object(
+                    id,
+                    SlideObject::Rect { x: 20.0, y: 20.0, w: 100.0, h: 80.0, rotation: 0.0 },
+                );
+            }
         }
         Command::AddCircle { slide } => {
-            controller.add_object(
-                *slide,
-                SlideObject::Circle { x: 50.0, y: 50.0, r: 30.0, rotation: 0.0 },
-            );
+            if let Some(id) = sid(*slide) {
+                controller.add_object(
+                    id,
+                    SlideObject::Circle { x: 50.0, y: 50.0, r: 30.0, rotation: 0.0 },
+                );
+            }
         }
         Command::DeleteObject { slide, index } => {
-            if let Some(object) = object_at(controller, *slide, *index) {
-                controller.delete_object(*slide, *index, object);
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                controller.delete_object(id, oid);
             }
         }
         Command::MoveObject { slide, index, dx, dy } => {
-            controller.move_object(*slide, *index, *dx, *dy);
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                controller.move_object(id, oid, *dx, *dy);
+            }
         }
         Command::ResizeObject { slide, index, w, h } => {
-            if let Some(object) = object_at(controller, *slide, *index) {
-                let (width, height) = size(&object);
-                let old = (object.x(), object.y(), width, height);
-                controller.resize_object(*slide, *index, old, (old.0, old.1, *w, *h));
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                if let Some(object) = object_at(controller, *slide, *index) {
+                    let (width, height) = size(&object);
+                    let old = (object.x(), object.y(), width, height);
+                    controller.resize_object(id, oid, (old.0, old.1, *w, *h));
+                }
             }
         }
         Command::RotateObject { slide, index, angle } => {
-            if let Some(object) = object_at(controller, *slide, *index) {
-                controller.rotate_object(*slide, *index, object.rotation(), *angle);
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                controller.rotate_object(id, oid, *angle);
             }
         }
         Command::ChangeText { slide, index, text } => {
-            if let Some(SlideObject::TextBox { text: old, .. }) =
-                object_at(controller, *slide, *index)
-            {
-                controller.change_text(*slide, *index, old, text.clone());
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                if let Some(SlideObject::TextBox { .. }) = object_at(controller, *slide, *index) {
+                    controller.change_text(id, oid, text.clone());
+                }
             }
         }
         Command::Align { slide, mode } => {
-            let indices: Vec<usize> = (0..object_count(controller, *slide)).collect();
-            controller.align_objects(*slide, &indices, *mode);
+            if let Some(id) = sid(*slide) {
+                let oids: Vec<u64> = (0..object_count(controller, *slide)).filter_map(|i| oid(*slide, i)).collect();
+                controller.align_objects(id, &oids, *mode);
+            }
         }
         Command::Distribute { slide, mode } => {
-            let indices: Vec<usize> = (0..object_count(controller, *slide)).collect();
-            controller.distribute_objects(*slide, &indices, *mode);
+            if let Some(id) = sid(*slide) {
+                let oids: Vec<u64> = (0..object_count(controller, *slide)).filter_map(|i| oid(*slide, i)).collect();
+                controller.distribute_objects(id, &oids, *mode);
+            }
         }
         Command::ZOrder { slide, index, op } => {
-            controller.z_order_object(*slide, *index, *op);
+            if let (Some(id), Some(oid)) = (sid(*slide), oid(*slide, *index)) {
+                controller.z_order_object(id, oid, *op);
+            }
         }
         Command::Undo => {
             controller.undo();
@@ -503,7 +530,7 @@ fn the_run_invariant_rejects_a_text_box_that_disagrees_with_itself() {
     // An invariant that cannot fail reads exactly like one that never
     // fires, so this shows the check catching what it is there for.
     let controller = fresh();
-    controller.add_object(0, text_box("hello", 0.0, 0.0));
+    controller.add_object(controller.slide_id_at(0).unwrap(), text_box("hello", 0.0, 0.0));
     assert!(check_invariants(&controller).is_ok());
 
     {

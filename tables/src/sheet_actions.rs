@@ -87,6 +87,30 @@ pub(crate) fn refuse_locked(ctl: &Ctl, toasts: &adw::ToastOverlay, row: usize, c
     refused
 }
 
+/// Run one user operation and report the controller's decision, never a
+/// second UI policy. Comparing operation counters cannot reuse an old denial.
+pub(crate) fn apply(
+    ctl: &Ctl,
+    grid: &gtk::DrawingArea,
+    edit: impl FnOnce(&mut WorkbookController),
+) -> bool {
+    let accepted = {
+        let mut controller = ctl.borrow_mut();
+        let before = controller.protection_rejection_count();
+        edit(&mut controller);
+        controller.protection_rejection_count() == before
+    };
+    if !accepted {
+        // The grid lives inside the window's shared native toast overlay.
+        if let Some(toasts) = grid.ancestor(adw::ToastOverlay::static_type())
+            .and_then(|widget| widget.downcast::<adw::ToastOverlay>().ok())
+        {
+            toast(&toasts, PROTECTED);
+        }
+    }
+    accepted
+}
+
 pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::DrawingArea, toasts: &adw::ToastOverlay, refresh: Rc<dyn Fn()>) {
     // Bold, Italic and Underline toggle on the selection, from the active
     // cell's style, as in every other spreadsheet. Tables had no such
@@ -98,16 +122,14 @@ pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::Dra
         ("underline", "Underline", |s| &mut s.underline),
     ];
     for (name, description, field) in flags {
-        let (ctl, grid, toasts, refresh) = (ctl.clone(), grid.clone(), toasts.clone(), refresh.clone());
+        let (ctl, grid, refresh) = (ctl.clone(), grid.clone(), refresh.clone());
         let act = gio::SimpleAction::new(name, None);
         act.connect_activate(move |_, _| {
-            if ctl.borrow().sheet_is_protected() {
-                toast(&toasts, PROTECTED);
-                return;
-            }
             let (mut style, _) = ctl.borrow().active_style();
             let on = !*field(&mut style);
-            ctl.borrow_mut().format_selection(description, move |s| *field(s) = on);
+            if !apply(&ctl, &grid, |c| c.format_selection(description, move |s| *field(s) = on)) {
+                return;
+            }
             grid.queue_draw();
             refresh();
         });
@@ -122,22 +144,22 @@ pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::Dra
         ("delete-rows", Axis::Rows, false),
         ("delete-cols", Axis::Cols, false),
     ] {
-        let (ctl, grid, toasts, refresh) = (ctl.clone(), grid.clone(), toasts.clone(), refresh.clone());
+        let (ctl, grid, refresh) = (ctl.clone(), grid.clone(), refresh.clone());
         let act = gio::SimpleAction::new(name, None);
         act.connect_activate(move |_, _| {
-            if ctl.borrow().sheet_is_protected() {
-                toast(&toasts, PROTECTED);
-                return;
-            }
             let (top, left, bottom, right) = ctl.borrow().state.borrow().sheet().selection_rect();
             let (at, count) = match axis {
                 Axis::Rows => (top, bottom - top + 1),
                 Axis::Cols => (left, right - left + 1),
             };
-            if insert {
-                ctl.borrow_mut().insert_lines(axis, at, count);
-            } else {
-                ctl.borrow_mut().delete_lines(axis, at, count);
+            if !apply(&ctl, &grid, |c| {
+                if insert {
+                    c.insert_lines(axis, at, count);
+                } else {
+                    c.delete_lines(axis, at, count);
+                }
+            }) {
+                return;
             }
             refresh();
             grid.queue_draw();
@@ -158,7 +180,9 @@ pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::Dra
                 (sheet.frozen_rows, sheet.selection_rect().0)
             };
             let rows = if frozen > 0 { 0 } else { top.max(1) };
-            ctl.borrow_mut().mutate_sheet("Freeze Rows", move |sheet| sheet.frozen_rows = rows);
+            if !apply(&ctl, &grid, |c| { c.mutate_sheet("Freeze Rows", move |sheet| sheet.frozen_rows = rows); }) {
+                return;
+            }
             toast(&toasts, if rows > 0 { "Rows frozen" } else { "Rows unfrozen" });
             refresh();
             grid.queue_draw();

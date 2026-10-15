@@ -19,7 +19,7 @@ fn sheet_from(
     const COLS: usize = 10;
     let mut engine = TablesEngine::new(ROWS, COLS)?;
     for (row, col, value) in cells {
-        engine.set_cell_text(*row, *col, value);
+        engine.set_cell_text(*row, *col, value)?;
     }
     engine.evaluate();
     let mut sheet = SheetModel::new(name, ROWS, COLS, sheet_id);

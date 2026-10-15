@@ -145,7 +145,9 @@ pub(crate) fn read_page_layouts(xml: &str, scale: (f64, f64)) -> Vec<PageLayout>
                 cur = Some(PageLayout {
                     name,
                     master: attr(&e, "decks:master"),
-                    layout: Layout { name: display, kind, background: None, shapes: Vec::new(), placeholders: Vec::new() },
+                    // Ids are stamped by the caller from the session space
+                    // (DCK-005): 0 here means not assigned yet.
+                    layout: Layout { id: 0, name: display, kind, background: None, shapes: Vec::new(), placeholders: Vec::new() },
                 });
             }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "presentation:placeholder" => {
@@ -153,11 +155,15 @@ pub(crate) fn read_page_layouts(xml: &str, scale: (f64, f64)) -> Vec<PageLayout>
                 let Some(role) = attr(&e, "presentation:object").as_deref().and_then(Placeholder::from_odf) else { continue };
                 let g = |n: &str| attr(&e, n).and_then(|v| crate::odp::parse_length_pt(&v)).unwrap_or(0.0);
                 pl.layout.placeholders.push(LayoutPlaceholder {
+                    id: 0,
                     role,
                     x: g("svg:x") * scale.0,
                     y: g("svg:y") * scale.1,
                     w: g("svg:width") * scale.0,
                     h: g("svg:height") * scale.1,
+                    // ODF has no placeholder indices: match by role alone.
+                    source_ty: String::new(),
+                    source_idx: None,
                 });
             }
             Ok(Event::End(e)) if e.name().as_ref() == "style:presentation-page-layout" => {
@@ -182,11 +188,13 @@ mod tests {
     #[test]
     fn page_layouts_round_trip() {
         let m = MasterSlide {
+            id: 9,
             name: "M".into(),
             background: "#ffffff".into(),
             default_font: "Sans".into(),
             shapes: vec![],
-            page_emu: None,
+            theme_id: None,
+            color_map: Default::default(),
             layouts: crate::layouts::standard(),
         };
         let xml = format!(

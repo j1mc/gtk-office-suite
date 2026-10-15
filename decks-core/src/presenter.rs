@@ -210,15 +210,28 @@ pub struct MissingMedia {
     pub path: String,
 }
 
-/// Return media that would make a presentation incomplete. Missing media is
-/// a structured readiness error so the UI can identify each file and offer a
-/// repair action; it must not become a silent blank slide.
+/// Return missing image files for each affected slide, including its
+/// background picture and decorations on its referenced master and layout.
+/// Image paths are already resolved by import/insertion (including
+/// extensionless extracted assets), as for rendering.
+/// Unused masters/layouts are not part of the show. This only checks presence,
+/// not whether an existing file can be decoded.
 pub fn missing_media(deck: &Deck) -> Vec<MissingMedia> {
     deck.slides.iter().enumerate().flat_map(|(slide_index, slide)| {
-        slide.objects.iter().filter_map(move |object| {
-            let SlideObject::Image { path, .. } = object else { return None; };
-            (!Path::new(path).is_file()).then(|| MissingMedia { slide_index, path: path.clone() })
-        })
+        let master = deck.master_of(slide);
+        let layout = deck.layout_of(slide);
+        // Match effective_master's additive decorations without cloning a master.
+        let pictures = slide.objects.iter()
+            .chain(master.into_iter().flat_map(|m| m.shapes.iter()))
+            .chain(layout.into_iter().flat_map(|l| l.shapes.iter()))
+            .filter_map(|object| match object {
+                SlideObject::Image { path, .. } => Some(path),
+                _ => None,
+            });
+        slide.background_picture.as_ref().map(|p| &p.path).into_iter()
+            .chain(pictures)
+            .filter(|path| !Path::new(path).is_file())
+            .map(move |path| MissingMedia { slide_index, path: path.clone() })
     }).collect()
 }
 
@@ -265,10 +278,12 @@ mod tests {
     fn deck() -> Deck {
         Deck {
             slides: vec![
-                Slide { title: "Opening".into(), background: "#fff".into(), objects: vec![], notes: "Welcome".into(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None },
-                Slide { title: "Details".into(), background: "#fff".into(), objects: vec![], notes: "Explain this".into(), master_idx: Some(0), transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout: None },
+                Slide { title: "Opening".into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: "Welcome".into(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None },
+                Slide { title: "Details".into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: "Explain this".into(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None },
             ],
             masters: vec![],
+            page_size: None,
+            themes: Vec::new(),
         }
     }
 
@@ -352,5 +367,72 @@ mod tests {
         let mut deck = deck();
         deck.slides[1].objects.push(SlideObject::Image { path: "/missing/video.mp4".into(), x: 0.0, y: 0.0, w: 1.0, h: 1.0, rotation: 0.0, crop: Default::default() });
         assert_eq!(missing_media(&deck), vec![MissingMedia { slide_index: 1, path: "/missing/video.mp4".into() }]);
+    }
+
+    /// A slide's background picture is part of what a show draws, so a
+    /// missing one is named like any other picture (DCK-004).
+    #[test]
+    fn a_missing_background_picture_is_reported() {
+        let mut deck = deck();
+        deck.slides[0].background_picture = Some(crate::engine::BackgroundPicture { path: "/missing/bg.png".into(), fill: Default::default() });
+        assert_eq!(missing_media(&deck), vec![MissingMedia { slide_index: 0, path: "/missing/bg.png".into() }]);
+    }
+
+    fn image(path: &str) -> SlideObject {
+        SlideObject::Image { path: path.into(), x: 0.0, y: 0.0, w: 1.0, h: 1.0, rotation: 0.0, crop: Default::default() }
+    }
+
+    #[test]
+    fn missing_media_includes_only_referenced_master_and_layout_artwork() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let mut deck = deck();
+        deck.masters.push(crate::engine::MasterSlide {
+            id: 0, name: "Master".into(), background: "#fff".into(), default_font: "Sans".into(),
+            shapes: Vec::new(), theme_id: None, color_map: Default::default(), layouts: Vec::new(),
+        });
+        deck.masters[0].shapes.push(image(&path("master")));
+        deck.masters[0].layouts = crate::layouts::standard();
+        deck.masters[0].layouts[0].shapes.push(image(&path("layout")));
+        deck.masters[0].layouts[1].shapes.push(image(&path("unused-layout")));
+        let mut unused = deck.masters[0].clone();
+        unused.shapes = vec![image(&path("unused-master"))];
+        deck.masters.push(unused);
+        crate::ops::ensure_all_ids(&mut deck.slides, &mut deck.masters);
+        deck.slides[0].master_id = Some(deck.masters[0].id);
+        deck.slides[1].master_id = Some(deck.masters[0].id);
+        deck.slides[0].layout_id = Some(deck.masters[0].layouts[0].id);
+        deck.slides[1].objects.push(image(&path("slide")));
+        assert_eq!(missing_media(&deck), vec![
+            MissingMedia { slide_index: 0, path: path("master") },
+            MissingMedia { slide_index: 0, path: path("layout") },
+            MissingMedia { slide_index: 1, path: path("slide") },
+            MissingMedia { slide_index: 1, path: path("master") },
+        ]);
+        deck.slides[0].layout_id = Some(u64::MAX);
+        deck.slides[1].master_id = Some(u64::MAX);
+        assert_eq!(missing_media(&deck), vec![
+            MissingMedia { slide_index: 0, path: path("master") },
+            MissingMedia { slide_index: 1, path: path("slide") },
+        ]);
+        // `None` inherits the first master; only an unknown id excludes it.
+        deck.slides[0].master_id = Some(u64::MAX);
+        deck.slides[1].objects.clear();
+        assert!(missing_media(&deck).is_empty());
+    }
+
+    #[test]
+    fn missing_media_uses_resolved_files_and_detects_removed_assets() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        let mut deck = deck();
+        deck.slides[0].objects.push(image(&path));
+        assert!(missing_media(&deck).is_empty(), "extensionless extracted assets are files too");
+        file.close().unwrap();
+        assert_eq!(missing_media(&deck), vec![MissingMedia { slide_index: 0, path }]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        deck.slides[0].objects = vec![image(&path)];
+        assert_eq!(missing_media(&deck), vec![MissingMedia { slide_index: 0, path }], "a directory is not an image file");
     }
 }

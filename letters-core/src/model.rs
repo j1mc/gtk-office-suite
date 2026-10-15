@@ -182,6 +182,123 @@ impl StylePatch {
     }
 }
 
+fn is_left(a: &Alignment) -> bool {
+    *a == Alignment::Left
+}
+
+/// Where the text after a tab stop sits relative to the stop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TabAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+    /// On the decimal separator (OOXML `decimal`, ODF `char`).
+    Decimal,
+}
+
+/// What fills the gap a tab jump leaves (OOXML `w:leader`, ODF
+/// `style:leader-style`/`style:leader-text`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TabLeader {
+    #[default]
+    None,
+    Dot,
+    Hyphen,
+    Underscore,
+    MiddleDot,
+}
+
+/// One tab stop: where the text after a tab goes, how it aligns there,
+/// and what fills the gap. Positions are points from the paragraph's
+/// left edge, as `ParaStyle::tab_stops_pt` keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TabStop {
+    pub pos_pt: f64,
+    #[serde(default)]
+    pub align: TabAlign,
+    #[serde(default)]
+    pub leader: TabLeader,
+}
+
+impl TabStop {
+    /// A plain left-aligned stop with no leader, as the ruler and older
+    /// documents (which stored bare positions) mean.
+    pub fn left(pos_pt: f64) -> Self {
+        Self { pos_pt, align: TabAlign::Left, leader: TabLeader::None }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TabStop {
+    /// Older documents stored bare positions (`[72.0, 144.0]`); those
+    /// read as plain left-aligned stops.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            Pos(f64),
+            Full { pos_pt: f64, #[serde(default)] align: TabAlign, #[serde(default)] leader: TabLeader },
+        }
+        Ok(match Compat::deserialize(deserializer)? {
+            Compat::Pos(pos_pt) => TabStop::left(pos_pt),
+            Compat::Full { pos_pt, align, leader } => TabStop { pos_pt, align, leader },
+        })
+    }
+}
+
+/// A paragraph's line height beyond the proportional multiple
+/// (`ParaStyle::line_spacing`): OOXML's `w:lineRule="exact"` and
+/// `"atLeast"`, in points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LineHeight {
+    /// Every line is exactly this tall; taller content overflows into
+    /// the next line, as Word and Writer draw it.
+    Exact(f64),
+    /// Every line is at least this tall, and taller when its content
+    /// needs it.
+    Minimum(f64),
+}
+
+/// One side of a paragraph's border (OOXML `w:pBdr`, ODF `fo:border-*`):
+/// its look, its colour as RRGGBB hex, and its width in points.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParaBorder {
+    pub style: BorderStyle,
+    pub color: String,
+    pub width_pt: f64,
+}
+
+/// A paragraph border's look. Only the looks both formats name the same
+/// way are modelled; anything else (wave, triple, inset) is a loss the
+/// save dialog reports (`crate::loss`), never a silent restyle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BorderStyle {
+    Single,
+    Dashed,
+    Dotted,
+    Double,
+}
+
+/// A paragraph's borders, one optional edge each (OOXML `w:pBdr`,
+/// ODF `fo:border-top` and its siblings). Empty is no border.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParaBorders {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<ParaBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<ParaBorder>,
+}
+
+impl ParaBorders {
+    pub fn is_empty(&self) -> bool {
+        self.top.is_none() && self.left.is_none() && self.bottom.is_none() && self.right.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Alignment {
     #[default]
@@ -243,8 +360,14 @@ pub struct ParaStyle {
     /// "(%1)", ODF's num-prefix and num-suffix. `None` is "N.".
     #[serde(default)]
     pub list_label: Option<ListLabel>,
-    /// Line spacing multiplier (1.0, 1.15, 1.5, 2.0).
+    /// Line spacing multiplier (1.0, 1.15, 1.5, 2.0). Applies to every
+    /// line unless `line_height` fixes the height.
     pub line_spacing: f32,
+    /// A fixed or minimum line height, in points (OOXML `w:lineRule`
+    /// exact/atLeast, ODF `fo:line-height` length /
+    /// `style:line-height-at-least`). `None` is purely proportional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<LineHeight>,
     /// Paragraph layout values in points. Tabs are absolute stops from the
     /// paragraph's left edge, also in points.
     #[serde(default)]
@@ -258,7 +381,7 @@ pub struct ParaStyle {
     #[serde(default)]
     pub first_line_indent_pt: f64,
     #[serde(default)]
-    pub tab_stops_pt: Vec<f64>,
+    pub tab_stops_pt: Vec<TabStop>,
     /// Code-block membership: Some(language) marks this paragraph as a line
     /// of a code block ("" = no language). Consecutive code paragraphs with
     /// the same language form one block; paragraphs never contain newlines,
@@ -285,6 +408,25 @@ pub struct ParaStyle {
     /// Headings are kept with what follows whatever this says.
     #[serde(default)]
     pub keep_with_next: bool,
+    /// Keep this paragraph's lines on one page (Word's keepLines, ODF's
+    /// fo:keep-together): a paragraph that fits a page never splits. One
+    /// taller than a page still splits, as Word splits it.
+    #[serde(default)]
+    pub keep_lines: bool,
+    /// Widow/orphan control for this paragraph alone: `None` is the
+    /// document default (controlled, two and two), `Some(false)` lets a
+    /// split strand single lines (Word's widowControl off, ODF
+    /// fo:widows/fo:orphans of one), `Some(true)` controls explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widow_control: Option<bool>,
+    /// Paragraph shading fill as RRGGBB hex (OOXML `w:shd`, ODF
+    /// fo:background-color on the paragraph style). `None` is unshaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shading: Option<String>,
+    /// Paragraph borders, one edge each (OOXML `w:pBdr`, ODF
+    /// `fo:border-*`). Empty is no border.
+    #[serde(default, skip_serializing_if = "ParaBorders::is_empty")]
+    pub borders: ParaBorders,
     /// A table of contents entry for a heading of this level (1..=9): its
     /// title, a tab and its page number, as `crate::toc` generates it.
     /// Consecutive entries form one table of contents, which is a field in
@@ -302,7 +444,7 @@ pub struct TableCell {
 
 impl Default for ParaStyle {
     fn default() -> Self {
-        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, table_cell: None, keep_with_next: false, toc: None }
+        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, line_height: None, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, table_cell: None, keep_with_next: false, keep_lines: false, widow_control: None, shading: None, borders: ParaBorders::default(), toc: None }
     }
 }
 
@@ -402,6 +544,21 @@ pub struct Document {
     /// Page header/footer text; "{page}" substitutes the page number.
     pub header: Option<String>,
     pub footer: Option<String>,
+    /// The pictures in the header, above its text (a letterhead's logo):
+    /// image runs (`RunStyle::image`, its extent, its alt text as the
+    /// run's text, and an anchor for one that floats).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_pictures: Vec<Run>,
+    /// The pictures in the footer, above its text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footer_pictures: Vec<Run>,
+    /// How the header's text is aligned (its first paragraph with text):
+    /// a bill's "FINANCE BILL" at the right, a classification centred.
+    #[serde(default, skip_serializing_if = "is_left")]
+    pub header_alignment: Alignment,
+    /// How the footer's text is aligned.
+    #[serde(default, skip_serializing_if = "is_left")]
+    pub footer_alignment: Alignment,
     /// Page size and margins; None = application default (A4).
     pub page: Option<PageGeometry>,
     /// The body font the document's own styles name; runs without a font
@@ -425,10 +582,35 @@ pub struct Document {
     /// row that sizes to its content), as the file gave them.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_rows: std::collections::BTreeMap<u32, Vec<Option<RowHeight>>>,
+    /// Each table's merged cells, by table id: a cell that spans more than
+    /// one row or column, and the grid positions it covers. A covered
+    /// position keeps its (empty) paragraph, so the grid stays whole.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_spans: std::collections::BTreeMap<u32, Vec<CellSpan>>,
     /// Each table's shaded cells, by table id: a form's grey header cells
     /// (`w:shd`, `fo:background-color`). A cell not listed is unshaded.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_fills: std::collections::BTreeMap<u32, Vec<CellFill>>,
+}
+
+/// A merged table cell: the cell at `row`, `col` spans `rows` rows and
+/// `cols` columns (each at least 1, one of them more), as Word's
+/// `w:gridSpan` and `w:vMerge` and ODF's `table:number-columns-spanned`
+/// and `table:number-rows-spanned` merge them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellSpan {
+    pub row: u32,
+    pub col: u32,
+    pub rows: u32,
+    pub cols: u32,
+}
+
+impl CellSpan {
+    /// Whether the span covers grid position `row`, `col`, its own
+    /// included.
+    pub fn contains(&self, row: u32, col: u32) -> bool {
+        (self.row..self.row + self.rows).contains(&row) && (self.col..self.col + self.cols).contains(&col)
+    }
 }
 
 /// A table cell's background colour, as six hex digits (`D9D9D9`).
@@ -520,12 +702,17 @@ impl Document {
             footnotes: vec![],
             header: None,
             footer: None,
+            header_pictures: Vec::new(),
+            footer_pictures: Vec::new(),
+            header_alignment: Alignment::Left,
+            footer_alignment: Alignment::Left,
             page: None,
             base_font: BaseFont::default(),
             heading_styles: Vec::new(),
             comments: Vec::new(),
             table_columns: Default::default(),
             table_rows: Default::default(),
+            table_spans: Default::default(),
             table_fills: Default::default(),
         }
     }
@@ -795,6 +982,7 @@ impl Document {
         // A new table has no file widths, even under the id of a deleted one.
         self.table_columns.remove(&table);
         self.table_rows.remove(&table);
+        self.table_spans.remove(&table);
         self.table_fills.remove(&table);
         if rows == 0 || cols == 0 {
             return table;
@@ -836,6 +1024,44 @@ impl Document {
         self.paragraphs = rest;
     }
 
+    /// Move `table`'s merged cells for `count` rows or columns inserted at
+    /// `at` (`count` < 0: deleted from `at`). `axis` picks a span's start
+    /// and extent along the rows or the columns. A span the change falls
+    /// inside grows or shrinks; one that no longer spans anything is gone.
+    fn shift_spans(&mut self, table: u32, axis: fn(&mut CellSpan) -> (&mut u32, &mut u32), at: u32, count: i64) {
+        let Some(spans) = self.table_spans.get_mut(&table) else { return };
+        for span in spans.iter_mut() {
+            let (start, len) = axis(span);
+            let (s, e) = (i64::from(*start), i64::from(*start) + i64::from(*len));
+            let (s, e) = if count >= 0 {
+                let at = i64::from(at);
+                match () {
+                    _ if at <= s => (s + count, e + count),
+                    _ if at < e => (s, e + count),
+                    _ => (s, e),
+                }
+            } else {
+                // Rows or columns `at..end` go; what of the span is left
+                // closes up around them.
+                let (from, to) = (i64::from(at), i64::from(at) - count);
+                let gone = (e.min(to) - s.max(from)).max(0);
+                let new_s = if s >= to { s + count } else { s.min(from) };
+                (new_s, new_s + (e - s - gone))
+            };
+            *start = s.max(0) as u32;
+            *len = (e - s).max(0) as u32;
+        }
+        spans.retain(|s| s.rows >= 1 && s.cols >= 1 && (s.rows > 1 || s.cols > 1));
+        if spans.is_empty() {
+            self.table_spans.remove(&table);
+        }
+    }
+
+    /// The merged cell of `table` covering grid position `row`, `col`.
+    pub fn span_at(&self, table: u32, row: u32, col: u32) -> Option<CellSpan> {
+        self.table_spans.get(&table)?.iter().copied().find(|s| s.contains(row, col))
+    }
+
     pub fn table_dimensions(&self, table: u32) -> Option<(u32, u32)> {
         let cells = self.paragraphs.iter().filter_map(|p| p.style.table_cell)
             .filter(|c| c.table == table).collect::<Vec<_>>();
@@ -862,6 +1088,7 @@ impl Document {
             let at = (at as usize).min(heights.len());
             heights.splice(at..at, std::iter::repeat_n(None, count as usize));
         }
+        self.shift_spans(table, |s| (&mut s.row, &mut s.rows), at, count as i64);
         self.move_fills(table, |row, col| Some((if row >= at { row + count } else { row }, col)));
         self.reflow_table(table);
         true
@@ -880,6 +1107,7 @@ impl Document {
             style: ParaStyle { table_cell: Some(TableCell { table, row, col: at + col }), ..Default::default() },
             runs: Vec::new(),
         })));
+        self.shift_spans(table, |s| (&mut s.col, &mut s.cols), at, count as i64);
         self.move_fills(table, |row, col| Some((row, if col >= at { col + count } else { col })));
         self.reflow_table(table);
         true
@@ -899,6 +1127,7 @@ impl Document {
             let len = heights.len();
             heights.drain((at as usize).min(len)..(end as usize).min(len));
         }
+        self.shift_spans(table, |s| (&mut s.row, &mut s.rows), at, -(count as i64));
         self.move_fills(table, |row, col| match row {
             r if (at..end).contains(&r) => None,
             r if r >= end => Some((r - count, col)),
@@ -920,6 +1149,7 @@ impl Document {
             if cell.col >= end { cell.col -= count; p.style.table_cell = Some(cell); }
             true
         });
+        self.shift_spans(table, |s| (&mut s.col, &mut s.cols), at, -(count as i64));
         self.move_fills(table, |row, col| match col {
             c if (at..end).contains(&c) => None,
             c if c >= end => Some((row, c - count)),
@@ -1037,7 +1267,7 @@ pub struct ParagraphLayout {
     pub left_indent_pt: f64,
     pub right_indent_pt: f64,
     pub first_line_indent_pt: f64,
-    pub tab_stops_pt: Vec<f64>,
+    pub tab_stops_pt: Vec<TabStop>,
 }
 
 // ── Cursor style readout (status bar) ─────────────────────────────────
@@ -1133,6 +1363,30 @@ mod structured_editing_tests {
     }
 
     #[test]
+    fn merged_cells_move_and_resize_with_rows_and_columns() {
+        let mut doc = Document::from_plain_text("after");
+        let t = doc.insert_table_at(0, 4, 4);
+        let span = |row, col, rows, cols| CellSpan { row, col, rows, cols };
+        doc.table_spans.insert(t, vec![span(0, 0, 1, 4), span(1, 1, 2, 2)]);
+        // A row inside the tall cell makes it taller; one above moves it.
+        assert!(doc.insert_table_rows(t, 2, 1));
+        assert_eq!(doc.table_spans[&t], [span(0, 0, 1, 4), span(1, 1, 3, 2)]);
+        assert!(doc.insert_table_rows(t, 0, 1));
+        assert_eq!(doc.table_spans[&t], [span(1, 0, 1, 4), span(2, 1, 3, 2)]);
+        // A column inside both widens them.
+        assert!(doc.insert_table_cols(t, 2, 1));
+        assert_eq!(doc.table_spans[&t], [span(1, 0, 1, 5), span(2, 1, 3, 3)]);
+        // Deleting the tall cell's first row leaves the rest of it, from
+        // where the row was.
+        assert!(doc.delete_table_rows(t, 2, 1));
+        assert_eq!(doc.table_spans[&t], [span(1, 0, 1, 5), span(2, 1, 2, 3)]);
+        // Columns down to one: the heading spans nothing and is gone.
+        assert!(doc.delete_table_cols(t, 1, 4));
+        assert!(!doc.table_spans.contains_key(&t), "{:?}", doc.table_spans);
+        assert_eq!(doc.span_at(t, 2, 0), None);
+    }
+
+    #[test]
     fn table_rows_and_columns_are_editable_without_flattening_cells() {
         let mut doc = Document::from_plain_text("");
         doc.paragraphs[0].style.table_cell = Some(TableCell { table: 7, row: 0, col: 0 });
@@ -1157,13 +1411,44 @@ mod structured_editing_tests {
         let mut doc = Document::from_plain_text("layout");
         doc.set_paragraph_layout(0, ParagraphLayout {
             space_before_pt: -2.0, space_after_pt: 8.0, left_indent_pt: 24.0,
-            right_indent_pt: 12.0, first_line_indent_pt: -18.0, tab_stops_pt: vec![72.0, 144.0],
+            right_indent_pt: 12.0, first_line_indent_pt: -18.0, tab_stops_pt: vec![TabStop::left(72.0), TabStop::left(144.0)],
         });
         let style = &doc.paragraphs[0].style;
         assert_eq!(style.space_before_pt, 0.0);
         assert_eq!(style.left_indent_pt, 24.0);
         assert_eq!(style.first_line_indent_pt, -18.0);
-        assert_eq!(style.tab_stops_pt, vec![72.0, 144.0]);
+        assert_eq!(style.tab_stops_pt, vec![TabStop::left(72.0), TabStop::left(144.0)]);
+    }
+
+    #[test]
+    fn legacy_bare_tab_positions_read_as_plain_left_stops() {
+        let style: ParaStyle = serde_json::from_str(
+            r#"{"alignment":"Left","list":"None","line_spacing":1.0,"tab_stops_pt":[72.0,144.0],"block_quote":false,"page_break_before":false}"#,
+        )
+        .expect("older snapshots stored bare positions");
+        assert_eq!(style.tab_stops_pt, vec![TabStop::left(72.0), TabStop::left(144.0)]);
+        assert!(!style.keep_lines);
+        assert_eq!(style.widow_control, None);
+        assert_eq!(style.line_height, None);
+        assert_eq!(style.shading, None);
+        assert!(style.borders.is_empty());
+    }
+
+    #[test]
+    fn new_typography_fields_round_trip_through_json() {
+        let mut style = ParaStyle::default();
+        style.keep_lines = true;
+        style.widow_control = Some(false);
+        style.line_height = Some(LineHeight::Minimum(18.0));
+        style.shading = Some("D9D9D9".to_string());
+        style.borders = ParaBorders {
+            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75 }),
+            ..ParaBorders::default()
+        };
+        style.tab_stops_pt = vec![TabStop { pos_pt: 72.0, align: TabAlign::Right, leader: TabLeader::Dot }];
+        let json = serde_json::to_string(&style).expect("style serializes");
+        let back: ParaStyle = serde_json::from_str(&json).expect("style deserializes");
+        assert_eq!(back, style);
     }
 }
 

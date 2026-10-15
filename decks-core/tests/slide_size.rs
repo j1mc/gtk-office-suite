@@ -19,7 +19,7 @@ const SIZES: [(f64, f64); 2] = [(9_144_000.0, 6_858_000.0), (7_200_000.0, 7_200_
 /// A deck on a `size` slide: a full-bleed rectangle and a 24 pt text box.
 fn deck(size: Option<(f64, f64)>) -> Deck {
     let mut d = Deck::new();
-    d.masters[0].page_emu = size;
+    d.page_size = size;
     d.slides[0].objects = vec![
         SlideObject::Rect { x: 0.0, y: 0.0, w: 960.0, h: 540.0, rotation: 0.0 },
         SlideObject::TextBox {
@@ -74,12 +74,12 @@ fn a_4_3_or_custom_deck_keeps_its_size_through_open_save_and_reopen() {
 
         // Open, save, reopen.
         let opened = read_pptx(source.to_str().unwrap()).unwrap();
-        assert_eq!(opened.masters[0].page_emu, Some(size), "the size is kept on open");
+        assert_eq!(opened.page_size, Some(size), "the size is kept on open");
         let saved = dir.path().join("saved.pptx");
         write_pptx(saved.to_str().unwrap(), &opened).unwrap();
         assert_eq!(declared(&saved), size, "the save writes the source's size, not ours");
         let reopened = read_pptx(saved.to_str().unwrap()).unwrap();
-        assert_eq!(reopened.masters[0].page_emu, Some(size));
+        assert_eq!(reopened.page_size, Some(size));
 
         // The contents are where they were, relative to the slide: the
         // full-bleed rectangle still covers it, in the file and the model.
@@ -112,7 +112,7 @@ fn a_deck_of_the_default_size_is_written_as_before() {
     write_pptx(path.to_str().unwrap(), &deck(None)).unwrap();
     assert_eq!(declared(&path), (9_144_000.0, 5_143_500.0));
     let back = read_pptx(path.to_str().unwrap()).unwrap();
-    assert_eq!(back.masters[0].page_emu, None, "our own size reads back as the default");
+    assert_eq!(back.page_size, None, "our own size reads back as the default");
     let slide = part(&path, "ppt/slides/slide1.xml");
     assert!(slide.contains("<a:ext cx=\"9144000\" cy=\"5143500\"/>"), "{slide}");
     assert!(slide.contains("sz=\"2400\""), "a 24 pt run is still sz=2400: {slide}");
@@ -141,7 +141,7 @@ fn a_4_3_or_custom_deck_keeps_its_size_through_odp() {
         let path = dir.path().join("deck.odp");
         decks_core::write_deck(path.to_str().unwrap(), &deck(Some(size))).unwrap();
         let back = decks_core::read_deck(path.to_str().unwrap()).unwrap();
-        let (cx, cy) = back.masters[0].page_emu.expect("the page size is read back");
+        let (cx, cy) = back.page_size.expect("the page size is read back");
         assert!((cx - size.0).abs() < 1.0 && (cy - size.1).abs() < 1.0, "{size:?}: read back as {cx}x{cy}");
         for (got, want) in boxes(&back).into_iter().zip(boxes(&deck(Some(size)))) {
             assert!(near(got, want), "{size:?}: {got:?} is not {want:?}");
@@ -151,4 +151,29 @@ fn a_4_3_or_custom_deck_keeps_its_size_through_odp() {
         decks_core::write_deck(again.to_str().unwrap(), &back).unwrap();
         assert_eq!(declared(&again), size, "odp then pptx");
     }
+}
+
+#[test]
+fn the_size_is_the_decks_not_the_first_masters() {
+    // Two masters with a slide each, reordered: the written size follows
+    // the deck, not whichever master happens to be first (DCK-006). Each
+    // master needs its slide, or the reader (which builds masters from
+    // the layouts slides use) has nothing to build it from.
+    let size = SIZES[0];
+    let mut d = deck(Some(size));
+    d.masters.push(d.masters[0].clone());
+    d.masters[1].id = 2;
+    d.masters[1].name = "Second".into();
+    let mut second = d.slides[0].clone();
+    second.title = "Slide 2".into();
+    second.master_id = Some(2);
+    d.slides.push(second);
+    d.masters.rotate_left(1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two-master.pptx");
+    write_pptx(path.to_str().unwrap(), &d).unwrap();
+    assert_eq!(declared(&path), size, "the deck's size, whichever master is first");
+    let back = read_pptx(path.to_str().unwrap()).unwrap();
+    assert_eq!(back.page_size, Some(size));
+    assert_eq!(back.masters.len(), 2);
 }

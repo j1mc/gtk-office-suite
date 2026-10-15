@@ -110,6 +110,8 @@ impl LettersWindow {
             ("app.list-restart-numbering", &suite_common::i18n("Restart Numbering")),
             ("app.insert-page-break", &suite_common::i18n("Insert Page Break")),
             ("app.cycle-line-spacing", &suite_common::i18n("Cycle Line Spacing")),
+            ("app.keep-lines-together", &suite_common::i18n("Keep Lines Together")),
+            ("app.widow-control", &suite_common::i18n("Widow and Orphan Control")),
             ("app.cycle-columns", &suite_common::i18n("Cycle Column Layout")),
             ("app.increase-font", &suite_common::i18n("Increase Font Size")),
             ("app.decrease-font", &suite_common::i18n("Decrease Font Size")),
@@ -120,7 +122,7 @@ impl LettersWindow {
             ("app.print", &suite_common::i18n("Print…")),
             ("app.print-preview", &suite_common::i18n("Print Preview")),
             ("app.export-pdf", &suite_common::i18n("Export as PDF…")),
-            ("app.export-pdf-typst", &suite_common::i18n("Export as PDF With Typst…")),
+            ("app.export-pdf-typst", &suite_common::i18n("Export as PDF With Typst (Approximate)…")),
             ("app.edit-headers", &suite_common::i18n("Edit Headers and Footers…")),
             ("app.style-p", &suite_common::i18n("Paragraph Style: Normal")),
             ("app.style-h1", &suite_common::i18n("Paragraph Style: Heading 1")),
@@ -471,8 +473,10 @@ impl LettersWindow {
             app.add_action(&a);
             app.set_accels_for_action(&format!("app.{name}"), &[accel]);
         }
-        // Typst stays as an alternative typeset export (ADR 0010); it no
-        // longer defines what a PDF of the document looks like.
+        // Typst stays as an explicitly approximate alternative typeset
+        // export (ADR 0010, engine.rs): it re-typesets plain text, never the
+        // laid-out pages, so it must never satisfy a WYSIWYG claim or stand
+        // in for Export as PDF in any test or document.
         {
             let tv = tab_view.clone();
             let w = win.clone();
@@ -509,6 +513,20 @@ impl LettersWindow {
             app.add_action(&a);
         }
 
+        // ── Keep-lines-together and widow-control toggles ──────────
+        for (name, toggle) in [
+            ("keep-lines-together", crate::actions::toggle_keep_lines_in as fn(&gtk::TextBuffer) -> bool),
+            ("widow-control", crate::actions::toggle_widow_control_in as fn(&gtk::TextBuffer) -> bool),
+        ] {
+            let tv = tab_view.clone();
+            let a = gtk::gio::SimpleAction::new(name, None);
+            a.connect_activate(move |_, _| {
+                if let Some(buf) = active_buffer(&tv) {
+                    toggle(&buf);
+                }
+            });
+            app.add_action(&a);
+        }
         // ── Columns action ────────────────────────────────────────
         {
             let a = gtk::gio::SimpleAction::new("cycle-columns", None);
@@ -600,6 +618,12 @@ impl LettersWindow {
                     eprintln!("export-pdf: no PageContainer in the active tab");
                     return;
                 };
+                // The current revision, not whatever the view last laid out
+                // (LET-004): an edit since the last idle relayout must reach
+                // the exported PDF.
+                if let Some(buf) = active_buffer(&tv) {
+                    crate::doc_tab::refresh_print_layout(&pc, &buf);
+                }
                 let Some(pv) = pc.page_view() else { return };
                 if let Err(e) = pv.write_pdf(std::path::Path::new(&out)) {
                     eprintln!("export-pdf: {e}");
@@ -765,7 +789,13 @@ impl LettersWindow {
         }
         apply_page_setup_from_buffer(&container, &buf);
         let td = TabData::new();
-        td.0.borrow_mut().file = Some(std::path::PathBuf::from(path));
+        {
+            let mut session = td.0.borrow_mut();
+            session.file = Some(std::path::PathBuf::from(path));
+            // Pin carried parts + loss findings to the revision just loaded;
+            // the save path reuses this instead of re-reading the live file (LET-001).
+            session.set_import_context(crate::bridge::import_context_for(path));
+        }
         tab_data_set(&container, td);
         let page = self.tab_view.append(&container);
         let name = std::path::Path::new(path)
@@ -819,6 +849,15 @@ impl LettersWindow {
 
             let td = TabData::new();
             td.0.borrow_mut().file = meta.original_path.clone();
+            // A recovered tab's content comes from the snapshot, but its
+            // unmodelled parts, if any are still recoverable, live in the original
+            // path as it reads now — pin to that, so a save neither warns about
+            // bytes from before the crash nor carries them silently (LET-001).
+            if let Some(original) = meta.original_path.as_ref() {
+                td.0.borrow_mut().set_import_context(crate::bridge::import_context_for(
+                    &original.to_string_lossy(),
+                ));
+            }
             // See AutosaveSlot::adopt_recovered for why this precedes the
             // clear. It mattered most here: Letters shipped with its autosave
             // timer switched off, so "the next tick will re-snapshot it" was
@@ -929,7 +968,13 @@ impl LettersWindow {
                             }
                             apply_page_setup_from_buffer(&container, &buf);
                             let td = TabData::new();
-                            td.0.borrow_mut().file = Some(path);
+                            {
+                                let mut session = td.0.borrow_mut();
+                                session.set_import_context(crate::bridge::import_context_for(
+                                    &path.to_string_lossy(),
+                                ));
+                                session.file = Some(path);
+                            }
                             tab_data_set(&container, td);
                             let page = tv.append(&container);
                             page.set_title(&name);
@@ -1036,10 +1081,10 @@ fn autosave_all_tabs(tv: &adw::TabView, notices: &suite_common::autosave_notice:
 // ── Page setup helpers ────────────────────────────────────────────────
 
 fn update_word_count(buf: &gtk::TextBuffer, wc: &gtk4::Label) {
-    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-    // letters-core decides what counts as a word: the buffer also holds
-    // list markers and the pipes of a rendered table, and a whitespace
-    // split counted those, so an empty 3x3 table read as "11 words".
+    // The count is the model's (LET-003): the buffer also holds list
+    // markers, table pipes and footnote "[n]", which are presentation and
+    // never words.
+    let text = letters_core::edit::sequence_text(&crate::bridge::document_of(buf));
     let n = letters_core::editor_word_count(&text);
     // "1 words" shipped in the status bar because this was a bare format!.
     wc.set_text(&format!("{} {}", n, suite_common::ni18n("word", "words", n as u64)));
@@ -1047,7 +1092,14 @@ fn update_word_count(buf: &gtk::TextBuffer, wc: &gtk4::Label) {
 
 fn connect_word_count(buf: &gtk::TextBuffer, wc: &gtk4::Label) {
     let wc = wc.clone();
-    buf.connect_changed(move |b| update_word_count(b, &wc));
+    buf.connect_changed(move |b| {
+        // Idle, not inline (LET-003): "changed" fires synchronously from the
+        // model's own projection while the live model is borrowed, and the
+        // count reads the model — reading it here would panic on the
+        // outstanding borrow and take the app down on every keystroke.
+        let (b, wc) = (b.clone(), wc.clone());
+        glib::idle_add_local_once(move || update_word_count(&b, &wc));
+    });
 }
 
 fn update_style_readout(buf: &gtk::TextBuffer, label: &gtk4::Label) {

@@ -98,7 +98,11 @@ pub fn snapshot(
     let mut cells = Vec::new();
     for row in rows.clone() {
         for col in cols.clone() {
-            let value = state.sheet().cell(row, col).to_string();
+            // Displayed text and editable input side by side, from their
+            // separate authorities: the projection for `value`, the engine
+            // for `formula`. A formula snapshots as both its result and
+            // its input, never as one flattened into the other.
+            let value = state.displayed_value(row, col);
             let input = state.cell_input(row, col);
             let formula = input.strip_prefix('=').map(|f| f.to_string());
             if value.is_empty() && formula.is_none() {

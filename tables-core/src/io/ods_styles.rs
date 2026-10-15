@@ -194,7 +194,7 @@ pub fn parse_ods_cell_styles(content_xml: &str, data_styles: &HashMap<String, Nu
             color: rgb.to_f64(),
         };
         let format = attr(&head, "style:data-style-name").and_then(|n| data_styles.get(n)).cloned().unwrap_or_default();
-        out.insert(name.to_string(), XfStyle { format, style, border });
+        out.insert(name.to_string(), XfStyle { format, style, border, ..XfStyle::default() });
     }
     out
 }

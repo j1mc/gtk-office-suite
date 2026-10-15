@@ -23,6 +23,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::engine::shape::{Color, GradientStop, LinearGradient, ShapeKind, ShapeStyle, Stroke};
+use crate::engine::theme::{ColorRef, FillSrc, StrokeSrc};
 use crate::engine::{Deck, SlideObject};
 
 fn attr(e: &quick_xml::events::BytesStart, name: &str) -> Option<String> {
@@ -243,11 +244,23 @@ impl GraphicDefs {
             Some("gradient") => gradient.as_ref().and_then(LinearGradient::mean),
             _ => None,
         };
+        // The statement as stated (DCK-006): a direct solid colour as a
+        // literal reference, an explicit none distinct from no statement.
+        let fill_src = match p.fill.as_deref() {
+            Some("solid") => p.fill_color.map(|c| FillSrc::Color(ColorRef::Rgb(c.to_hex()))),
+            Some("none") => Some(FillSrc::NoFill),
+            _ => None,
+        };
         let stroke = match p.stroke.as_deref() {
             Some("solid") | Some("dash") => p.stroke_color.map(|color| Stroke { color, width: p.stroke_width_pt.unwrap_or(0.0) * k }),
             _ => None,
         };
-        Some(ShapeStyle { fill, gradient, stroke })
+        let stroke_src = match p.stroke.as_deref() {
+            Some("solid") | Some("dash") => p.stroke_color.map(|c| StrokeSrc::Color(ColorRef::Rgb(c.to_hex()))),
+            Some("none") => Some(StrokeSrc::NoLine),
+            _ => None,
+        };
+        Some(ShapeStyle { fill, gradient, stroke, fill_src, stroke_src })
     }
 }
 

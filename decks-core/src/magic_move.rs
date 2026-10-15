@@ -196,7 +196,7 @@ mod tests {
             w: 50.0,
             h: 50.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(fill), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         }
     }
 

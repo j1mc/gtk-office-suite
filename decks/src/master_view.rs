@@ -46,18 +46,17 @@ pub(crate) fn register(app: &adw::Application, add_bar: impl Fn(&adw::Banner), h
     };
 
     {
-        let (ctl, cs, so, masters, banner, app2) =
-            (h.controller.clone(), h.current_slide.clone(), h.selected_object.clone(), h.masters.clone(), banner.clone(), app.clone());
+        let (ctl, masters, banner, app2) =
+            (h.controller.clone(), h.masters.clone(), banner.clone(), app.clone());
         let redraw = redraw.clone();
         let act = gio::SimpleAction::new("edit-master", None);
         act.connect_activate(move |_, _| {
-            let Some(index) = ctl.edit_master(cs.get()) else { return };
-            let name = masters.borrow().get(index).map(|m| m.name.clone()).unwrap_or_default();
+            let Some(slide_id) = ctl.selection().slide_id else { return };
+            let Some(master_id) = ctl.edit_master(slide_id) else { return };
+            let name = masters.borrow().iter().find(|m| m.id == master_id).map(|m| m.name.clone()).unwrap_or_default();
             banner.set_title(&format!("Editing the master \u{201c}{name}\u{201d}: every slide that uses it changes"));
             banner.set_revealed(true);
             set_deck_actions(&app2, false);
-            cs.set(0);
-            so.set(None);
             redraw(0);
         });
         app.add_action(&act);
@@ -65,27 +64,47 @@ pub(crate) fn register(app: &adw::Application, add_bar: impl Fn(&adw::Banner), h
     // Put the current slide on layout n of its master (the inspector's
     // Layout row does the same; this is the keyboard's and automation's way).
     {
-        let (ctl, cs, redraw) = (h.controller.clone(), h.current_slide.clone(), redraw.clone());
+        let (ctl, redraw) = (h.controller.clone(), redraw.clone());
         let act = gio::SimpleAction::new("apply-layout", Some(gtk4::glib::VariantTy::UINT32));
         act.connect_activate(move |_, p| {
             let Some(n) = p.and_then(|p| p.get::<u32>()) else { return };
-            if ctl.apply_layout(cs.get(), n as usize) {
-                redraw(cs.get());
+            let row_idx = n as usize;
+            let Some(slide_id) = ctl.selection().slide_id else { return };
+            let apply = {
+                let slides = ctl.slides.borrow();
+                let slide = slides.iter().find(|s| s.ids.slide == slide_id);
+                let masters = ctl.masters.borrow();
+                let master = slide.and_then(|s| s.master_id).and_then(|id| masters.iter().find(|m| m.id == id));
+                match master.filter(|m| !m.layouts.is_empty()) {
+                    Some(m) => m.layouts.get(row_idx).map(|l| (false, l.id)),
+                    None => Some((true, row_idx as u64)),
+                }
+            };
+            let Some((standard, id)) = apply else { return };
+            let changed = if standard {
+                ctl.apply_standard_layout(slide_id, id as usize)
+            } else {
+                ctl.apply_layout(slide_id, id)
+            };
+            if changed {
+                if let Some(at) = ctl.selected_slide_index() {
+                    redraw(at);
+                }
             }
         });
         app.add_action(&act);
     }
     {
-        let (ctl, cs, so, banner, app2) =
-            (h.controller.clone(), h.current_slide.clone(), h.selected_object.clone(), banner.clone(), app.clone());
+        let (ctl, banner, app2) = (h.controller.clone(), banner.clone(), app.clone());
         let act = gio::SimpleAction::new("finish-master", None);
         act.connect_activate(move |_, _| {
-            let Some(from) = ctl.finish_master() else { return };
+            let Some(from_slide_id) = ctl.finish_master() else { return };
             banner.set_revealed(false);
             set_deck_actions(&app2, true);
-            cs.set(from);
-            so.set(None);
-            redraw(from);
+            ctl.select_slide(from_slide_id);
+            if let Some(at) = ctl.selected_slide_index() {
+                redraw(at);
+            }
         });
         app.add_action(&act);
     }

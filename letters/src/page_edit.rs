@@ -2,17 +2,19 @@
 //
 // page_edit.rs — editing on the Print Layout view (ADR 0010, stage 3).
 //
-// The tab's GtkTextBuffer is still the document's live state, so the page
-// view edits *it*: a click places the buffer's cursor at the character the
-// laid-out page shows there, typing goes through a GtkIMContext into the
-// buffer, and the view lays the document out again after every change.
+// The tab's live model is the document's live state, so the page view
+// edits *it*: a click places the buffer's cursor at the character the
+// laid-out page shows there, typing goes through a GtkIMContext into model
+// ops, and the view lays the document out again after every change. The
+// buffer is the model's projection, hosting the caret, the selection, the
+// IME and the text screen readers read (LET-003).
 // Undo, formatting actions, find and save all keep working unchanged,
-// because they act on the same buffer.
+// because they act on the same model.
 //
 // Enter continues and ends lists (`bridge::enter_in_list`); Markdown
 // shortcuts act on the buffer, so they work here too; the suite clipboard
-// format is connected by doc_tab; screen readers read the view through
-// GtkAccessibleText (page_view.rs).
+// format is connected by doc_tab; screen readers read the buffer's text
+// through GtkAccessibleText (page_view.rs).
 
 use gtk4::{self as gtk, gdk, glib, prelude::*};
 
@@ -418,8 +420,8 @@ mod tests {
         let live = crate::live::LiveModel::attach(&buf, letters_core::Document::from_plain_text(text));
         let view = PageView::new();
         make_editable(&view, &buf);
-        let (doc, starts) = live.borrow().snapshot();
-        view.set_typeset(Typeset::new(doc, Default::default()), starts);
+        let snap = live.borrow().snapshot();
+        view.set_typeset(Typeset::new(snap.doc, Default::default()), snap.starts);
         (view, buf)
     }
 
@@ -487,7 +489,6 @@ mod tests {
             let settings = view.settings();
             settings.set_gtk_cursor_blink(true);
             settings.set_gtk_cursor_blink_time(200);
-            view.grab_focus();
             let ctx = glib::MainContext::default();
             let until = |ms: u64| {
                 let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -495,6 +496,8 @@ mod tests {
                     ctx.iteration(false);
                 }
             };
+            view.grab_focus();
+            until(200); // presentation and focus settle before asserting
             buf.place_cursor(&buf.iter_at_offset(2));
             assert!(view.caret_visible(), "a moved caret shows at once");
             assert!(view.is_focus(), "the page view has its window's focus");
@@ -644,7 +647,7 @@ mod tests {
             let styles = |buf: &gtk::TextBuffer| -> Vec<(f32, Vec<f64>)> {
                 let live = crate::live::of(buf).unwrap();
                 let m = live.borrow();
-                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.clone())).collect()
+                m.document().paragraphs.iter().map(|p| (p.style.line_spacing, p.style.tab_stops_pt.iter().map(|t| t.pos_pt).collect())).collect()
             };
             let before = { let m = live.borrow(); m.foreign_edits };
 
@@ -663,6 +666,32 @@ mod tests {
             assert_eq!(styles(&buf).iter().map(|s| s.0).collect::<Vec<_>>(), vec![1.15, 1.15, 1.15]);
             crate::live::undo(&buf, false);
             assert_eq!(styles(&buf).iter().map(|s| s.0).collect::<Vec<_>>(), vec![1.0, 1.5, 1.0]);
+        });
+    }
+
+    /// Keep-lines and widow-control toggles are the caret's paragraph
+    /// as model ops: each toggle is one history transaction, and one
+    /// undo takes each back.
+    #[test]
+    fn keep_lines_and_widow_control_are_model_ops_with_undo() {
+        gtk_test(|| {
+            let (_view, buf) = editable("one\ntwo");
+            let style = |buf: &gtk::TextBuffer| {
+                let live = crate::live::of(buf).unwrap();
+                let m = live.borrow();
+                let s = &m.document().paragraphs[1].style;
+                (s.keep_lines, s.widow_control)
+            };
+            // The caret inside "two".
+            buf.place_cursor(&buf.iter_at_offset(5));
+            assert!(crate::actions::toggle_keep_lines_in(&buf));
+            assert_eq!(style(&buf), (true, None));
+            assert!(crate::actions::toggle_widow_control_in(&buf));
+            assert_eq!(style(&buf), (true, Some(false)));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (true, None));
+            crate::live::undo(&buf, false);
+            assert_eq!(style(&buf), (false, None));
         });
     }
 

@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::sheet::{col_label, SortDirection};
+use crate::sheet::{col_label, FilterColumn, FilterDef, SheetModel, SortDirection};
 
 use super::ops::{Op, SheetProp};
 
@@ -64,6 +64,18 @@ impl WorkbookController {
         Ok(())
     }
 
+    /// The paired ops that install `def` with its derived rows: one undo
+    /// step restoring definition and visibility together. The `Filter`
+    /// swap touches only the definition and `Filtered` only the rows, so
+    /// the pair is exact whatever order the group applies in.
+    fn filter_ops(sheet_id: u32, def: Option<FilterDef>, sheet: &SheetModel) -> Vec<Op> {
+        let hidden = def.as_ref().map(|d| d.derive_hidden(sheet)).unwrap_or_default();
+        vec![
+            Op::SetProp { sheet: sheet_id, prop: SheetProp::Filter(def) },
+            Op::SetProp { sheet: sheet_id, prop: SheetProp::Filtered(hidden) },
+        ]
+    }
+
     pub fn filter_by_value(&mut self, col: usize, needle: &str) {
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
@@ -80,21 +92,43 @@ impl WorkbookController {
                 })
                 .collect()
         };
+        // The substring dialog is a session-only filter: it replaces any
+        // explicit definition, which has no substring form to persist.
+        let replace_def = sheet.filter.is_some();
         drop(sheet);
         drop(state);
-        if before != after {
-            self.set_prop("Filter Rows", sheet_id, SheetProp::Filtered(after));
+        if before == after && !replace_def {
+            return;
         }
+        let mut ops = Vec::new();
+        if replace_def {
+            ops.push(Op::SetProp { sheet: sheet_id, prop: SheetProp::Filter(None) });
+        }
+        if before != after {
+            ops.push(Op::SetProp { sheet: sheet_id, prop: SheetProp::Filtered(after) });
+        }
+        self.apply_ops("Filter Rows", ops);
     }
 
     pub fn clear_filter(&mut self) {
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
-        let before = (*state.sheet().hidden_rows).clone();
-        drop(state);
-        if !before.is_empty() {
-            self.set_prop("Clear Filter", sheet_id, SheetProp::Filtered(HashSet::new()));
+        let sheet = state.sheet();
+        // Manual hides are independent: clearing restores filter-hidden
+        // rows only, never rows the user deliberately hid.
+        if sheet.filter.is_none() && sheet.hidden_rows.is_empty() {
+            return;
         }
+        let mut ops = Vec::new();
+        if sheet.filter.is_some() {
+            ops.push(Op::SetProp { sheet: sheet_id, prop: SheetProp::Filter(None) });
+        }
+        if !sheet.hidden_rows.is_empty() {
+            ops.push(Op::SetProp { sheet: sheet_id, prop: SheetProp::Filtered(HashSet::new()) });
+        }
+        drop(sheet);
+        drop(state);
+        self.apply_ops("Clear Filter", ops);
     }
 
     pub fn hide_selected_rows(&mut self) {
@@ -184,45 +218,118 @@ impl WorkbookController {
         use SortDirection::{Ascending, Descending};
         let sorted = self.state.borrow().sheet().sorted_col;
         match sorted {
-            Some((current, Ascending)) if current == col => self.sort_column(col, Descending),
+            Some((current, Ascending)) if current == col => {
+                self.sort_column(col, Descending);
+            }
             Some((current, Descending)) if current == col => {
                 self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None);
             }
-            _ => self.sort_column(col, Ascending),
+            _ => {
+                self.sort_column(col, Ascending);
+            }
         }
     }
 
     /// Hide the rows whose value in `col` (as shown) is in `hidden`, and
-    /// show the rest: the column menu's filter list. One undo step; an
-    /// empty `hidden` clears the filter.
+    /// show the rest: the column menu's filter list. The criterion joins
+    /// the sheet's explicit definition — every active column filters
+    /// together — as one undo step; an empty `hidden` clears this
+    /// column's criterion (and the definition when it was the last one).
     pub fn filter_column_values(&mut self, col: usize, hidden: &HashSet<String>) {
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
         let sheet = state.sheet();
-        let before = (*sheet.hidden_rows).clone();
-        let after: HashSet<usize> = (0..sheet.rows)
-            .filter(|&r| {
-                (0..sheet.cols).any(|c| !sheet.cell(r, c).is_empty())
-                    && hidden.contains(&sheet.formats[r][col].format(sheet.cell(r, col)))
-            })
-            .collect();
+        let mut def = sheet.filter.clone().unwrap_or(FilterDef { range: None, columns: Vec::new() });
+        match def.columns.iter_mut().find(|criterion| criterion.col == col) {
+            Some(criterion) => criterion.hidden = hidden.clone(),
+            None => def.columns.push(FilterColumn { col, hidden: hidden.clone() }),
+        }
+        def.columns.retain(|criterion| !criterion.hidden.is_empty());
+        def.columns.sort_by_key(|criterion| criterion.col);
+        let def = if def.columns.is_empty() { None } else { Some(def) };
+        // A no-op (same definition, same derived rows) pushes no step —
+        // and, crucially, leaves session-only dialog rows alone.
+        let hidden_rows = def.as_ref().map(|d| d.derive_hidden(&sheet)).unwrap_or_default();
+        if sheet.filter == def && *sheet.hidden_rows == hidden_rows {
+            return;
+        }
+        let ops = Self::filter_ops(sheet_id, def, &sheet);
         drop(sheet);
         drop(state);
-        if before != after {
-            self.set_prop("Filter Rows", sheet_id, SheetProp::Filtered(after));
+        self.apply_ops("Filter Rows", ops);
+    }
+
+    /// Clear one column's criterion, leaving every other column's in
+    /// place: the column menu's per-column clear. A no-op when the
+    /// column carries no criterion.
+    pub fn clear_column_filter(&mut self, col: usize) {
+        let state = self.state.borrow();
+        let sheet_id = state.sheet().sheet_id;
+        let sheet = state.sheet();
+        let mut def = match sheet.filter.clone() {
+            Some(def) => def,
+            None => return,
+        };
+        let before = def.columns.len();
+        def.columns.retain(|criterion| criterion.col != col);
+        if def.columns.len() == before {
+            return;
         }
+        let def = if def.columns.is_empty() { None } else { Some(def) };
+        let ops = Self::filter_ops(sheet_id, def, &sheet);
+        drop(sheet);
+        drop(state);
+        self.apply_ops("Clear Column Filter", ops);
+    }
+
+    /// Give the sheet's filter an explicit range (TBL-003): the range's
+    /// top row is its label header and is never hidden. Corners may come
+    /// either way round; the range clamps to the sheet. Replaces any
+    /// rangeless session definition's extent while keeping its criteria.
+    pub fn set_filter_range(&mut self, range: (usize, usize, usize, usize)) {
+        let state = self.state.borrow();
+        let sheet_id = state.sheet().sheet_id;
+        let sheet = state.sheet();
+        let (r0, c0, r1, c1) = range;
+        let range = (
+            r0.min(r1).min(sheet.rows.saturating_sub(1)),
+            c0.min(c1).min(sheet.cols.saturating_sub(1)),
+            r0.max(r1).min(sheet.rows.saturating_sub(1)),
+            c0.max(c1).min(sheet.cols.saturating_sub(1)),
+        );
+        let mut def = sheet.filter.clone().unwrap_or(FilterDef { range: None, columns: Vec::new() });
+        if def.range == Some(range) {
+            return;
+        }
+        def.range = Some(range);
+        let ops = Self::filter_ops(sheet_id, Some(def), &sheet);
+        drop(sheet);
+        drop(state);
+        self.apply_ops("Set Filter Range", ops);
     }
 
     /// Sort the sheet's rows by `col` in `direction` (numbers numerically,
-    /// text case-insensitively, blanks last), as one undo step.
-    pub fn sort_column(&mut self, col: usize, direction: SortDirection) {
+    /// text case-insensitively, blanks last), as one undo step. Returns
+    /// whether the sort was applied: a reference the engine cannot
+    /// translate aborts the sort with no history step rather than
+    /// reordering rows under stale references.
+    pub fn sort_column(&mut self, col: usize, direction: SortDirection) -> bool {
         use SortDirection::Ascending;
+
+        let (sheet, start, rows, cols) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            (sheet.sheet_id, sheet.frozen_rows.min(sheet.rows), sheet.rows, sheet.cols)
+        };
+        if !self.authorize_cells(sheet, (start..rows).flat_map(|r| (0..cols).map(move |c| (r, c)))) {
+            return false;
+        }
 
         let state = self.state.borrow();
         let sheet_id = state.sheet().sheet_id;
         let before_sheet = state.sheet().clone();
         if col >= before_sheet.cols {
-            return;
+            return false;
         }
         let new_direction = direction;
         let before_inputs: Vec<Vec<String>> = (0..before_sheet.rows)
@@ -290,7 +397,14 @@ impl WorkbookController {
             let mut state = self.state.borrow_mut();
             for (new_row, &old_row) in order.iter().enumerate() {
                 for (column, (input, current)) in before_inputs[old_row].iter().zip(&before_inputs[new_row]).enumerate() {
-                    let moved = state.engine.move_input(input, (old_row, column), (new_row, column));
+                    // The translation touches nothing yet — these strings
+                    // become the op below — so a rejection aborts the sort
+                    // with no history step rather than sorting rows under
+                    // references that no longer point where they did.
+                    let moved = match state.engine.move_input(input, (old_row, column), (new_row, column)) {
+                        Ok(moved) => moved,
+                        Err(_) => return false,
+                    };
                     if moved != *current {
                         cells.push((new_row, column, moved));
                     }
@@ -306,6 +420,6 @@ impl WorkbookController {
         after_sheet.notes = order.iter().map(|&row| before_sheet.notes[row].clone()).collect();
         let mut ops = vec![Op::SetCells { sheet: sheet_id, cells }];
         ops.extend(super::ops::diff_ops(&before_sheet, &after_sheet));
-        self.apply_ops("Sort", ops);
+        self.apply_ops("Sort", ops)
     }
 }

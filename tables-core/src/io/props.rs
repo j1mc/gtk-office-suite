@@ -41,9 +41,8 @@ pub struct SheetXlsxProps {
     /// Merged ranges as `(row, col, rowspan, colspan)` — the shape
     /// `SheetModel::merges` uses, so the caller assigns it directly.
     pub merges: Vec<(usize, usize, usize, usize)>,
-    /// What cells name through their style (`<c s="n">`): number format and
-    /// CellStyle, 0-based `(row, col, style)`. Cells on the default style
-    /// are absent.
+    /// Resolved cell styles, including protection, 0-based `(row, col, style)`.
+    /// Cells whose resolved style equals the model defaults are absent.
     pub cell_styles: Vec<(usize, usize, super::XfStyle)>,
     /// Cell notes, 0-based `(row, col, text)`: xlsx's `comments` part,
     /// ODF's `office:annotation`.
@@ -51,10 +50,27 @@ pub struct SheetXlsxProps {
     /// Data validation, 0-based inclusive `(top, left, bottom, right)`
     /// ranges and what they allow.
     pub validations: Vec<((usize, usize, usize, usize), ValidationSource)>,
-    /// `<sheetProtection sheet="1">`: the sheet is protected. Tables writes
-    /// it and used to drop it on open, so a protected workbook came back
-    /// unprotected and was saved that way (#1204).
-    pub protected: bool,
+    /// An imported worksheet `<autoFilter>` in file terms (TBL-003): its
+    /// range and, per filtered column, the values the file lists plus
+    /// whether blanks show. `load.rs` resolves these against the loaded
+    /// cells into a `FilterDef` (hidden = distinct − shown), so the
+    /// derived visibility matches the file's without storing row numbers.
+    /// Unsupported column constructs (top-N, dates, colors, customs) are
+    /// absent here; the loss scan reports them instead.
+    pub auto_filter: Option<SheetAutoFilter>,
+    /// Modeled `<sheetProtection>` state. Credentials that the writer cannot
+    /// preserve are reported by source-loss detection, not stored as a hash.
+    pub protection: crate::sheet::SheetProtection,
+}
+
+/// An imported worksheet `<autoFilter>` in file terms: its range and, per
+/// filtered column, the absolute column, the values the file lists and
+/// whether blanks show (TBL-003).
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct SheetAutoFilter {
+    pub range: (usize, usize, usize, usize),
+    /// (absolute column, shown values, blanks shown).
+    pub columns: Vec<(usize, std::collections::HashSet<String>, bool)>,
 }
 
 /// A validation as the file states it. A list can name its items or a
@@ -190,6 +206,60 @@ pub(super) fn parse_xlsx_validations(xml: &str) -> Vec<((usize, usize, usize, us
         }
     }
     out
+}
+
+/// Whether a `<filterColumn>` body holds a construct Tables cannot model:
+/// top-N, dynamic/date-group, color/icon or custom filters. Value lists
+/// (`<filters><filter val="…"/>`) are admitted; these are not, and the
+/// loss scan reports each one specifically (TBL-003).
+fn has_unsupported_filter(body: &str) -> bool {
+    ["<customFilters", "<dynamicFilter", "<top10", "<dateGroupItem", "<colorFilter", "<iconFilter"]
+        .iter()
+        .any(|needle| body.contains(needle))
+}
+
+/// A worksheet `<autoFilter>` as value criteria, if the part has one:
+/// the range plus each admitted value-filter column (absolute column,
+/// listed values, blanks shown). Columns with unsupported constructs
+/// are left out for the loss scan to report. A bare range with no
+/// admitted columns still comes back (filter buttons, no criteria).
+pub(super) fn parse_auto_filter(xml: &str) -> Option<SheetAutoFilter> {
+    // Tolerate a namespace prefix on the element itself (`<x:autoFilter`);
+    // inner elements stay strict, as the rest of this reader is.
+    let at = xml.find("<autoFilter").or_else(|| xml.find(":autoFilter"))?;
+    let tag = &xml[at..];
+    let head = tag.split('>').next().unwrap_or("");
+    let reference = xml_attr(head, "ref")?;
+    let (r0, c0, r1, c1) = parse_area(reference)?;
+    if r1 >= crate::sheet::SHEET_MAX_ROWS || c1 >= crate::sheet::SHEET_MAX_COLS {
+        return None;
+    }
+    let mut out = SheetAutoFilter { range: (r0, c0, r1, c1), columns: Vec::new() };
+    if head.trim_end().ends_with('/') {
+        return Some(out);
+    }
+    let body = tag.split("</autoFilter>").next().unwrap_or("");
+    let body = body.split_once('>').map(|(_, rest)| rest).unwrap_or("");
+    for column in body.split("<filterColumn ").skip(1) {
+        let head = column.split('>').next().unwrap_or("");
+        let Some(relative) = xml_attr(head, "colId").and_then(|v| v.parse::<usize>().ok()) else { continue };
+        let inner = column.split("</filterColumn>").next().unwrap_or("");
+        if has_unsupported_filter(inner) {
+            continue;
+        }
+        let Some(filters) = inner.split("<filters").nth(1) else { continue };
+        let filters_head = filters.split('>').next().unwrap_or("");
+        let show_blanks = xml_bool_attr(filters_head, "blank");
+        let mut shown = std::collections::HashSet::new();
+        for filter in inner.split("<filter ").skip(1) {
+            let tag = filter.split('>').next().unwrap_or("");
+            if let Some(val) = xml_attr(tag, "val") {
+                shown.insert(unescape(val));
+            }
+        }
+        out.columns.push((c0 + relative, shown, show_blanks));
+    }
+    Some(out)
 }
 
 /// XML text to plain text: the five named entities and numeric character
@@ -332,8 +402,9 @@ fn xml_bool_attr(tag: &str, attr: &str) -> bool {
 }
 
 /// name → target for each `<Relationship Id="rIdN" Target="...">` in a
-/// `.rels` part.
-fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
+/// `.rels` part. Shared with the chart reader, which resolves the same
+/// workbook→worksheet→drawing→chart chain (TBL-002).
+pub(crate) fn parse_rels(xml: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for tag in xml.split("<Relationship ").skip(1) {
         let tag = tag.split('>').next().unwrap_or("");
@@ -529,7 +600,16 @@ pub fn read_sheet_props_from_xlsx(
 
         if let Some(tag) = xml.split("<sheetProtection").nth(1) {
             let tag = tag.split('>').next().unwrap_or("").trim_end_matches('/');
-            props.protected = matches!(xml_attr(tag, "sheet"), Some("1") | Some("true"));
+            // OOXML's operation flags mean "disallow", not "allow".
+            props.protection = crate::sheet::SheetProtection {
+                protected: xml_bool_attr(tag, "sheet"),
+                password_hash: None,
+                allow_select_locked: !xml_bool_attr(tag, "selectLockedCells"),
+                allow_select_unlocked: !xml_bool_attr(tag, "selectUnlockedCells"),
+                allow_format_cells: matches!(xml_attr(tag, "formatCells"), Some("0" | "false")),
+                allow_insert_rows: matches!(xml_attr(tag, "insertRows"), Some("0" | "false")),
+                allow_delete_rows: matches!(xml_attr(tag, "deleteRows"), Some("0" | "false")),
+            };
         }
 
         if let Some(block) = xml.split("<mergeCells").nth(1) {
@@ -597,6 +677,7 @@ pub fn read_sheet_props_from_xlsx(
         }
 
         props.validations = parse_xlsx_validations(&xml);
+        props.auto_filter = parse_auto_filter(&xml);
 
         // Notes: the sheet's rels name its comments part.
         let (dir, file) = part.rsplit_once('/').unwrap_or(("", part.as_str()));

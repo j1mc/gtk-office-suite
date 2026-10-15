@@ -106,7 +106,9 @@ pub fn build(
             if syncing.get() {
                 return;
             }
-            ctl.borrow_mut().format_selection(description, change);
+            if !crate::sheet_actions::apply(&ctl, &grid, |c| c.format_selection(description, change)) {
+                return;
+            }
             // A bigger font or wrapped text needs a taller row.
             {
                 let c = ctl.borrow();

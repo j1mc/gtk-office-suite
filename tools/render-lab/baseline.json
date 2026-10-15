@@ -14,6 +14,10 @@
     "B": "green",
     "C": "green"
   },
+  "decks/delegated-authorities-reduced-dark-mode-window": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/edited-journey": {
     "A": "green",
     "B": "green"
@@ -27,6 +31,14 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "decks/pay-centre-reduced-line-breaks": {
+    "A": "amber",
+    "B": "amber"
+  },
+  "decks/pay-centre-reduced-picture-background": {
+    "A": "green",
+    "B": "green"
   },
   "decks/rotation": {
     "A": "green",
@@ -83,9 +95,17 @@
     "B": "green",
     "C": "green"
   },
+  "letters/combining-marks": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/edited-journey": {
     "A": "green",
     "B": "green"
+  },
+  "letters/exact-line-spacing": {
+    "A": "amber",
+    "B": "amber"
   },
   "letters/font-families": {
     "A": "green",
@@ -137,6 +157,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/keep-widow": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/landscape": {
     "A": "green",
     "B": "green",
@@ -182,6 +206,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/para-shading-borders": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/paragraph-spacing": {
     "A": "green",
     "B": "green",
@@ -196,6 +224,10 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/tab-leaders": {
+    "A": "green",
+    "B": "green"
   },
   "letters/table": {
     "A": "amber",
@@ -242,6 +274,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/chart-multi": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/chart-pie": {
     "A": "green",
     "B": "green",
@@ -271,6 +308,11 @@
     "B": "green",
     "C": "green"
   },
+  "tables/filtered": {
+    "A": "amber",
+    "B": "amber",
+    "C": "amber"
+  },
   "tables/frozen": {
     "A": "green",
     "B": "green",
@@ -286,10 +328,18 @@
     "B": "amber",
     "C": "amber"
   },
+  "tables/pivot-crosstab": {
+    "A": "green",
+    "B": "green"
+  },
   "tables/values": {
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "tables/wrap-merged": {
+    "A": "amber",
+    "B": "amber"
   },
   "tables/wrap-text": {
     "A": "amber",

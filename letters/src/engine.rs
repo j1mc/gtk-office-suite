@@ -1,5 +1,11 @@
-// engine.rs — Legacy PDF export helpers for Letters.
+// engine.rs — Alternative PDF export through Typst, kept beside the
+// page-faithful one (ADR 0010).
 // SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This re-typesets plain text through the Typst CLI: an explicitly
+// approximate alternative in the Export menu, never WYSIWYG evidence. What
+// Print Layout shows — and what Print, Print Preview and Export as PDF
+// write — is the tab's laid-out pages (printing.rs, `Typeset::draw_page`).
 //
 // Document loading/saving uses letters-core through bridge.rs. Keeping a
 // second plain-text save pipeline here caused Save As to discard formatting.

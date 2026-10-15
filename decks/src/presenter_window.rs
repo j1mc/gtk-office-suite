@@ -465,6 +465,37 @@ pub fn start(app: &adw::Application, deck: Deck, start: usize, rehearse: bool) {
     if deck.slides.is_empty() {
         return;
     }
+    let missing = decks_core::presenter::missing_media(&deck);
+    if missing.is_empty() {
+        start_ready(app, deck, start, rehearse);
+        return;
+    }
+    let details = missing.iter().map(|media| {
+        suite_common::i18n("Slide %n: %s")
+            .replace("%n", &(media.slide_index + 1).to_string())
+            .replace("%s", &media.path)
+    }).collect::<Vec<_>>().join("\n");
+    let body = format!("{}\n\n{}\n\n{}",
+        suite_common::i18n("Some image files used by this presentation are missing:"),
+        details,
+        suite_common::i18n("Cancel to restore the files, or continue with missing artwork."));
+    let dialog = adw::AlertDialog::new(Some(&suite_common::i18n("Present With Missing Images?")), Some(&body));
+    dialog.add_response("cancel", &suite_common::i18n("_Cancel"));
+    dialog.add_response("continue", &suite_common::i18n("_Continue Anyway"));
+    dialog.set_response_appearance("continue", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let parent = app.active_window();
+    let app = app.clone();
+    dialog.choose(parent.as_ref(), None::<&gio::Cancellable>, move |response| {
+        if response == "continue" {
+            start_ready(&app, deck, start, rehearse);
+        }
+    });
+}
+
+/// Open windows only after the readiness decision, using the checked snapshot.
+fn start_ready(app: &adw::Application, deck: Deck, start: usize, rehearse: bool) {
     // Preferences ▸ Presentation Display: -1 is automatic.
     let chosen = usize::try_from(gio::Settings::new("org.tunaos.decks").int("presentation-display")).ok();
     let layout = show_layout_on(monitors_for_layout(), rehearse, chosen);

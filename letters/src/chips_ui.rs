@@ -399,9 +399,9 @@ mod tests {
             insert(&buf, chips::date_chip(d), false);
             let view = crate::page_view::PageView::new();
             crate::page_edit::make_editable(&view, &buf);
-            let (doc, starts) = crate::live::of(&buf).unwrap().borrow_mut().snapshot();
-            let typeset = letters_core::layout::pango::Typeset::new(doc, letters_core::layout::LayoutOptions::default());
-            view.set_typeset(typeset, starts);
+            let snap = crate::live::of(&buf).unwrap().borrow_mut().snapshot();
+            let typeset = letters_core::layout::pango::Typeset::new(snap.doc, letters_core::layout::LayoutOptions::default());
+            view.set_typeset(typeset, snap.starts);
             // The chip spans buffer 4..14 ("3 Oct 2026").
             let (x0, _, _) = view.caret_rect(4).unwrap();
             let (x1, _, _) = view.caret_rect(14).unwrap();

@@ -40,6 +40,15 @@ pub fn save_sheets_to_xlsx_with_engine(
     suite_common_core::atomic_save::atomic_write_bytes(std::path::Path::new(path), &bytes)
 }
 
+/// The text to save for a non-formula cell: the engine's editable input.
+/// An empty input means no input — either a truly empty cell (the blank
+/// path below) or a derived spill cell, whose displayed value must not be
+/// flattened into a constant that would block the spill on reload.
+/// (Formula cells never reach here: they save through `formula_at`.)
+fn save_value_text(engine: &TablesEngine, sheet: usize, row: usize, col: usize) -> String {
+    engine.editable_input_at(sheet, row, col)
+}
+
 /// Render the workbook to an in-memory xlsx buffer without touching disk —
 /// shared by the real save path (which then writes it atomically) and
 /// autosave (which writes it into a crash-recovery snapshot slot instead).
@@ -99,27 +108,47 @@ pub fn save_sheets_to_xlsx_bytes(
                         // consumers that skip recalc-on-load (LibreOffice
                         // included) show the right result immediately.
                         let cached = eng.cell_at(si, r, c);
-                        sheet
-                            .write_formula(r as u32, c as u16, Formula::new(&f).set_result(&cached))
-                            .map_err(|e| format!("Write error: {}", e))?;
+                        let formula = Formula::new(&f).set_result(&cached);
+                        let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]);
+                        match &format {
+                            Some(format) => sheet.write_formula_with_format(r as u32, c as u16, formula, format),
+                            None => sheet.write_formula(r as u32, c as u16, formula),
+                        }
+                        .map_err(|e| format!("Write error: {}", e))?;
                         continue;
                     }
                 }
-                let val = &sh.data[r][c];
+                // The value from the engine's editable input, not the
+                // projection: displayed text written back as input would
+                // flatten formulas — and spill results — into constants
+                // that block the spill on reload. Without a live engine
+                // the projection is all there is (the engine-less save
+                // path), and plain values round-trip identically either
+                // way.
+                let owned;
+                let val = match engine {
+                    Some(eng) => {
+                        owned = save_value_text(eng, si, r, c);
+                        &owned
+                    }
+                    None => &sh.data[r][c],
+                };
                 if val.is_empty() {
                     // An empty cell can still be styled: a boxed or filled
                     // blank is part of what the sheet looks like. Most empty
                     // cells are plain, and are skipped before building a
                     // format (performance_budgets' dense save).
-                    if sh.styles[r][c].is_default() && sh.borders[r][c].is_none() {
+                    if sh.styles[r][c].is_default() && sh.borders[r][c].is_none()
+                        && sh.cell_protections[r][c].locked && !sh.cell_protections[r][c].hidden_formula
+                    {
                         continue;
                     }
-                    if let Some(f) = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c]) {
+                    if let Some(f) = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]) {
                         sheet.write_blank(r as u32, c as u16, &f).map_err(|e| format!("Write error: {}", e))?;
                     }
                     continue;
                 }
-                let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c]);
+                let format = cell_format(&sh.formats[r][c], &with_sheet_font(&sh.styles[r][c], sh, &wb_font), &sh.borders[r][c], &sh.cell_protections[r][c]);
                 // Rust's f64::from_str accepts "inf"/"infinity"/"nan"
                 // (any case, optionally signed) as valid floats — but a
                 // user typing that text almost certainly means literal
@@ -146,8 +175,11 @@ pub fn save_sheets_to_xlsx_bytes(
 
         for (mr, mc, rows, cols) in &sh.merges {
             let (lr, lc) = (mr + (*rows).max(1) - 1, mc + (*cols).max(1) - 1);
-            let val = sh.data[*mr][*mc].clone();
-            let format = cell_format(&sh.formats[*mr][*mc], &with_sheet_font(&sh.styles[*mr][*mc], sh, &wb_font), &sh.borders[*mr][*mc]).unwrap_or_default();
+            let val = match engine {
+                Some(eng) => save_value_text(eng, si, *mr, *mc),
+                None => sh.data[*mr][*mc].clone(),
+            };
+            let format = cell_format(&sh.formats[*mr][*mc], &with_sheet_font(&sh.styles[*mr][*mc], sh, &wb_font), &sh.borders[*mr][*mc], &sh.cell_protections[*mr][*mc]).unwrap_or_default();
             sheet
                 .merge_range(
                     *mr as u32,
@@ -158,6 +190,30 @@ pub fn save_sheets_to_xlsx_bytes(
                     &format,
                 )
                 .map_err(|e| format!("Merge error: {}", e))?;
+            if let Some(eng) = engine {
+                if let Some(formula) = eng.formula_at(si, *mr, *mc) {
+                    sheet.write_formula_with_format(
+                        *mr as u32, *mc as u16,
+                        Formula::new(&formula).set_result(eng.cell_at(si, *mr, *mc)),
+                        &format,
+                    ).map_err(|e| format!("Write error: {}", e))?;
+                }
+            }
+            // merge_range applies the anchor's format to every covered blank.
+            // Keep that appearance, but not its potentially different locks.
+            let anchor = &sh.cell_protections[*mr][*mc];
+            for r in *mr..=lr {
+                for c in *mc..=lc {
+                    let protection = &sh.cell_protections[r][c];
+                    if protection == anchor {
+                        continue;
+                    }
+                    let cell_format = if protection.locked { format.clone().set_locked() } else { format.clone().set_unlocked() };
+                    let cell_format = if protection.hidden_formula { cell_format.set_hidden() } else { cell_format.unset_hidden() };
+                    sheet.write_blank(r as u32, c as u16, &cell_format)
+                        .map_err(|e| format!("Write error: {}", e))?;
+                }
+            }
         }
         if sh.frozen_rows > 0 || sh.frozen_cols > 0 {
             sheet
@@ -175,10 +231,12 @@ pub fn save_sheets_to_xlsx_bytes(
             }
         }
 
-        // Row/column hiding (#113): filter- and manually-hidden rows are
-        // indistinguishable once written — a reopened file has no filter
-        // state to restore, just hidden rows, same as real Excel/Sheets
-        // after a filter is "applied" and the file is saved.
+        // Row/column hiding (#113): every hidden row is written hidden,
+        // whether a filter or a manual hide put it there. A ranged filter
+        // additionally writes its autoFilter range and value criteria
+        // below, so reopening restores the definition (and Clear Filter
+        // works); a rangeless session filter has no autoFilter form and
+        // reopens as manual hides, which the loss ledger reports.
         for r in 0..sh.rows {
             if sh.is_row_hidden(r) {
                 sheet
@@ -191,6 +249,39 @@ pub fn save_sheets_to_xlsx_bytes(
                 sheet
                     .set_column_hidden(c as u16)
                     .map_err(|e| format!("Hide column error: {}", e))?;
+            }
+        }
+
+        // Explicit filter persistence (TBL-003): the autoFilter range plus
+        // one value-list column per criterion, listing the values shown.
+        // The header row is the range's top row by OOXML semantics, and
+        // the reader excludes it the same way.
+        if let Some(def) = &sh.filter {
+            if let Some((r0, c0, r1, c1)) = def.range {
+                sheet
+                    .autofilter(r0 as u32, c0 as u16, r1 as u32, c1 as u16)
+                    .map_err(|e| format!("Filter error: {e}"))?;
+                for criterion in &def.columns {
+                    if criterion.col < c0 || criterion.col > c1 {
+                        continue;
+                    }
+                    let mut shown: Vec<String> = def
+                        .distinct_values(sh, criterion.col)
+                        .into_iter()
+                        .filter(|v| !criterion.hidden.contains(v))
+                        .collect();
+                    shown.sort();
+                    let mut condition = rust_xlsxwriter::FilterCondition::new();
+                    if shown.iter().any(|v| v.is_empty()) {
+                        condition = condition.add_list_blanks_filter();
+                    }
+                    for value in shown.iter().filter(|v| !v.is_empty()) {
+                        condition = condition.add_list_filter(value.as_str());
+                    }
+                    sheet
+                        .filter_column(criterion.col as u16, &condition)
+                        .map_err(|e| format!("Filter error: {e}"))?;
+                }
             }
         }
 
@@ -232,7 +323,11 @@ pub fn save_sheets_to_xlsx_bytes(
             );
         }
 
-        for rule in &sh.cond_rules {
+        // Priority order (TBL-003): the writer numbers rules in the order
+        // they are added, so a stored priority must be written first.
+        let mut rules: Vec<&crate::sheet::CondRule> = sh.cond_rules.iter().collect();
+        rules.sort_by_key(|rule| rule.priority);
+        for rule in rules {
             use crate::sheet::CondOp;
             use rust_xlsxwriter::{ConditionalFormatCell, ConditionalFormatCellRule as R, Format};
             let cf_rule = match rule.op {
@@ -301,44 +396,37 @@ pub fn save_sheets_to_xlsx_bytes(
                 ChartKind::Area => XType::Area,
             });
 
-            if !ch.series.is_empty() {
-                for s in &ch.series {
-                    let series = chart.add_series();
-                    if !s.name.is_empty() {
-                        series.set_name(&s.name);
-                    }
-                    series.set_categories((
-                        sh.name.as_str(),
-                        s.cat.0 as u32,
-                        s.cat.1 as u16,
-                        s.cat.2 as u32,
-                        s.cat.1 as u16,
-                    ));
-                    series.set_values((
-                        sh.name.as_str(),
-                        s.val.0 as u32,
-                        s.val.1 as u16,
-                        s.val.2 as u32,
-                        s.val.1 as u16,
-                    ));
+            // The canonical series vector is the single source: the legacy
+            // `cat`/`val` mirror the first series (TBL-002), so writing the
+            // canonical form writes both.
+            for s in ch.canonical_series() {
+                let series = chart.add_series();
+                if !s.name.trim().is_empty() {
+                    // A plain string is not a range: the writer stores it
+                    // as a literal `<tx><v>` name, which the reader takes
+                    // back verbatim.
+                    series.set_name(s.name.as_str());
                 }
-            } else {
-                chart
-                    .add_series()
-                    .set_categories((
-                        sh.name.as_str(),
-                        ch.cat.0 as u32,
-                        ch.cat.1 as u16,
-                        ch.cat.2 as u32,
-                        ch.cat.1 as u16,
-                    ))
-                    .set_values((
-                        sh.name.as_str(),
-                        ch.val.0 as u32,
-                        ch.val.1 as u16,
-                        ch.val.2 as u32,
-                        ch.val.1 as u16,
-                    ));
+                if let Some(hex) = s.color.as_deref().filter(|c| is_chart_hex(c)) {
+                    series.set_format(
+                        rust_xlsxwriter::ChartFormat::new()
+                            .set_solid_fill(rust_xlsxwriter::ChartSolidFill::new().set_color(hex)),
+                    );
+                }
+                series.set_categories((
+                    sh.name.as_str(),
+                    s.cat.0 as u32,
+                    s.cat.1 as u16,
+                    s.cat.2 as u32,
+                    s.cat.1 as u16,
+                ));
+                series.set_values((
+                    sh.name.as_str(),
+                    s.val.0 as u32,
+                    s.val.1 as u16,
+                    s.val.2 as u32,
+                    s.val.1 as u16,
+                ));
             }
 
             if !ch.title.is_empty() {
@@ -357,6 +445,16 @@ pub fn save_sheets_to_xlsx_bytes(
                 LegendPosition::Left => chart.legend().set_position(ChartLegendPosition::Left),
                 LegendPosition::Right => chart.legend().set_position(ChartLegendPosition::Right),
             };
+            // Real size: the writer lays the chart out as a two-cell anchor
+            // over the sheet's own geometry, which the reader inverts back
+            // to these pixels (TBL-002). Missing sizes fall back to the
+            // writer default both ways.
+            if ch.width_px.is_finite() && ch.width_px > 0.0 {
+                chart.set_width(ch.width_px.round().clamp(1.0, 20_000.0) as u32);
+            }
+            if ch.height_px.is_finite() && ch.height_px > 0.0 {
+                chart.set_height(ch.height_px.round().clamp(1.0, 20_000.0) as u32);
+            }
 
             sheet
                 .insert_chart(ch.anchor.0 as u32, ch.anchor.1 as u16, &chart)
@@ -364,7 +462,15 @@ pub fn save_sheets_to_xlsx_bytes(
         }
 
         if sh.protection.protected {
-            sheet.protect();
+            let protection = &sh.protection;
+            sheet.protect_with_options(&rust_xlsxwriter::ProtectionOptions {
+                select_locked_cells: protection.allow_select_locked,
+                select_unlocked_cells: protection.allow_select_unlocked,
+                format_cells: protection.allow_format_cells,
+                insert_rows: protection.allow_insert_rows,
+                delete_rows: protection.allow_delete_rows,
+                ..Default::default()
+            });
         }
     }
     // Named ranges (#113): all workbook-scoped in this app today (no
@@ -382,6 +488,13 @@ pub fn save_sheets_to_xlsx_bytes(
     workbook
         .save_to_buffer()
         .map_err(|e| format!("Save error: {}", e))
+}
+
+/// Whether `color` is a plain six-digit hex fill the chart writer can
+/// emit as sRGB (TBL-002). Theme and indexed colors have no hex to keep.
+fn is_chart_hex(color: &str) -> bool {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A validation rule in xlsx's terms, or `None` where it has none (a
@@ -446,16 +559,23 @@ fn cell_format(
     nf: &suite_common_core::format::NumberFormat,
     style: &crate::style::CellStyle,
     border: &crate::sheet::CellBorder,
+    protection: &crate::sheet::CellProtection,
 ) -> Option<rust_xlsxwriter::Format> {
     use crate::sheet::BorderStyle;
     use crate::style::{HAlign, VAlign};
     use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, FormatUnderline};
     let code = xlsx_num_format(nf);
-    if code.is_none() && style.is_default() && border.is_none() {
+    if code.is_none() && style.is_default() && border.is_none() && protection.locked && !protection.hidden_formula {
         return None;
     }
     let rgb = |c: crate::style::Rgb| Color::RGB(((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32);
     let mut f = Format::new();
+    if !protection.locked {
+        f = f.set_unlocked();
+    }
+    if protection.hidden_formula {
+        f = f.set_hidden();
+    }
     if !border.is_none() {
         let edge = |s: &BorderStyle| match s {
             BorderStyle::None => FormatBorder::None,
@@ -779,9 +899,9 @@ mod tests {
         let path = dir.path().join("f.xlsx");
 
         let mut e = engine();
-        e.set_cell_text(0, 0, "2");
-        e.set_cell_text(0, 1, "3");
-        e.set_cell_text(1, 0, "=A1+B1");
+        e.set_cell_text(0, 0, "2").unwrap();
+        e.set_cell_text(0, 1, "3").unwrap();
+        e.set_cell_text(1, 0, "=A1+B1").unwrap();
         e.evaluate();
         let mut sheet = SheetModel::new("S", 3, 3, 0);
         sheet.data[0][0] = "2".into();
@@ -803,12 +923,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.xlsx");
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "2");
-        engine.set_cell_text(0, 1, "=A1*2");
+        engine.set_cell_text(0, 0, "2").unwrap();
+        engine.set_cell_text(0, 1, "=A1*2").unwrap();
         engine.add_sheet("Sheet2").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "3");
-        engine.set_cell_text(0, 1, "=A1*3");
+        engine.set_cell_text(0, 0, "3").unwrap();
+        engine.set_cell_text(0, 1, "=A1*3").unwrap();
 
         let first = SheetModel::new("Sheet1", 3, 3, 0);
         let second = SheetModel::new("Sheet2", 3, 3, 1);
@@ -830,10 +950,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi-load.xlsx");
         let mut engine = TablesEngine::new(3, 3).unwrap();
-        engine.set_cell_text(0, 0, "4");
+        engine.set_cell_text(0, 0, "4").unwrap();
         engine.add_sheet("Rates").unwrap();
         engine.set_active_sheet(1).unwrap();
-        engine.set_cell_text(0, 0, "=Sheet1!A1*5");
+        engine.set_cell_text(0, 0, "=Sheet1!A1*5").unwrap();
         engine.set_active_sheet(0).unwrap();
         let mut first = SheetModel::new("Sheet1", 3, 3, 0);
         first.sync_from_engine(&engine);
@@ -898,12 +1018,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("names-rt.xlsx");
         let mut engine = TablesEngine::new(4, 2).unwrap();
-        engine.set_cell_text(0, 0, "21");
+        engine.set_cell_text(0, 0, "21").unwrap();
         engine
             .model
             .new_defined_name("Rate", None, "Sheet1!$A$1")
             .unwrap();
-        engine.set_cell_text(1, 0, "=Rate*2");
+        engine.set_cell_text(1, 0, "=Rate*2").unwrap();
         engine.evaluate();
         let mut sheet = SheetModel::new("Sheet1", 4, 2, 0);
         sheet.sync_from_engine(&engine);

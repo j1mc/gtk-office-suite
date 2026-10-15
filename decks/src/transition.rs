@@ -354,19 +354,20 @@ mod tests {
             w: 100.0,
             h: 100.0,
             rotation: 0.0,
-            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None },
+            style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let (red, blue) = (Color(220, 0, 0), Color(0, 0, 220));
         let slide = |objects| Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects,
             notes: String::new(),
-            master_idx: None,
+            master_id: None,
             transition: Transition::MagicMove,
             builds: Vec::new(),
             ids: Default::default(),
-            layout: None,
+            layout_id: None,
         };
         let from = slide(vec![sq(100.0, red)]);
         let mut arriving = sq(430.0, blue);

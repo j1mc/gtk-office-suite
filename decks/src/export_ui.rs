@@ -10,7 +10,6 @@
 use adw::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
-use std::cell::Cell;
 use std::rc::Rc;
 
 use decks_core::DecksController;
@@ -59,7 +58,7 @@ fn stem(ctl: &DecksController) -> String {
         .unwrap_or_else(|| "Presentation".into())
 }
 
-pub(crate) fn register(app: &adw::Application, window: &adw::ApplicationWindow, header: &adw::HeaderBar, ctl: &Rc<DecksController>, current_slide: &Rc<Cell<usize>>) {
+pub(crate) fn register(app: &adw::Application, window: &adw::ApplicationWindow, header: &adw::HeaderBar, ctl: &Rc<DecksController>) {
     if let Some(menu) = suite_common::menus::primary_menu(header.upcast_ref()) {
         // After File, before Edit and Help, unlabelled like the others.
         menu.insert_section(1, None, &menu_section());
@@ -88,11 +87,11 @@ pub(crate) fn register(app: &adw::Application, window: &adw::ApplicationWindow, 
         app.add_action(&act);
     }
     {
-        let (ctl, win, cs) = (ctl.clone(), window.clone(), current_slide.clone());
+        let (ctl, win) = (ctl.clone(), window.clone());
         let act = gio::SimpleAction::new("export-png", None);
         act.connect_activate(move |_, _| {
             let deck = ctl.deck();
-            let index = cs.get();
+            let index = ctl.selected_slide_index().unwrap_or(0);
             let name = format!("{} Slide {}.png", stem(&ctl), index + 1);
             save_as(&win, "Export Slide as PNG", &name, "*.png", "PNG Images", move |p| {
                 crate::export::export_png(&deck, index, 1920, p)
