@@ -302,7 +302,7 @@ pub fn arrange(s: &Slide, layout: &Layout) -> Vec<SlideObject> {
                     continue;
                 }
                 if let Some(q) = score(p, key.as_ref()) {
-                    if best.map_or(true, |(b, _)| q < b) {
+                    if best.is_none_or(|(b, _)| q < b) {
                         best = Some((q, i));
                     }
                 }

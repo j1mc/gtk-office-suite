@@ -1047,6 +1047,9 @@ const PART_NS: [(&str, &str); 3] = [
 /// else the identity mapping above, byte-identical to what the writer
 /// has always emitted.
 fn clr_map_xml(master: &MasterSlide) -> String {
+    if master.color_map.is_empty() {
+        return CLR_MAP.to_string();
+    }
     // The twelve presentation names in schema order, each to the slot
     // the master maps it to, or to itself when it maps nothing.
     let names = ["bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];

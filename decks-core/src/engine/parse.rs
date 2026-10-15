@@ -390,10 +390,10 @@ fn layout_master_theme_paths(
     let dir = Path::new(layout_path).parent().unwrap_or(Path::new("ppt")).to_string_lossy().into_owned();
     let layout_rels = rels_of(archive, budget, layout_path);
     let master = target(&dir, &layout_rels, "slideMaster");
-    let theme = master.as_deref().map(|mp| {
+    let theme = master.as_deref().and_then(|mp| {
         let dir = Path::new(mp).parent().unwrap_or(Path::new("ppt")).to_string_lossy().into_owned();
         target(&dir, &rels_of(archive, budget, mp), "theme")
-    }).flatten();
+    });
     (master, theme)
 }
 
@@ -1540,7 +1540,6 @@ fn transition_kind(name: &str) -> Transition {
 /// Without it the name fell out of the part's file path — "slideLayout1"
 /// for a deck we wrote, so a master called "House Style" came back under a
 /// name nobody chose, and the sidebar showed it.
-
 pub fn parse_c_sld_name(xml: &str) -> Option<String> {
     if xml.is_empty() {
         return None;
