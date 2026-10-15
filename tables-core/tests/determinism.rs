@@ -83,7 +83,7 @@ fn build(inputs: &[(usize, usize, usize, String)], name_first: bool) -> TablesEn
     }
     for (sheet, r, c, input) in inputs {
         engine.set_active_sheet(*sheet).unwrap();
-        engine.set_cell_text(*r, *c, input);
+        engine.set_cell_text(*r, *c, input).unwrap();
     }
     if !name_first {
         define(&mut engine);

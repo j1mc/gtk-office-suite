@@ -365,7 +365,7 @@ mod tests {
             // may be an argument error, but never #NAME?.
             let n = f.args.iter().filter(|a| !a.starts_with('[')).count();
             let args = vec!["1"; n].join(",");
-            engine.set_cell_text(0, 0, &format!("={}({})", f.name, args));
+            engine.set_cell_text(0, 0, &format!("={}({})", f.name, args)).unwrap();
             let got = engine.cell(0, 0);
             assert!(!got.contains("#NAME"), "{} is not a function the engine knows: {got}", f.name);
         }
