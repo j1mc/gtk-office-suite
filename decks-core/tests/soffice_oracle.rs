@@ -92,6 +92,7 @@ fn impress_survives_multi_slide_deck() {
         deck.slides.push(decks_core::engine::Slide {
             title: format!("Slide {}", i),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![SlideObject::TextBox {
                 text: format!("content {}", i),
                 x: 80.0, y: 120.0, w: 300.0, h: 50.0,
@@ -144,6 +145,7 @@ fn text_slide(title: &str, text: &str, notes: &str) -> Slide {
     Slide {
         title: title.into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: text.into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -250,6 +252,7 @@ fn shape_kinds_survive_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "shapes".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![
             SlideObject::Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0, rotation: 0.0 },
             SlideObject::Circle { x: 500.0, y: 300.0, r: 80.0, rotation: 0.0 },
@@ -274,6 +277,7 @@ fn positions_approx_survive_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "pos".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Rect { x: 240.0, y: 180.0, w: 320.0, h: 120.0, rotation: 0.0 }],
         notes: String::new(),
         master_id: None,
@@ -318,6 +322,7 @@ fn empty_slide_survives_impress_rewrite() {
         Slide {
             title: "empty".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id: None,
@@ -339,6 +344,7 @@ fn bold_run_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: "plain bolded".into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -425,6 +431,7 @@ fn styled_run_slide(runs: Vec<Run>) -> Slide {
     Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text,
             x: 100.0, y: 100.0, w: 600.0, h: 80.0,
@@ -525,6 +532,7 @@ fn image_object_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "img".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Image {
             path: png_path.to_string_lossy().to_string(),
             x: 100.0, y: 100.0, w: 200.0, h: 150.0,
@@ -620,6 +628,7 @@ fn odp_geometry_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "g".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::Rect { x: 240.0, y: 180.0, w: 320.0, h: 120.0, rotation: 0.0 }],
         notes: String::new(),
         master_id: None,
@@ -676,6 +685,7 @@ fn odp_bold_run_survives_impress_rewrite() {
     deck.slides = vec![Slide {
         title: "styled".into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects: vec![SlideObject::TextBox {
             text: "plain bolded".into(),
             x: 100.0, y: 100.0, w: 500.0, h: 60.0,
@@ -1077,6 +1087,7 @@ fn impress_runs_in_one_paragraph_come_back_as_one_line() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::TextBox {
@@ -1135,6 +1146,7 @@ fn a_styled_multiline_box_keeps_its_break_and_its_styling_through_impress() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::TextBox {
@@ -1270,6 +1282,7 @@ fn geometry_survives_a_conversion_between_the_two_formats() {
     deck.slides = vec![Slide {
         title: "T".into(),
         background: String::new(),
+        background_picture: None,
         notes: String::new(),
         master_id: None,
         objects: vec![SlideObject::Rect {

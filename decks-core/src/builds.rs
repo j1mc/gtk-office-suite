@@ -171,6 +171,7 @@ mod tests {
         Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![sq(0.0), sq(100.0), sq(200.0)],
             notes: String::new(),
             master_id: None,

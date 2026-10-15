@@ -291,6 +291,7 @@ impl Replica {
         let meta = self.meta(node);
         put(&meta, "title", &s.title);
         put(&meta, "bg", &s.background);
+        put(&meta, "bgpic", &json(&s.background_picture));
         put(&meta, "notes", &s.notes);
         put(&meta, "master", &json(&s.master_id));
         put(&meta, "tr", &json(&s.transition));
@@ -417,6 +418,7 @@ impl Replica {
             let mut s = Slide {
                 title: string_at(&meta, "title").unwrap_or_default(),
                 background: string_at(&meta, "bg").unwrap_or_default(),
+                background_picture: string_at(&meta, "bgpic").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
                 objects: Vec::new(),
                 notes: string_at(&meta, "notes").unwrap_or_default(),
                 master_id: string_at(&meta, "master").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),

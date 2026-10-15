@@ -179,6 +179,7 @@ fn blank_slide() -> Slide {
     Slide {
         title: String::new(),
         background: String::new(),
+        background_picture: None,
         objects: Vec::new(),
         notes: String::new(),
         master_id: None,

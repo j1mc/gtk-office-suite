@@ -37,6 +37,7 @@ fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
     Slide {
         title: title.into(),
         background: "#ffffff".into(),
+        background_picture: None,
         objects,
         notes: String::new(),
         master_id: None,
