@@ -115,7 +115,10 @@ jobs:
           fi
           # test_edit_render.py: the edit -> save -> reopen journeys whose
           # saved files the render lab also compares against LibreOffice.
-          tests/gui/run_gui_tests.sh test_smoke.py test_edit_render.py "$@"
+          # --junitxml: each journey's outcome, which the ledger step below
+          # judges; a collected journey with no outcome did not run (SH-001).
+          tests/gui/run_gui_tests.sh test_smoke.py test_edit_render.py "$@" \
+            --junitxml="$GITHUB_WORKSPACE/smoke-junit.xml"
 
       # Not filtered by app, and deliberately not inside test_smoke.py:
       # these drive a journey that fails on purpose and assert on what it
@@ -136,14 +139,20 @@ jobs:
           # journeys accept either, so this line is how a reader tells which
           # happened on this runner.
           echo "kernel core_pattern: $(cat /proc/sys/kernel/core_pattern)"
-          tests/gui/run_gui_tests.sh test_harness_artifacts.py
+          tests/gui/run_gui_tests.sh test_harness_artifacts.py \
+            --junitxml="$GITHUB_WORKSPACE/harness-junit.xml"
 
-      # C3 for the GUI layer: a journey the ledger cites must still be
-      # collected under that name. Collection is cheap and runs after the
-      # journeys themselves, so a rename shows up as a ledger failure
-      # rather than as evidence that quietly stopped meaning anything.
-      - name: Capability ledger vs. collected journeys
+      # C3/C4/C9 for the GUI layer: a journey the ledger cites must still be
+      # collected under that name, and must have passed in this run unless
+      # the change-based selection above left it out — in which case it is
+      # listed as not selected, never counted as passing. Collection is cheap
+      # and runs after the journeys themselves, so a rename shows up as a
+      # ledger failure rather than as evidence that quietly stopped meaning
+      # anything.
+      - name: Capability ledger vs. collected and completed journeys
         if: always()
+        env:
+          JOURNEY_FILTER: ${{ steps.affected.outputs.filter }}
         run: |
           # -q twice: the runner appends its own -v, and pytest's
           # verbosity is (-v count) minus (-q count) — one -q only cancels
@@ -151,11 +160,43 @@ jobs:
           # parses.
           tests/gui/run_gui_tests.sh test_smoke.py test_edit_render.py test_harness_artifacts.py \
             --collect-only -q -q > collected.txt
+          # The selection the journeys actually ran with, taken from pytest
+          # rather than restated: the same -k over the same files, and the
+          # unfiltered harness file. What it leaves out is recorded as
+          # deselected; a journey missing from both it and the reports is a
+          # journey that did not run.
+          selection=()
+          if [ -n "$JOURNEY_FILTER" ]; then
+            {
+              tests/gui/run_gui_tests.sh test_smoke.py test_edit_render.py \
+                -k "$JOURNEY_FILTER" --collect-only -q -q
+              tests/gui/run_gui_tests.sh test_harness_artifacts.py --collect-only -q -q
+            } > selected.txt
+            selection=(--pytest-selected "tests/gui=selected.txt")
+          fi
           python3 conformance/collect_test_inventory.py \
-            --pytest "tests/gui=collected.txt" --out gui-inventory.json
+            --pytest "tests/gui=collected.txt" "${selection[@]}" \
+            --pytest-junit "tests/gui=smoke-junit.xml" \
+            --pytest-junit "tests/gui=harness-junit.xml" \
+            --revision "$GITHUB_SHA" \
+            --out gui-inventory.json --results-out gui-results.json
           python3 conformance/validate_capabilities.py \
             --lanes conformance/lanes.json --lane smoke \
-            --collected gui-inventory.json
+            --collected gui-inventory.json --results gui-results.json \
+            --candidate "$GITHUB_SHA"
+
+      - name: Keep the journeys' outcomes and inventory
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: smoke-ledger-evidence
+          path: |
+            smoke-junit.xml
+            harness-junit.xml
+            gui-inventory.json
+            gui-results.json
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Upload failure artifacts
         if: failure()
