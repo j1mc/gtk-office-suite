@@ -50,6 +50,7 @@ fn slide_of(objects: Vec<SlideObject>, notes: &str, background: &str) -> Slide {
     Slide {
         title: String::new(),
         background: background.to_string(),
+        background_picture: None,
         objects,
         notes: notes.to_string(),
         master_id: None,
@@ -353,6 +354,7 @@ fn masters_survive_a_snapshot() {
                 Slide {
                     title: String::new(),
                     background: String::new(),
+                    background_picture: None,
                     objects: vec![text_box("on the house master", 10.0, 10.0)],
                     notes: String::new(),
                     // Stamped with the masters' ids below.
@@ -369,6 +371,7 @@ fn masters_survive_a_snapshot() {
                 Slide {
                     title: String::new(),
                     background: String::new(),
+                    background_picture: None,
                     objects: vec![text_box("on the second master", 10.0, 10.0)],
                     notes: String::new(),
                     master_id: None,
@@ -574,6 +577,7 @@ fn the_masters_font_survives_a_snapshot() {
             slides: vec![Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![text_box("body text", 10.0, 10.0)],
                 notes: String::new(),
                 master_id: None,
@@ -639,6 +643,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
             Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![text_box("on first", 10.0, 10.0)],
                 notes: String::new(),
                 master_id: None,
@@ -650,6 +655,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
             Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 objects: vec![text_box("on second", 10.0, 10.0)],
                 notes: String::new(),
                 master_id: None,
@@ -712,6 +718,7 @@ fn the_pptx_declares_the_theme_part_it_ships() {
         slides: vec![Slide {
             title: String::new(),
             background: String::new(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id: Some(7),

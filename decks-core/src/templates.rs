@@ -162,6 +162,7 @@ fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
         title: title.into(),
         // White is "unset": the slide shows its master's background.
         background: "#ffffff".into(),
+        background_picture: None,
         objects,
         notes: String::new(),
         // Stamped with the template master's id below, once it has one.

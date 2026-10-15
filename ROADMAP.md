@@ -72,7 +72,7 @@ gtk-office-suite is the org's flagship **end-user product bet** and a cornerston
   | file | lines | ceiling |
   |---|---|---|
   | `tables/src/window.rs` | 2150 | 2300 |
-  | `decks/src/window.rs` | 1598 | 1800 |
+  | `decks/src/window.rs` | 1601 | 1800 |
   | `letters/src/window.rs` | 1186 | 1300 |
 
   The ceilings are enforced by `scripts/release_gate.py`, and

@@ -50,6 +50,7 @@ pub struct SlideIds {
 pub struct SlideProps {
     pub title: String,
     pub background: String,
+    pub background_picture: Option<crate::engine::BackgroundPicture>,
     pub notes: String,
     /// The slide's master, by stable master id — never a position in the
     /// deck's masters, which reordering or a master insert invalidates.
@@ -65,6 +66,7 @@ impl SlideProps {
         SlideProps {
             title: s.title.clone(),
             background: s.background.clone(),
+            background_picture: s.background_picture.clone(),
             notes: s.notes.clone(),
             master_id: s.master_id,
             transition: s.transition,
@@ -76,6 +78,7 @@ impl SlideProps {
     fn put(self, s: &mut Slide) {
         s.title = self.title;
         s.background = self.background;
+        s.background_picture = self.background_picture;
         s.notes = self.notes;
         s.master_id = self.master_id;
         s.transition = self.transition;
@@ -430,6 +433,7 @@ mod tests {
         Slide {
             title: title.into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: (0..n).map(|i| SlideObject::Rect { x: i as f64 * 10.0, y: 0.0, w: 5.0, h: 5.0, rotation: 0.0 }).collect(),
             notes: String::new(),
             master_id: None,
