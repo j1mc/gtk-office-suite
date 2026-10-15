@@ -137,12 +137,19 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                     "w:txbxContent" => txbx_depth += 1,
                     "w:tabs" => in_tabs = true,
                     "w:p" => {
+                        // A skipped paragraph (in a text box, or nested
+                        // past the tables the scan pairs) clears the
+                        // attachment: its properties belong to no entry.
                         if txbx_depth == 0 {
                             if let Some(fed) = at(&mut out, table_depth) {
                                 fed.push(RawPara::default());
                                 list = Some(table_depth.min(1));
                                 in_para = true;
+                            } else {
+                                list = None;
                             }
+                        } else {
+                            list = None;
                         }
                     }
                     "w:pPr" => {
@@ -167,6 +174,14 @@ fn raw_paragraph_props(path: &str) -> RawParas {
                             in_para = false;
                             ppr_depth = 0;
                             in_pbdr = false;
+                        } else {
+                            // A text box's paragraph ends: attachment
+                            // returns to the outer paragraph's list.
+                            list = match table_depth {
+                                0 => Some(0),
+                                1 => Some(1),
+                                _ => None,
+                            };
                         }
                     }
                     "w:pPr" => {
