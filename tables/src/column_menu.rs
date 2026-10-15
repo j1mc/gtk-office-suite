@@ -156,14 +156,19 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
             let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
             clear_one.connect_clicked(move |_| {
                 popover.popdown();
-                crate::sheet_actions::apply(&ctl, &grid, |c| c.clear_column_filter(col));
+                crate::sheet_actions::apply(&ctl, &grid, |c| { c.clear_column_filter(col); });
                 refresh();
                 grid.queue_draw();
                 // The menu held keyboard focus while open; hand it back to
-                // the grid so grid shortcuts (Ctrl+G and typing) work at
-                // once instead of waiting on whatever focus limbo popdown
-                // leaves behind.
-                grid.grab_focus();
+                // the grid only once the menu has actually closed.
+                // Grabbing it synchronously here races the popover's dying
+                // input grab and loses silently, leaving keyboard focus
+                // where later Ctrl+G and typing cannot reach — the next
+                // name-box jump then times out with stale fx text.
+                let grid = grid.clone();
+                suite_common::popover::on_next_close(&popover, move || {
+                    grid.grab_focus();
+                });
             });
             content.append(&clear_one);
         }
