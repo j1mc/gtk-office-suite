@@ -159,6 +159,10 @@
     "B": "green",
     "C": "green"
   },
+  "letters/mixed-sections": {
+    "A": "green",
+    "B": "green"
+  },
   "letters/named-styles": {
     "A": "green",
     "B": "green",
