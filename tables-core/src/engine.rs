@@ -179,16 +179,26 @@ impl TablesEngine {
     }
 
     /// The editable input for a cell: its formula with the leading `=`,
-    /// else text that recreates it when set back. Plain values come from
-    /// [`Self::input_at`] — except numbers, where a formatted rendering
-    /// does not parse back and the canonical numeric text does. This is
-    /// what undo captures, copy carries, sort moves and save writes; the
-    /// displayed value never stands in for it.
+    /// else text that recreates it when set back. A cell with no input —
+    /// truly empty, or a derived spill cell showing a computed value —
+    /// reports none: input is never invented from a displayed value.
+    /// Plain values otherwise come from [`Self::input_at`] — except
+    /// numbers, where a formatted rendering does not parse back and the
+    /// canonical numeric text does. This is what undo captures, copy
+    /// carries, sort moves and save writes; the displayed value never
+    /// stands in for it.
     pub fn editable_input_at(&self, sheet: usize, row: usize, col: usize) -> String {
-        if self.formula_at(sheet, row, col).is_none() && self.is_number_at(sheet, row, col) {
+        if self.formula_at(sheet, row, col).is_some() {
+            return self.input_at(sheet, row, col);
+        }
+        let input = self.input_at(sheet, row, col);
+        if input.is_empty() {
+            return String::new();
+        }
+        if self.is_number_at(sheet, row, col) {
             self.cell_at(sheet, row, col)
         } else {
-            self.input_at(sheet, row, col)
+            input
         }
     }
 
