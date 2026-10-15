@@ -225,7 +225,9 @@ class EveryExportAppRunsInCI(unittest.TestCase):
     list by hand. Tables gained a hook and opted fixtures in, but was added
     to none of the three, so its export verdicts were never measured in CI
     and its baseline entries were never enforced (#1194). Derived here so a
-    fourth app cannot repeat it.
+    fourth app cannot repeat it. The matrix is now the apps a change reaches
+    (tools/render-lab/real_scope.py), every one of them outside a pull
+    request, so the scope's apps are what must equal the exporting apps.
     """
 
     WORKFLOW = os.path.join(
@@ -236,26 +238,34 @@ class EveryExportAppRunsInCI(unittest.TestCase):
         import yaml
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "render-lab"))
         import export_render
+        import real_scope
         self.apps = set(export_render.EXPORT_APPS)
+        self.scope_apps = set(real_scope.APPS)
         with open(self.WORKFLOW, encoding="utf-8") as handle:
             self.jobs = yaml.safe_load(handle)["jobs"]
         self.assertTrue(self.apps, "export_render.EXPORT_APPS is empty; this check is vacuous")
 
     def test_the_export_lab_matrix_runs_every_export_app(self):
-        self.assertEqual(set(self.jobs["export-lab"]["strategy"]["matrix"]["app"]), self.apps)
+        self.assertEqual(self.jobs["export-lab"]["strategy"]["matrix"]["app"],
+                         "${{ fromJSON(needs.scope.outputs.apps) }}")
+        self.assertEqual(self.scope_apps, self.apps)
 
     def test_the_report_downloads_and_checks_every_export_app(self):
         steps = self.jobs["export-report"]["steps"]
-        downloaded = {
-            step["with"]["name"].removeprefix("export-lab-")
+        downloads = {
+            step["with"]["name"].removeprefix("export-lab-"): step
             for step in steps
             if "download-artifact" in str(step.get("uses", ""))
         }
-        self.assertEqual(downloaded, self.apps)
-        check = next(s["run"] for s in steps if s.get("name", "").startswith("Check every app"))
+        self.assertEqual(set(downloads), self.apps)
+        inscope = next(s["run"] for s in steps if s.get("id") == "inscope")
         for app in sorted(self.apps):
             with self.subTest(app=app):
-                self.assertRegex(check, rf"for app in [^;]*\b{app}\b")
+                self.assertRegex(inscope, rf"for app in [^;]*\b{app}\b")
+                self.assertEqual(downloads[app].get("if"), f"steps.inscope.outputs.{app} == 'true'")
+        check = next(s for s in steps if s.get("name", "").startswith("Check every app"))
+        self.assertEqual(check["env"]["APPS"], "${{ needs.scope.outputs.apps }}")
+        self.assertIn('for app in $(jq -r \'.[]\' <<<"$APPS")', check["run"])
 
 
 class ReportsSkipCancelledRuns(unittest.TestCase):

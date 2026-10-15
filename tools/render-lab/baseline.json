@@ -44,6 +44,10 @@
     "A": "green",
     "B": "green"
   },
+  "decks/preset-shapes": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/rotation": {
     "A": "green",
     "B": "green",
@@ -174,6 +178,10 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/mixed-sections": {
+    "A": "green",
+    "B": "green"
   },
   "letters/named-styles": {
     "A": "green",

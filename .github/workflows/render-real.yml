@@ -77,7 +77,8 @@ jobs:
             exit 1
           }
           git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          run=$(python3 tools/render-lab/real_scope.py --app "$APP" --changed "$RUNNER_TEMP/changed.txt")
+          run=$(python3 tools/render-lab/real_scope.py --workflow .github/workflows/render-real.yml \
+                  --app "$APP" --changed "$RUNNER_TEMP/changed.txt")
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [ "$run" = false ]; then
             echo "Nothing this pull request changes reaches $APP's rendering (tools/render-lab/real_scope.py), so its real documents were not rendered: they would render as on main." >> "$GITHUB_STEP_SUMMARY"

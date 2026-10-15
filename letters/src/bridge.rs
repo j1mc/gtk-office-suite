@@ -519,6 +519,19 @@ pub fn selection_fragment(buf: &gtk::TextBuffer, start: usize, end: usize) -> le
     letters_core::fragment::from_sequence(doc, seq(start), seq(end))
 }
 
+/// The section breaks between buffer offsets `start` and `end`, as a copy
+/// carries them beside its fragment (`letters_core::sections::carried`).
+pub fn selection_section_breaks(buf: &gtk::TextBuffer, start: usize, end: usize) -> Vec<letters_core::sections::CarriedBreak> {
+    let Some(m) = crate::live::of(buf) else { return Vec::new() };
+    let snap = m.borrow_mut().snapshot();
+    let (doc, starts) = (&snap.doc, &snap.starts);
+    let seq = |off: usize| {
+        let (para, offset) = paragraph_offset(doc, starts, off);
+        letters_core::edit::paragraph_start(doc, para) + offset
+    };
+    letters_core::sections::carried(doc, seq(start), seq(end))
+}
+
 /// Buffer offset of char `offset` of paragraph `para`'s layout text, the
 /// paragraph's text starting at buffer offset `start`.
 pub fn buffer_offset(para: &Paragraph, start: usize, offset: usize) -> usize {
@@ -874,7 +887,9 @@ fn para_tag(buf: &gtk::TextBuffer, style: &letters_core::ParaStyle) -> Option<St
         }
         if style.list == letters_core::ListKind::None {
             if style.left_indent_pt != 0.0 {
-                tag.set_left_margin(EDITOR_LEFT_MARGIN_PX + px(style.left_indent_pt));
+                // A negative indent (into the page margin) is real in Word
+                // documents, but GTK refuses a negative margin and aborts.
+                tag.set_left_margin((EDITOR_LEFT_MARGIN_PX + px(style.left_indent_pt)).max(0));
             }
             if style.first_line_indent_pt != 0.0 {
                 tag.set_indent(px(style.first_line_indent_pt));
