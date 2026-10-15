@@ -3518,6 +3518,11 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
             return self.app.child(roleName="combo box").name
         self.wait_until(step, lambda got: got == name, interval=0.6,
                         description=f"the sheet switcher to select {name}")
+        # The popup is invisible to AT-SPI, so a retry can land the
+        # selection while leaving it open; an open popup holds the
+        # keyboard and every later Ctrl+G misses. Escape dismisses it,
+        # and in the grid it only hands focus back to the grid.
+        rawinput.keyCombo("Escape")
 
     def test_rename_reorder_delete_undo_save_and_reopen(self):
         import re
@@ -3572,6 +3577,11 @@ class TablesTwoSheetJourneySmoke(TablesCellEntryMixin, BaseGUITestCase):
         # TBL-006: edit the precedent on Sheet1, then save WITHOUT
         # visiting Totals first. The saved Totals sheet must still carry
         # the formula and the freshly recalculated cached value.
+        # Escape first: focus may still sit in the sheet switcher after
+        # the keyboard-driven switch above, and Ctrl+G only reaches the
+        # name box from the grid — without this the jump below has nowhere
+        # to go.
+        rawinput.keyCombo("Escape")
         self._put("A1", "7")
         self._wait_state((["Totals", "Sheet1"], 1, ("7", None)), "Sheet1's edited precedent to land")
 
