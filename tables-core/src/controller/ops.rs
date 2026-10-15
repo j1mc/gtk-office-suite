@@ -206,16 +206,13 @@ fn check_cell(state: &WorkbookState, sheet: usize, row: usize, col: usize) -> Re
     if row < s.rows && col < s.cols { Ok(()) } else { Err(format!("cell ({row}, {col}) is outside sheet {sheet}")) }
 }
 
-/// Re-read a sheet's values from the engine after a structural change.
-pub(super) fn resync(state: &mut WorkbookState, sheet: usize) {
-    let previous = state.active_sheet;
-    if state.engine.set_active_sheet(sheet).is_err() {
-        return;
-    }
-    state.active_sheet = sheet;
-    state.sync_active_sheet();
-    let _ = state.engine.set_active_sheet(previous);
-    state.active_sheet = previous;
+/// Re-read every sheet's projection after an engine mutation made outside
+/// `WorkbookState`'s syncing writers (structural changes, name changes,
+/// sheet add/delete). Cell writes go through those writers and arrive
+/// already synced; these paths resync here instead, before the op returns,
+/// so no consumer ever reads a dependent sheet's stale values.
+pub(super) fn resync_all(state: &mut WorkbookState) {
+    state.sync_all_sheets();
 }
 
 /// Re-derive a sheet's filter visibility after its cells or rows changed
@@ -232,7 +229,7 @@ pub(super) fn refilter(state: &mut WorkbookState, sheet: usize) {
 pub(super) fn cell_content(state: &WorkbookState, sheet: usize, row: usize, col: usize) -> CellContent {
     let s = state.sheets[sheet].borrow();
     CellContent {
-        input: state.engine.input_at(sheet, row, col),
+        input: state.engine.editable_input_at(sheet, row, col),
         format: s.formats[row][col].clone(),
         style: s.styles[row][col].clone(),
         border: s.borders[row][col].clone(),
@@ -243,13 +240,16 @@ pub(super) fn cell_content(state: &WorkbookState, sheet: usize, row: usize, col:
 }
 
 /// Put back formula cells whose text differs from what they should be.
-fn apply_relinks(state: &mut WorkbookState, relinks: &[Relink]) {
+/// A relink that cannot be restored fails the op it belongs to: undoing
+/// a delete must restore the workbook exactly, not approximately.
+fn apply_relinks(state: &mut WorkbookState, relinks: &[Relink]) -> Result<(), String> {
     for (id, row, col, input) in relinks {
         let Some(sheet) = state.sheet_index_for_id(*id) else { continue };
         if state.engine.input_at(sheet, *row, *col) != *input {
-            state.set_cell_input_on_sheet(sheet, *row, *col, input);
+            state.set_cell_input_on_sheet(sheet, *row, *col, input)?;
         }
     }
+    Ok(())
 }
 
 /// The workbook's formula cells at the positions `keep` accepts, as
@@ -301,8 +301,10 @@ impl Op {
         match self {
             Op::SetCell { sheet, row, col, input } => {
                 check_cell(state, si, *row, *col)?;
-                let old = state.engine.input_at(si, *row, *col);
-                state.set_cell_input_on_sheet(si, *row, *col, input);
+                let old = state.engine.editable_input_at(si, *row, *col);
+                // The write syncs every sheet's projection itself; a
+                // rejection fails the op before any history step.
+                state.set_cell_input_on_sheet(si, *row, *col, input)?;
                 refilter(state, si);
                 Ok(Op::SetCell { sheet: *sheet, row: *row, col: *col, input: old })
             }
@@ -373,9 +375,9 @@ impl Op {
                     }
                 }
                 state.grow_engine();
-                state.set_cell_inputs_on_sheet(si, inputs.iter().map(|(r, c, i)| (*r, *c, i.as_str())));
-                apply_relinks(state, relinks);
-                resync(state, si);
+                state.set_cell_inputs_on_sheet(si, inputs.iter().map(|(r, c, i)| (*r, *c, i.as_str())))?;
+                apply_relinks(state, relinks)?;
+                resync_all(state);
                 // Inserted lines shift the filter range (model); visibility follows the moved values.
                 refilter(state, si);
                 Ok(Op::Delete { sheet: *sheet, axis: *axis, at: *at, count: n })
@@ -429,7 +431,7 @@ impl Op {
                         Axis::Cols => s.delete_cols(*at, *count),
                     }
                 }
-                resync(state, si);
+                resync_all(state);
                 refilter(state, si);
                 Ok(Op::Insert { sheet: *sheet, axis: *axis, at: *at, lines, relinks, merges: Some(merges) })
             }
@@ -490,8 +492,8 @@ impl Op {
                     }
                 }
                 let old: Vec<(usize, usize, String)> =
-                    cells.iter().map(|(r, c, _)| (*r, *c, state.engine.input_at(si, *r, *c))).collect();
-                state.set_cell_inputs_on_sheet(si, cells.iter().map(|(r, c, i)| (*r, *c, i.as_str())));
+                    cells.iter().map(|(r, c, _)| (*r, *c, state.engine.editable_input_at(si, *r, *c))).collect();
+                state.set_cell_inputs_on_sheet(si, cells.iter().map(|(r, c, i)| (*r, *c, i.as_str())))?;
                 refilter(state, si);
                 // Undone in reverse, so a cell set twice in one op gets its
                 // first value back.
@@ -524,9 +526,7 @@ impl Op {
                 }
                 state.engine.set_defined_name(name, formula.as_deref())?;
                 state.engine.evaluate();
-                for s in 0..state.sheets.len() {
-                    resync(state, s);
-                }
+                resync_all(state);
                 Ok(Op::DefineName { name: name.clone(), formula: old })
             }
             Op::AddSheet { index, name, sheet_id, content, relinks } => {
@@ -545,12 +545,10 @@ impl Op {
                 state.active_sheet = state.engine.active_sheet();
                 state.grow_engine();
                 if let Some(c) = content {
-                    state.set_cell_inputs_on_sheet(*index, c.inputs.iter().map(|(r, col, i)| (*r, *col, i.as_str())));
+                    state.set_cell_inputs_on_sheet(*index, c.inputs.iter().map(|(r, col, i)| (*r, *col, i.as_str())))?;
                 }
-                apply_relinks(state, relinks);
-                for s in 0..state.sheets.len() {
-                    resync(state, s);
-                }
+                apply_relinks(state, relinks)?;
+                resync_all(state);
                 Ok(Op::DeleteSheet { sheet: id })
             }
             Op::DeleteSheet { .. } => {
@@ -562,16 +560,14 @@ impl Op {
                 let inputs: Vec<(usize, usize, String)> = (0..model.rows)
                     .flat_map(|r| (0..model.cols).map(move |c| (r, c)))
                     .filter_map(|(r, c)| {
-                        let input = state.engine.input_at(*index, r, c);
+                        let input = state.engine.editable_input_at(*index, r, c);
                         (!input.is_empty()).then_some((r, c, input))
                     })
                     .collect();
                 let relinks = relinks_where(state, |s, _, _| s != *index);
                 let (name, sheet_id) = (model.name.clone(), model.sheet_id);
                 state.delete_sheet(*index)?;
-                for s in 0..state.sheets.len() {
-                    resync(state, s);
-                }
+                resync_all(state);
                 Ok(Op::AddSheet { index: *index, name, sheet_id: Some(sheet_id), content: Some(Box::new(SheetContent { model, inputs })), relinks })
             }
         }
@@ -813,7 +809,7 @@ impl WorkbookImage {
                 let inputs = (0..s.rows)
                     .flat_map(|r| (0..s.cols).map(move |c| (r, c)))
                     .filter_map(|(r, c)| {
-                        let input = state.engine.input_at(i, r, c);
+                        let input = state.engine.editable_input_at(i, r, c);
                         (!input.is_empty()).then_some((r, c, input))
                     })
                     .collect();
