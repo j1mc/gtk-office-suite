@@ -102,21 +102,31 @@ cannot quietly stop meaning anything:
 
 ```bash
 python3 conformance/validate_capabilities.py          # structure, waivers, duplicates
+python3 conformance/validate_capabilities.py --lanes conformance/lanes.json  # + lane, layer, candidate maps
 python3 conformance/collect_test_inventory.py --junit "=target/nextest/ci/junit.xml" \
-    --out inv.json --results-out res.json
-python3 conformance/validate_capabilities.py --collected inv.json --results res.json
+    --revision "$(git rev-parse HEAD)" --out inv.json --results-out res.json
+python3 conformance/validate_capabilities.py --lanes conformance/lanes.json --lane test \
+    --collected inv.json --results res.json --candidate "$(git rev-parse HEAD)"
 ```
 
 A renamed or deleted test, a layer with no test, a skipped or failing test
 behind a `verified` claim, an expired waiver, or two test classes sharing a
-name all fail the build. Add an entry when you can name the tests that
+name all fail the build. So does evidence filed under the wrong layer (a
+core unit test cited as `gui`), a release-critical test in a lane the release
+job does not re-run, and a lane report that is empty, incomplete or recorded
+at another revision (SH-001). Add an entry when you can name the tests that
 prove a capability *and* the revision you watched them pass on; leave the
 status at `implemented-unverified` until then. `docs/PARITY.md` remains the
 human-facing scorecard — the ledger is what a reviewer can check.
 
 ## CI map
 
-| Workflow | Trigger | Gates? | Contents |
+"Fails the run" is not "blocks the merge": branch protection on `main`
+requires only `test` (observed 2026-10-15). The generated proposal for the
+required contexts, and why each other job is optional, is in
+[ci-gates.md](readiness-2026-09/ci-gates.md#the-required-check-boundary-sh-001).
+
+| Workflow | Trigger | Fails the run? | Contents |
 |---|---|---|---|
 | `ci.yml` | push, PR | yes | cargo check, clippy, unit tests; coverage on main; Flatpak builds |
 | `gui-tests.yml` → `smoke` | push/PR to main | yes | tier 2 under Xvfb |
@@ -124,9 +134,11 @@ human-facing scorecard — the ledger is what a reviewer can check.
 | `gui-container.yml` | container file changes, weekly, manual | yes (for itself) | builds/verifies/publishes the GUI test image |
 | `feature-verification.yml` | `verify-video` label, manual | yes | records journeys in the container, posts the clips on the PR |
 
-The capability ledger is checked in three places: structure in the fast PR
-lane, against collected Rust tests and their outcomes in `ci.yml`'s test
-job, and against collected journeys in `gui-tests.yml`'s smoke job.
+The capability ledger is checked in each lane against that lane's own
+collected tests and recorded outcomes, at the lane's revision: structure and
+the lane/layer maps in the fast PR lane, the Rust tests in `ci.yml`'s `test`
+job, the validator tests in `python-checks`, the journeys in `gui-tests.yml`'s
+`smoke` job, and the LibreOffice oracle in `nightly.yml`'s `oracle` job.
 
 The versioned office interoperability contract lives in
 [`interop/corpus.json`](../interop/corpus.json). Its cheap structural check
