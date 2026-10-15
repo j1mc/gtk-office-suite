@@ -5457,7 +5457,10 @@ class TablesProtectionSettingsSmoke(TablesCellEntryMixin, BaseGUITestCase):
     _formula = TablesSheetStructureSmoke._formula
 
     def _fx(self):
-        return self.app.child(name="Formula input", roleName="text").text
+        # dogtail's .text asks for characters 0..-1, which GTK 4's text
+        # interface answers with nothing; ask for the count it reports.
+        text = self.app.child(name="Formula input", roleName="text").queryText()
+        return text.getText(0, text.characterCount)
 
     def _sheet(self):
         return self._cells()[1]["sheet"]
