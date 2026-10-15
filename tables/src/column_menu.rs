@@ -92,7 +92,7 @@ fn open(ctl: &Ctl, grid: &gtk::DrawingArea, h: &gtk::Adjustment, refresh: &Rc<dy
         let (ctl, grid, refresh, popover) = (ctl.clone(), grid.clone(), refresh.clone(), popover.clone());
         b.connect_clicked(move |_| {
             popover.popdown();
-            if !crate::sheet_actions::apply(&ctl, &grid, |c| c.sort_column(col, direction)) {
+            if !crate::sheet_actions::apply(&ctl, &grid, |c| { c.sort_column(col, direction); }) {
                 return;
             }
             refresh();
