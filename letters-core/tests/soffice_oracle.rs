@@ -2128,16 +2128,12 @@ fn paragraph_shading_and_borders_survive_writer_both_ways() {
     let close = |got: &Document, how: &str| {
         let boxed = &para_with_text(got, "shaded and boxed").style;
         assert_eq!(boxed.shading.as_deref(), Some("D9D9D9"), "{how}: shading lost");
-        let edge = |e: &Option<ParaBorder>, what: &str| -> &ParaBorder {
-            match e {
-                Some(e) => e,
-                None => panic!("{how}: {what} border lost: {:?}", boxed.borders),
-            }
-        };
-        let top = edge(&boxed.borders.top, "top");
+        assert!(boxed.borders.top.is_some(), "{how}: top border lost: {:?}", boxed.borders);
+        assert!(boxed.borders.bottom.is_some(), "{how}: bottom border lost: {:?}", boxed.borders);
+        let top = boxed.borders.top.as_ref().unwrap();
         assert_eq!((top.style, top.color.as_str()), (BorderStyle::Single, "FF0000"), "{how}: top border changed");
         assert!((top.width_pt - 0.75).abs() < 0.25, "{how}: top width moved: {}", top.width_pt);
-        let bottom = edge(&boxed.borders.bottom, "bottom");
+        let bottom = boxed.borders.bottom.as_ref().unwrap();
         assert_eq!((bottom.style, bottom.color.as_str()), (BorderStyle::Dashed, "0000FF"), "{how}: bottom border changed");
         assert!(boxed.borders.left.is_none() && boxed.borders.right.is_none(), "{how}: phantom side borders: {:?}", boxed.borders);
         let plain = &para_with_text(got, "ordinary").style;
