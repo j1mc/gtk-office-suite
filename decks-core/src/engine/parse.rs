@@ -1358,6 +1358,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             builds: super::timing::read_builds(&slide_xml, |spid| object_ids.iter().position(|id| *id == Some(spid)).and_then(|i| ids.objects.get(i).copied())),
             ids,
             layout_id: None,
+            hidden: slide_is_hidden(&slide_xml),
         });
     }
 
@@ -1528,7 +1529,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     }
 
     if slides.is_empty() {
-        slides.push(Slide {
+        slides.push(Slide { hidden: false,
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2064,6 +2065,15 @@ impl GroupFrame {
         let sy = if ch_ext.1 > 0.0 { ext.1 / ch_ext.1 } else { 1.0 };
         (off.0 + (x - ch_off.0) * sx, off.1 + (y - ch_off.1) * sy, w * sx, h * sy)
     }
+}
+
+/// Whether a slide part is hidden: `show="0"` (or `false`) on its `p:sld`,
+/// which PowerPoint writes for "Hide Slide".
+fn slide_is_hidden(slide_xml: &str) -> bool {
+    let Some(at) = slide_xml.find("<p:sld") else { return false };
+    let Some(len) = slide_xml[at..].find('>') else { return false };
+    let tag = &slide_xml[at..at + len];
+    tag.contains(" show=\"0\"") || tag.contains(" show=\"false\"")
 }
 
 /// A rectangle given in the innermost of `groups`, on the slide.
