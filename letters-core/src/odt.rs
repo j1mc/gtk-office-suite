@@ -1147,10 +1147,6 @@ fn styles_xml(doc: &Document) -> String {
             })
             .collect()
     };
-    let layouts: String = masters
-        .iter()
-        .map(|m| format!("<style:page-layout style:name=\"{}\">{}</style:page-layout>", m.layout, page_layout_properties(m.page.as_ref())))
-        .collect();
     let mut hf = String::new();
     // A header's or footer's pictures are frames at the start of its
     // paragraph, a floating one placed by a graphic style of styles.xml's.
@@ -1165,6 +1161,38 @@ fn styles_xml(doc: &Document) -> String {
     let shows = |story: (Option<&str>, bool), pictures: &[Run]| {
         if story.1 { story.0.is_some() || !pictures.is_empty() } else { story.0.is_some_and(|t| !t.is_empty()) }
     };
+    // A section's header and footer sit in its margins as Writer lays a
+    // page out: the page margin runs to the header, whose minimum height
+    // keeps the body where the section's margin (Word's, the model's)
+    // puts it; the reader adds it back. A document of one section writes
+    // its page as before.
+    let distance = crate::layout::LayoutOptions::default().header_distance_pt;
+    let layouts: String = masters
+        .iter()
+        .map(|m| {
+            let room = |shown: bool, margin: f64| (!doc.sections.is_empty() && shown && margin > distance).then_some(margin - distance);
+            let header = m.page.and_then(|p| room(shows(m.header, &doc.header_pictures), p.margin_top_pt));
+            let footer = m.page.and_then(|p| room(shows(m.footer, &doc.footer_pictures), p.margin_bottom_pt));
+            let page = m.page.map(|mut p| {
+                if header.is_some() {
+                    p.margin_top_pt = distance;
+                }
+                if footer.is_some() {
+                    p.margin_bottom_pt = distance;
+                }
+                p
+            });
+            let mut out = format!("<style:page-layout style:name=\"{}\">{}", m.layout, page_layout_properties(page.as_ref()));
+            if let Some(h) = header {
+                out.push_str(&format!("<style:header-style><style:header-footer-properties fo:min-height=\"{h:.2}pt\" fo:margin-bottom=\"0pt\"/></style:header-style>"));
+            }
+            if let Some(h) = footer {
+                out.push_str(&format!("<style:footer-style><style:header-footer-properties fo:min-height=\"{h:.2}pt\" fo:margin-top=\"0pt\"/></style:footer-style>"));
+            }
+            out.push_str("</style:page-layout>");
+            out
+        })
+        .collect();
     let own_shown = masters.iter().any(|m| (m.header.1 && shows(m.header, &doc.header_pictures)) || (m.footer.1 && shows(m.footer, &doc.footer_pictures)));
     // An aligned header's or footer's paragraph names a style of its own.
     let aligned = |name: &str, a: Alignment, styles: &mut String| -> String {
@@ -3105,6 +3133,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut layout_name = String::new();
         let mut master_layout: Option<String> = None;
         let mut last_layout: Option<String> = None;
+        // Inside a page layout's `style:header-style` (true) or
+        // `style:footer-style` (false).
+        let mut hf_style: Option<bool> = None;
         // Inside an alternative text (`svg:title`/`svg:desc`) of a frame,
         // which is not the header's text.
         let mut in_alt = false;
@@ -3166,6 +3197,26 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             .and_then(|v| v.parse::<u8>().ok()).unwrap_or(1).max(1);
                         page.column_gap_pt = attr_val(&e, "fo:column-gap")
                             .and_then(|v| parse_length_pt(&v)).unwrap_or(page.column_gap_pt);
+                    }
+                }
+                // Writer's page margin runs to the header; the header's
+                // own height and spacing sit between it and the body, and
+                // Word's top margin (what the model holds) is to the body.
+                // So a header area adds to the top margin, a footer area
+                // to the bottom one.
+                Ok(Event::Start(e)) if e.name().as_ref() == "style:header-style" || e.name().as_ref() == "style:footer-style" => {
+                    hf_style = Some(e.name().as_ref() == "style:header-style");
+                }
+                Ok(Event::End(e)) if e.name().as_ref() == "style:header-style" || e.name().as_ref() == "style:footer-style" => hf_style = None,
+                Ok(Event::Empty(e)) | Ok(Event::Start(e)) if hf_style.is_some() && e.name().as_ref() == "style:header-footer-properties" => {
+                    let len = |name: &str| attr_val(&e, name).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
+                    let height = len("fo:min-height").max(len("svg:height"));
+                    if let Some(page) = layouts.get_mut(&layout_name) {
+                        if hf_style == Some(true) {
+                            page.margin_top_pt += height + len("fo:margin-bottom");
+                        } else {
+                            page.margin_bottom_pt += height + len("fo:margin-top");
+                        }
                     }
                 }
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:master-page" => {
