@@ -568,7 +568,9 @@ pub(crate) fn register(h: EditorHandles, editor_host: &gtk::Overlay) {
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let colour = button("color-select-symbolic", "Text Colour of Selection");
-    let spacing = button("format-line-spacing-symbolic", "Paragraph Spacing");
+    let spacing = gtk::Button::with_label(&suite_common::i18n("Spacing"));
+    spacing.set_tooltip_text(Some("Paragraph Spacing"));
+    spacing.update_property(&[gtk::accessible::Property::Label("Paragraph Spacing")]);
     let outdent = button("format-indent-less-symbolic", "Decrease Paragraph Indent");
     let indent = button("format-indent-more-symbolic", "Increase Paragraph Indent");
     let cancel = gtk::Button::with_label(&suite_common::i18n("Cancel"));
