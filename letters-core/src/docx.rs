@@ -1354,13 +1354,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             for p in group {
                 let tc = p.style.table_cell.expect("grouped by table_cell");
                 if let Some(mut cell) = tbl.cell(tc.row as usize, tc.col as usize) {
-                    // A new cell already holds an empty paragraph: replace
-                    // it, or every cell opens with a blank line in Writer
-                    // and Word (our reader skipped empty cell paragraphs,
-                    // which hid it; #1296).
-                    if filled.insert((tc.row, tc.col)) {
-                        cell.remove_first_empty_paragraph();
-                    }
+                    filled.insert((tc.row, tc.col));
                     let mut cp = cell.add_paragraph("");
                     // A cell paragraph's typography, which the reader maps
                     // the same way it maps a body paragraph's: without
@@ -1424,6 +1418,16 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         if run.style.highlight { r = r.highlight("yellow"); }
                         if run.style.code { r = r.style("SourceText"); }
                     }
+                }
+            }
+            // A new cell already holds an empty paragraph: drop it once the
+            // cell has its own, or every cell opens with a blank line in
+            // Writer and Word (our reader skipped empty cell paragraphs,
+            // which hid it; #1296). rdocx 0.16 keeps a cell's last
+            // paragraph, so this has to come after the cell is filled.
+            for (row, col) in filled {
+                if let Some(mut cell) = tbl.cell(row as usize, col as usize) {
+                    cell.remove_first_empty_paragraph();
                 }
             }
             // Merged cells: the first spans its columns (`w:gridSpan`) and
