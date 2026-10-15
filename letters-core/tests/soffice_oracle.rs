@@ -2090,17 +2090,17 @@ fn keep_lines_and_widow_control_survive_writer_both_ways() {
     let dp = sub.join("keep.docx");
     assert!(dp.exists(), "soffice did not convert keep.odt to docx");
     eprintln!("DIAG converted pPr: {}", ppr_of(&dp, "may strand"));
-    let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
-    close(&rt, "odt → Writer → docx");
+    // Probe B (export leg): our docx rewritten as docx. If Writer keeps
+    // the off bit, its exporter is fine and the odt import drops it.
+    let _ = soffice_convert(bin, &docx_path, "docx").ok();
+    eprintln!("DIAG rewritten pPr: {}", ppr_of(&docx_path, "may strand"));
     // Probe A (import leg): our odt rewritten as odt. If Writer keeps
     // fo:widows="1", its import is fine and the docx exporter drops it.
     // Converted in place: keep.odt now holds Writer's rewrite.
     let _ = soffice_convert(bin, &op, "odt").ok();
     eprintln!("DIAG rewritten style: {}", style_of(&op, "1", "1"));
-    // Probe B (export leg): our docx rewritten as docx. If Writer keeps
-    // the off bit, its exporter is fine and the odt import drops it.
-    let _ = soffice_convert(bin, &docx_path, "docx").ok();
-    eprintln!("DIAG rewritten pPr: {}", ppr_of(&docx_path, "may strand"));
+    let rt = docx::read(dp.to_str().unwrap()).expect("read converted docx");
+    close(&rt, "odt → Writer → docx");
 }
 
 /// DIAGNOSTIC (temporary): the paragraph-properties carrying the given
