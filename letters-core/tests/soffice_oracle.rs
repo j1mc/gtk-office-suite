@@ -2128,8 +2128,11 @@ fn paragraph_shading_and_borders_survive_writer_both_ways() {
     let close = |got: &Document, how: &str| {
         let boxed = &para_with_text(got, "shaded and boxed").style;
         assert_eq!(boxed.shading.as_deref(), Some("D9D9D9"), "{how}: shading lost");
-        let edge = |e: &Option<ParaBorder>, what: &str| {
-            e.as_ref().unwrap_or_else(|| panic!("{how}: {what} border lost: {:?}", boxed.borders))
+        let edge = |e: &Option<ParaBorder>, what: &str| -> &ParaBorder {
+            match e {
+                Some(e) => e,
+                None => panic!("{how}: {what} border lost: {:?}", boxed.borders),
+            }
         };
         let top = edge(&boxed.borders.top, "top");
         assert_eq!((top.style, top.color.as_str()), (BorderStyle::Single, "FF0000"), "{how}: top border changed");
