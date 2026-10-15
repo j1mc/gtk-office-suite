@@ -226,15 +226,19 @@ pub struct ShapeStyle {
 
 impl Default for ShapeStyle {
     /// A new shape as the default Office theme draws one: accent 1 fill
-    /// with a darker outline of the same hue.
+    /// with a darker outline of the same hue. Both are explicit locals
+    /// (DCK-006): a save writes them back as the literals they are, so
+    /// the round trip keeps the references, not just the colours.
     fn default() -> Self {
+        use super::theme::{ColorRef, FillSrc, StrokeSrc};
         let accent1 = Color(0x44, 0x72, 0xC4);
+        let line = accent1.lum(Some(50_000), None);
         ShapeStyle {
             fill: Some(accent1),
             gradient: None,
-            stroke: Some(Stroke { color: accent1.lum(Some(50_000), None), width: 1.0 }),
-            fill_src: None,
-            stroke_src: None,
+            stroke: Some(Stroke { color: line, width: 1.0 }),
+            fill_src: Some(FillSrc::Color(ColorRef::Rgb(accent1.to_hex()))),
+            stroke_src: Some(StrokeSrc::Color(ColorRef::Rgb(line.to_hex()))),
         }
     }
 }
