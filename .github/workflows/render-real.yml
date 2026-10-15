@@ -6,24 +6,30 @@ name: Render parity (real documents)
 # tools/render-lab/real_corpus/manifest.json. The fixtures find bugs; this
 # shows whether users would notice them.
 #
-# Nightly and on demand, and on a PR that changes the corpus or the lab.
+# Nightly, on demand, and on every pull request. Each app's job first asks
+# tools/render-lab/real_scope.py whether the change reaches that app's
+# rendering — its crate and every workspace crate it links (derived from
+# the Cargo manifests), the lockfile, the workspace manifest, the lab and
+# this workflow — and passes in seconds when it does not. It used to be
+# path-filtered to the corpus and the lab, so engine changes skipped it:
+# DCK-006 (#1574) touched only decks-core and turned a real deck from amber
+# to red, caught by a later manual dispatch instead of on the PR. Running
+# the workflow on every PR and deciding per step, never with a job-level
+# `if:` or a `paths:` filter, is what keeps all three checks reporting, so
+# they can be required (conformance/required-checks.json).
+#
 # Verdicts ratchet against tools/render-lab/baseline-real.json, separately
-# from the fixtures' baseline.json. The documents are fetched once and
-# cached by the corpus manifest's hash, so a source that later disappears
-# does not take the run down; one that cannot be fetched at all shows as
-# `missing` against its baseline verdict.
+# from the fixtures' baseline.json: a regression fails the job, and so does
+# an improvement not committed to the baseline. The documents are fetched
+# once and cached by the corpus manifest's hash, so a source that later
+# disappears does not take the run down; one that cannot be fetched at all
+# shows as `missing` against its baseline verdict.
 
 on:
   schedule:
     - cron: '50 3 * * *'
   workflow_dispatch:
   pull_request:
-    paths:
-      - tools/render-lab/real_corpus/**
-      - tools/render-lab/fetch_real_corpus.py
-      - tools/render-lab/baseline-real.json
-      - tools/render-lab/run.sh
-      - .github/workflows/render-real.yml
 
 concurrency:
   group: render-real-${{ github.ref }}-${{ github.event_name }}
@@ -46,10 +52,42 @@ jobs:
         app: [letters, tables, decks]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # On a pull request this is its merge commit; the scope step
+          # diffs it against its first parent, the base branch it merges
+          # into, which is all the history it needs.
+          fetch-depth: 2
+
+      # Decided per step, not with a job-level `if:`: a skipped matrix job
+      # reports under its unexpanded name, so the required
+      # "Real documents (<app>)" check would never arrive. An app the
+      # change does not reach passes here, in seconds. Not a pull request
+      # (schedule, dispatch): every app runs.
+      - name: Does the change reach ${{ matrix.app }}'s rendering?
+        id: scope
+        env:
+          APP: ${{ matrix.app }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rev-parse --verify -q HEAD^2 >/dev/null || {
+            echo "::error::expected the pull request's merge commit at HEAD; cannot tell what it changes"
+            exit 1
+          }
+          git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          run=$(python3 tools/render-lab/real_scope.py --app "$APP" --changed "$RUNNER_TEMP/changed.txt")
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ "$run" = false ]; then
+            echo "Nothing this pull request changes reaches $APP's rendering (tools/render-lab/real_scope.py), so its real documents were not rendered: they would render as on main." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        if: steps.scope.outputs.run == 'true'
 
       - name: Build render-lab image
+        if: steps.scope.outputs.run == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tools/render-lab
@@ -60,6 +98,7 @@ jobs:
           cache-from: type=gha,scope=render-lab
 
       - name: Cache cargo
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
@@ -71,6 +110,7 @@ jobs:
             render-lab-cargo-
 
       - name: Cache the real documents
+        if: steps.scope.outputs.run == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/render-lab-corpus
@@ -79,6 +119,7 @@ jobs:
             render-lab-corpus-${{ matrix.app }}-
 
       - name: Run render lab on the real documents
+        if: steps.scope.outputs.run == 'true'
         id: run
         env:
           CONTAINER_ENGINE: docker
@@ -86,14 +127,14 @@ jobs:
         run: tools/render-lab/run.sh --app ${{ matrix.app }}
 
       - name: Job summary
-        if: always()
+        if: always() && steps.scope.outputs.run == 'true'
         run: cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
 
       # One `render-real` issue per document that is not green, closed
       # when it turns green; only from main, and only from a run whose
       # ratchet passed, so a regression is a failed run, not an issue.
       - name: Sync render-real issues
-        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.run.outcome == 'success' && hashFiles('render-lab-out/summary.json') != ''
+        if: always() && steps.scope.outputs.run == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.run.outcome == 'success' && hashFiles('render-lab-out/summary.json') != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
@@ -102,7 +143,7 @@ jobs:
           --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Upload report
-        if: always()
+        if: always() && steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: render-real-${{ matrix.app }}
