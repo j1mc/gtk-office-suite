@@ -334,6 +334,16 @@ impl TablesEngine {
         Ok(())
     }
 
+    /// The formula of workbook-level name `name`, if it's defined.
+    pub fn defined_name(&self, name: &str) -> Option<String> {
+        self.model
+            .workbook
+            .defined_names
+            .iter()
+            .find(|n| n.sheet_id.is_none() && n.name.eq_ignore_ascii_case(name))
+            .map(|n| n.formula.clone())
+    }
+
     /// Define, redefine or (with `None`) remove workbook-level name `name`.
     ///
     /// A name can outlive the sheet it points at (deleting a sheet leaves

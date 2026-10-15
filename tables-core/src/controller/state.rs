@@ -76,7 +76,6 @@ impl WorkbookState {
     /// reads them — not when their sheet is next visited. An upstream
     /// rejection is an error, never a silent success.
     pub(super) fn set_cell_input(&mut self, row: usize, col: usize, input: &str) -> Result<(), String> {
-        let sheet = self.active_sheet;
         self.engine.set_cell_text(row, col, input)?;
         self.sync_all_sheets();
         Ok(())

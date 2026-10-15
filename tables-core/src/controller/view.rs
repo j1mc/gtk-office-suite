@@ -220,7 +220,7 @@ impl WorkbookController {
         match sorted {
             Some((current, Ascending)) if current == col => self.sort_column(col, Descending),
             Some((current, Descending)) if current == col => {
-                self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None);
+                self.mutate_sheet("Clear Sort Indicator", |sheet| sheet.sorted_col = None)
             }
             _ => self.sort_column(col, Ascending),
         }
