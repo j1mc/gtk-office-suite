@@ -1149,8 +1149,8 @@ fn theme_part_xml(master: &MasterSlide, retained: Option<&super::theme::Theme>) 
          <a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>\
          <a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst>\
          <a:lnStyleLst><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln>\
-         <a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:ln>\
-         <a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:ln></a:lnStyleLst>\
+         <a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln>\
+         <a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst>\
          <a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle>\
          <a:effectStyle><a:effectLst/></a:effectStyle>\
          <a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>\
