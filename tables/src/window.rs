@@ -261,6 +261,7 @@ impl TablesWindow {
         name_box.set_text("A1");
         name_box.set_tooltip_text(Some(&suite_common::i18n("Cell Reference or Name")));
         name_box.update_property(&[gtk4::accessible::Property::Label("Cell reference")]);
+        let name_box_view = crate::name_box::NameBox::new(&name_box);
 
         let fx_label = gtk4::Label::new(Some(" fx"));
         fx_label.add_css_class("dim-label");
@@ -302,7 +303,7 @@ impl TablesWindow {
         let inspector_sync: crate::format_inspector::SyncSlot = Rc::default();
         let refresh_sel: Rc<dyn Fn()> = {
             let s = state.clone();
-            let nb = name_box.clone();
+            let nb = name_box_view.clone();
             let stats = stats_label.clone();
             let (ga, h, v) = (grid_area.clone(), h_adj.clone(), v_adj.clone());
             let isync = inspector_sync.clone();
@@ -312,7 +313,7 @@ impl TablesWindow {
                     let sh = st.sheet();
                     ga.sync_cells(&sh.data, &sh.formats, &sh.notes, sh.selection_rect());
                     crate::grid_render::follow_selection(&ga, &sh, &h, &v);
-                    nb.set_text(&format!("{}{}", tables_core::sheet::col_label(sh.selected_col), sh.selected_row + 1));
+                    nb.show(&format!("{}{}", tables_core::sheet::col_label(sh.selected_col), sh.selected_row + 1));
                     stats.set_text(&sh.selection_status());
                 }
                 if let Some(sync) = isync.borrow().as_ref() {
