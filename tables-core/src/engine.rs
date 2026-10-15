@@ -191,7 +191,7 @@ impl TablesEngine {
     pub fn editable_input_at(&self, sheet: usize, row: usize, col: usize) -> String {
         if let Ok(ws) = self.model.workbook.worksheet(sheet as u32) {
             if let Some(cell) = ws.cell(row as i32 + 1, col as i32 + 1) {
-                if matches!(cell, ironcalc_base::types::Cell::SpillCell { .. }) {
+                if matches!(cell.as_ref(), ironcalc_base::types::Cell::SpillCell { .. }) {
                     return String::new();
                 }
             }
@@ -214,12 +214,10 @@ impl TablesEngine {
     pub fn formula_cells(&self) -> Vec<(usize, usize, usize, String)> {
         let mut out = Vec::new();
         for (s, ws) in self.model.workbook.worksheets.iter().enumerate() {
-            for (&r, row) in &ws.sheet_data {
-                for (&c, cell) in row {
-                    if cell.has_formula() && r >= 1 && c >= 1 {
-                        let (r, c) = (r as usize - 1, c as usize - 1);
-                        out.push((s, r, c, self.input_at(s, r, c)));
-                    }
+            for (r, c, cell) in ws.sheet_data.cells() {
+                if cell.has_formula() && r >= 1 && c >= 1 {
+                    let (r, c) = (r as usize - 1, c as usize - 1);
+                    out.push((s, r, c, self.input_at(s, r, c)));
                 }
             }
         }
