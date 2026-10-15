@@ -57,6 +57,13 @@ pub struct Slide {
     /// time, and the writers omit an empty background. An explicit white
     /// slide on a coloured master stays white; it does not inherit.
     pub background: String,
+    /// A picture the slide's own background is filled with (pptx `p:bg`
+    /// `a:blipFill`, ODF's bitmap drawing-page fill), drawn over
+    /// `background`. `None` for a slide filled with a colour or inheriting.
+    /// A slide that states a picture states its own background, so it
+    /// draws over whatever its layout or master would have given it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<BackgroundPicture>,
     pub objects: Vec<SlideObject>,
     pub notes: String,
     /// The master this slide uses, by [`MasterSlide::id`]; `None` for none.
@@ -85,6 +92,49 @@ impl Slide {
     /// The z-position of object `id` on this slide, if it is still there.
     pub fn object_index(&self, id: u64) -> Option<usize> {
         self.ids.objects.iter().position(|o| *o == id)
+    }
+}
+
+/// A picture a background is filled with, stretched (`a:stretch`).
+#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct BackgroundPicture {
+    /// The picture's file (an imported one lives in the media cache).
+    pub path: String,
+    /// Where the stretched picture lies: pptx's `a:fillRect`.
+    #[serde(default, skip_serializing_if = "FillRect::is_none")]
+    pub fill: FillRect,
+}
+
+/// How far a stretched picture's edges lie inside the box it fills, as
+/// fractions of the box's width (left, right) and height (top, bottom):
+/// pptx's `a:fillRect`. Negative reaches past the box, as the pay centre
+/// decks' title pictures do by 1% on each side (`l="-1000" r="-1000"`):
+/// what is past the edge is cut. All zero fills the box exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FillRect {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
+
+impl FillRect {
+    /// The picture fills the box exactly.
+    pub fn is_none(&self) -> bool {
+        *self == FillRect::default()
+    }
+
+    /// The picture's rectangle for a box at (`x`, `y`), `w`×`h`:
+    /// (x, y, w, h). A degenerate rect (insets meeting or crossing) keeps
+    /// a minimal positive size rather than drawing inverted.
+    pub fn place(&self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64, f64, f64) {
+        let px = x + self.left * w;
+        let py = y + self.top * h;
+        let pw = (w * (1.0 - self.left - self.right)).max(1e-6);
+        let ph = (h * (1.0 - self.top - self.bottom)).max(1e-6);
+        (px, py, pw, ph)
     }
 }
 
@@ -353,6 +403,7 @@ impl Deck {
             slides: vec![Slide {
                 title: "Slide 1".into(),
                 background: "#ffffff".into(),
+                background_picture: None,
                 objects: vec![],
                 notes: String::new(),
                 master_id: Some(default_master.id),

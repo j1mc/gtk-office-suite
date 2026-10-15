@@ -342,6 +342,25 @@ fn parse_src_rect(e: &BytesStart) -> crate::engine::Crop {
     crop
 }
 
+/// A stretched picture's `a:fillRect`: insets from each edge of the box it
+/// fills, in thousandths of a percent; negative reaches past the edge.
+/// Each inset is bounded to ±10 boxes so a hostile value cannot place the
+/// picture at infinity.
+fn parse_fill_rect(e: &BytesStart) -> crate::engine::FillRect {
+    let mut fill = crate::engine::FillRect::default();
+    for a in e.attributes().filter_map(|a| a.ok()) {
+        let v = a.value.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map_or(0.0, |v| (v / 100_000.0).clamp(-10.0, 10.0));
+        match a.key.as_ref() {
+            "l" => fill.left = v,
+            "t" => fill.top = v,
+            "r" => fill.right = v,
+            "b" => fill.bottom = v,
+            _ => {}
+        }
+    }
+    fill
+}
+
 /// The placeholders of a slide layout and of the master it belongs to, for
 /// resolving slide placeholders that carry no geometry of their own.
 fn read_layout_placeholders(
@@ -774,6 +793,10 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         // empty (inherits the layout's, then the master's): never white
         // smuggled in at import (DCK-006).
         let mut background = String::new();
+        // A picture the background is filled with (`p:bg`'s `a:blipFill`):
+        // its relationship and where it is stretched to (`a:fillRect`).
+        let mut background_blip: Option<String> = None;
+        let mut background_fill = super::model::FillRect::default();
         {
             // Text inside `a:t` is significant: a run ending in a space
             // ("Plain " + "Bold") is one word boundary, and trimming it
@@ -789,6 +812,9 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             let mut current_picture: Option<PendingPicture> = None;
             let mut in_text_element = false;
             let mut in_bg = false;
+            // Inside `p:bg`'s `a:blipFill`: a colour there (a duotone, a
+            // recolour) belongs to the picture, not the background.
+            let mut in_bg_blip = false;
             let mut in_rpr = false;
             // The groups (p:grpSp) the walker is inside, outermost first:
             // a shape in one is placed in the group's child frame.
@@ -807,6 +833,8 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                         let name = e.name();
                         match name.as_ref() {
                             "p:bg" => in_bg = true,
+                            "a:blipFill" if in_bg && current_shape.is_none() && current_picture.is_none() => in_bg_blip = true,
+                            "a:fillRect" if in_bg_blip => background_fill = parse_fill_rect(e),
                             "p:grpSp" => groups.push(GroupFrame::default()),
                             "p:grpSpPr" if current_shape.is_none() && current_picture.is_none() => in_grp_pr = true,
                             "a:chOff" | "a:chExt" if in_grp_pr => {
@@ -911,6 +939,8 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     if let Some(embed) = parse_blip_embed(e) {
                                         pic.embed_id = Some(embed);
                                     }
+                                } else if in_bg_blip {
+                                    background_blip = parse_blip_embed(e);
                                 }
                             }
                             "a:srcRect" => {
@@ -965,7 +995,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     shape.cur_style = parse_run_style(e);
                                 }
                             }
-                            "a:srgbClr" if in_rpr || in_bg => {
+                            "a:srgbClr" if in_rpr || (in_bg && !in_bg_blip) => {
                                 if let Some(val) = e
                                     .attributes()
                                     .filter_map(|a| a.ok())
@@ -1035,14 +1065,17 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     if let Some(embed) = parse_blip_embed(e) {
                                         pic.embed_id = Some(embed);
                                     }
+                                } else if in_bg_blip {
+                                    background_blip = parse_blip_embed(e);
                                 }
                             }
+                            "a:fillRect" if in_bg_blip => background_fill = parse_fill_rect(e),
                             "a:srcRect" => {
                                 if let Some(pic) = current_picture.as_mut() {
                                     pic.crop = parse_src_rect(e);
                                 }
                             }
-                            "a:srgbClr" if in_bg => {
+                            "a:srgbClr" if in_bg && !in_bg_blip => {
                                 if let Some(val) = e
                                     .attributes()
                                     .filter_map(|a| a.ok())
@@ -1057,7 +1090,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                             // A theme-slot background (`a:schemeClr`),
                             // resolved against the slide's own master's
                             // theme rather than the first theme part.
-                            "a:schemeClr" if in_bg => {
+                            "a:schemeClr" if in_bg && !in_bg_blip => {
                                 if let Some(val) = e
                                     .attributes()
                                     .filter_map(|a| a.ok())
@@ -1075,6 +1108,10 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                         let name = e.name();
                         if name.as_ref() == "p:bg" {
                             in_bg = false;
+                            in_bg_blip = false;
+                        }
+                        if name.as_ref() == "a:blipFill" {
+                            in_bg_blip = false;
                         }
                         if name.as_ref() == "p:grpSpPr" {
                             in_grp_pr = false;
@@ -1267,6 +1304,14 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             ids.objects.push(fresh);
             fresh += 1;
         }
+        // The background picture, read into the media cache like a slide's
+        // pictures. A relationship naming no part leaves the slide without
+        // one; the save's loss report names that dangling picture
+        // (`loss::pptx_drops`, missing-pictures).
+        let background_picture = background_blip
+            .as_deref()
+            .and_then(|id| part_picture(&mut archive, &mut budget, &target_path, &slide_rels_xml, id))
+            .map(|path| crate::engine::BackgroundPicture { path, fill: background_fill });
         slides.push(Slide {
             // The name the slide carries, falling back to a positional
             // label. The fallback is why the loss was invisible: the reader
@@ -1279,6 +1324,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| format!("Slide {}", slide_index + 1)),
             background,
+            background_picture,
             objects,
             notes,
             // Resolved to a master id once the master parts below are
@@ -1461,6 +1507,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         slides.push(Slide {
             title: "Slide 1".into(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects: vec![],
             notes: String::new(),
             master_id: None,

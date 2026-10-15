@@ -951,6 +951,24 @@ fn write_background<W: std::io::Write>(
     Ok(())
 }
 
+/// `p:bg` for a picture stretched over the slide (relationship `rel_id`),
+/// its `a:fillRect` insets in thousandths of a percent and omitted when
+/// the picture fills the slide exactly, as PowerPoint writes it.
+fn background_picture_xml(rel_id: &str, fill: &crate::engine::FillRect) -> String {
+    let inset = |name: &str, v: f64| {
+        let v = (v * 100_000.0).round() as i64;
+        if v == 0 { String::new() } else { format!(" {name}=\"{v}\"") }
+    };
+    format!(
+        "<p:bg><p:bgPr><a:blipFill dpi=\"0\" rotWithShape=\"1\"><a:blip r:embed=\"{rel_id}\"/><a:srcRect/>\
+         <a:stretch><a:fillRect{}{}{}{}/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>",
+        inset("l", fill.left),
+        inset("t", fill.top),
+        inset("r", fill.right),
+        inset("b", fill.bottom),
+    )
+}
+
 /// Write a master's decoration shapes.
 ///
 /// Images are skipped: they would need a media part and a relationship per
@@ -1545,9 +1563,17 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
 
             // Slide background when the slide states one, white included:
             // an explicit white slide on a coloured master stays white
-            // (DCK-006), and Impress preserves an explicit p:bg.
+            // (DCK-006), and Impress preserves an explicit p:bg. A picture
+            // is written as PowerPoint writes one: a stretched blip fill
+            // with its `a:fillRect`, the picture a media part of its own.
             let bg = slide.background.trim_start_matches('#');
-            if bg.len() == 6 {
+            if let Some(pic) = &slide.background_picture {
+                let img_idx = images_to_add.len() + 1;
+                images_to_add.push(pic.path.clone());
+                let rel_id = format!("rId{}", slide_rels.len() + 1);
+                slide_rels.push((rel_id.clone(), IMAGE_REL, format!("../media/image{img_idx}.png")));
+                writer.get_mut().write_all(background_picture_xml(&rel_id, &pic.fill).as_bytes()).map_err(|e| e.to_string())?;
+            } else if bg.len() == 6 {
                 writer.write_event(Event::Start(BytesStart::new("p:bg"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("p:bgPr"))).map_err(|e| e.to_string())?;
                 writer.write_event(Event::Start(BytesStart::new("a:solidFill"))).map_err(|e| e.to_string())?;
@@ -1794,6 +1820,7 @@ mod emu_rounding_tests {
             slides: vec![Slide {
                 title: String::new(),
                 background: String::new(),
+                background_picture: None,
                 notes: String::new(),
                 master_id: None,
                 objects: vec![SlideObject::TextBox {

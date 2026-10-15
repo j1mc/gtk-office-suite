@@ -360,6 +360,7 @@ mod tests {
         let slide = |objects| Slide {
             title: String::new(),
             background: "#ffffff".into(),
+            background_picture: None,
             objects,
             notes: String::new(),
             master_id: None,
