@@ -14,8 +14,59 @@
     "against what it actually collected so the map cannot drift into",
     "fiction.",
     "A namespace is a prefix of a test id, and it has to be no broader than what the lane really runs: 'tests/' would vouch for every path under it, including one nothing collects.",
-    "Each lane declares runs_on_every_revision. A lane that does not run on every revision can have evidence older than the code being released, so --release-revision refuses to certify a release with claims resting on such a lane unless its evidence was recorded at that exact revision. The field is required: a new lane cannot slip in as trustworthy by omitting it."
+    "Each lane declares runs_on_every_revision. A lane that does not run on every revision can have evidence older than the code being released, so --release-revision refuses to certify a release with claims resting on such a lane unless its evidence was recorded at that exact revision. The field is required: a new lane cannot slip in as trustworthy by omitting it.",
+    "Each lane also declares runs_on_candidate: whether release-revision.yml re-runs it at the revision being released. Every test a release-critical capability cites must sit in such a lane (SH-001), or no result at the released revision could prove it.",
+    "A lane that runs only the tests a change can affect declares selective: true. Its inventory lists the tests its selection left out as `deselected`; those are reported, never counted as passing, and a lane that does not declare selection may not excuse an unrun test that way.",
+    "`layers` gives each evidence layer the id prefixes it may cite (SH-001). It is a statement about what kind of test can prove a layer, not about who runs it: a core-crate unit test filed as `gui` is refused even though a lane collects and passes it, and the GUI-facing layers may not share a prefix with the core ones."
   ],
+  "layers": {
+    "model": [
+      "letters-core::",
+      "tables-core::",
+      "decks-core::",
+      "suite-common-core::",
+      "suite-export::",
+      "tests/test_",
+      "tests/adaptive_editor_contract.py::"
+    ],
+    "format": [
+      "letters-core::",
+      "tables-core::",
+      "decks-core::",
+      "suite-common-core::",
+      "suite-export::"
+    ],
+    "persistence": [
+      "letters-core::",
+      "tables-core::",
+      "decks-core::",
+      "suite-common-core::",
+      "suite-export::"
+    ],
+    "bridge": [
+      "letters::",
+      "tables::",
+      "decks::",
+      "suite-common::"
+    ],
+    "gui": [
+      "tests/gui/"
+    ],
+    "a11y": [
+      "tests/gui/"
+    ],
+    "performance": [
+      "letters-core::",
+      "tables-core::",
+      "decks-core::",
+      "suite-common-core::",
+      "suite-export::",
+      "letters::",
+      "tables::",
+      "decks::",
+      "tests/gui/"
+    ]
+  },
   "lanes": [
     {
       "job": "test",
@@ -44,7 +95,8 @@
         "tables-core::soffice_oracle::"
       ],
       "excludes_reason": "These targets need LibreOffice installed. This lane does not have it, and without REQUIRE_SOFFICE the tests return early and report *ok* \u2014 measured: with no soffice on PATH, we_read_soffice_output prints 'skipping: soffice not installed' and nextest records a pass. A crate-level namespace would therefore let this lane offer those passes as live evidence for a claim only the oracle lane can support.",
-      "runs_on_every_revision": true
+      "runs_on_every_revision": true,
+      "runs_on_candidate": true
     },
     {
       "job": "smoke",
@@ -57,7 +109,10 @@
         "pull_request",
         "push"
       ],
-      "runs_on_every_revision": true
+      "runs_on_every_revision": true,
+      "runs_on_candidate": true,
+      "selective": true,
+      "selective_reason": "tests/gui/select_journeys.sh runs only the journeys of the apps a change can affect (#108), falling back to every app when unsure; schedule and dispatch runs take everything. The journeys it leaves out are listed as deselected in the inventory and printed by the validator, never counted as passing."
     },
     {
       "job": "python-checks",
@@ -81,7 +136,8 @@
         "pull_request",
         "push"
       ],
-      "runs_on_every_revision": true
+      "runs_on_every_revision": true,
+      "runs_on_candidate": false
     },
     {
       "job": "oracle",
@@ -100,7 +156,8 @@
         "tables-core::soffice_oracle::"
       ],
       "runs_on_every_revision": false,
-      "runs_on_every_revision_reason": "Scheduled daily, plus pull requests that touch format or model code. Neither guarantees a run at the revision being released: the schedule sees whatever main was at 05:00, and the path filter sees nothing at all when a release changes only packaging."
+      "runs_on_every_revision_reason": "Scheduled daily, plus pull requests that touch format or model code. Neither guarantees a run at the revision being released: the schedule sees whatever main was at 05:00, and the path filter sees nothing at all when a release changes only packaging.",
+      "runs_on_candidate": false
     }
   ]
 }
