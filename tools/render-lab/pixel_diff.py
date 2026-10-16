@@ -12,6 +12,12 @@ the two greys are more than --tol levels apart. Two numbers per page:
                  parity figure: 0.0 is pixel-identical text and rules,
                  1.0 is nothing in common. Blank paper cannot dilute it.
   page_mismatch  differing pixels / all pixels on the page.
+  band_miss      ink_miss_1px with vertical drift forgiven: each band of
+                 LibreOffice's page (its ink rows, split at blank gaps) is
+                 matched against ours at the vertical shift within +-SHIFT
+                 px that agrees best. What remains is what differs within
+                 lines (indents, wrapping, glyphs, rules), however far an
+                 earlier miss pushed them; the gap to ink_miss_1px is drift.
   ink_miss_1px   ink pixels with no ink within 1 px in the other render /
                  ink pixels in either — the same figure with anti-aliasing
                  and sub-pixel glyph placement forgiven. Strict ink_mismatch
@@ -62,6 +68,42 @@ def near(mask, r=1):
     return out
 
 
+SHIFT = 40  # px a band may slide to meet its counterpart (band_miss)
+
+
+def bands(ink):
+    """Row ranges of `ink` holding ink, split at blank rows."""
+    rows = np.where(ink.any(1))[0]
+    if not len(rows):
+        return []
+    cuts = np.where(np.diff(rows) > 1)[0] + 1
+    return [(int(g[0]), int(g[-1]) + 1) for g in np.split(rows, cuts)]
+
+
+def band_miss(lo_ink, our_ink):
+    """(missed, inked) over LibreOffice's bands, each at its best shift."""
+    h = lo_ink.shape[0]
+    near_ours = near(our_ink)
+    near_lo = near(lo_ink)
+    missed = inked = 0
+    for top, bottom in bands(lo_ink):
+        best = None
+        for dy in range(-SHIFT, SHIFT + 1):
+            t, b = top + dy, bottom + dy
+            if t < 0 or b > h:
+                continue
+            lo_b = lo_ink[top:bottom]
+            ours_b = our_ink[t:b]
+            miss = int((lo_b & ~near_ours[t:b]).sum() + (ours_b & ~near_lo[top:bottom]).sum())
+            ink = int((lo_b | ours_b).sum())
+            if best is None or miss < best[0]:
+                best = (miss, ink)
+        if best:
+            missed += best[0]
+            inked += best[1]
+    return missed, inked
+
+
 def compare(lo_path, ours_path, tol, overlay_path=None):
     lo = grey(lo_path)
     ours = grey(ours_path, (lo.shape[1], lo.shape[0]))
@@ -71,7 +113,9 @@ def compare(lo_path, ours_path, tol, overlay_path=None):
     lo_ink, our_ink = lo <= INK, ours <= INK
     lo_only = lo_ink & ~near(our_ink)
     our_only = our_ink & ~near(lo_ink)
+    bm, bi = band_miss(lo_ink, our_ink)
     result = {
+        "band_miss": bm / bi if bi else 0.0,
         "ink_miss_1px": float((lo_only | our_only).sum() / n_ink) if n_ink else 0.0,
         "ink_mismatch": float((differs & inked).sum() / n_ink) if n_ink else 0.0,
         "page_mismatch": float(differs.mean()),
@@ -104,7 +148,7 @@ def main(argv=None):
         pages = {}
         for n in sorted(lo_pages):
             if n not in ours:
-                pages[n] = {"ink_mismatch": 1.0, "ink_miss_1px": 1.0,
+                pages[n] = {"ink_mismatch": 1.0, "ink_miss_1px": 1.0, "band_miss": 1.0,
                             "page_mismatch": None, "missing": True}
                 continue
             overlay = os.path.join(d, f"pixel-{n}.png") if a.overlay else None
@@ -114,6 +158,7 @@ def main(argv=None):
         report[f"{a.app}/{os.path.basename(d)}"] = {
             "worst": worst,
             "worst_strict": max(p["ink_mismatch"] for p in pages.values()),
+            "worst_band": max(p["band_miss"] for p in pages.values()),
             "pages_lo": len(lo_pages),
             "pages_ours": len(ours),
             "extra_pages": extra,
@@ -124,7 +169,7 @@ def main(argv=None):
         json.dump(report, f, indent=1, sort_keys=True)
     for name, r in sorted(report.items(), key=lambda kv: -kv[1]["worst"]):
         pc = "" if r["pages_lo"] == r["pages_ours"] else f"  pages {r['pages_ours']}/{r['pages_lo']}"
-        print(f"{name:52} 1px {r['worst']:.3f}  strict {r['worst_strict']:.3f}{pc}")
+        print(f"{name:52} 1px {r['worst']:.3f}  band {r['worst_band']:.3f}  strict {r['worst_strict']:.3f}{pc}")
     return 0
 
 
