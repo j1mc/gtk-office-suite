@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Monitor Cargo (Rust) dependencies
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    reviewers:
+      - tuna-os/maintainers
+    labels:
+      - dependencies
+      - security
+
+  # Monitor GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    reviewers:
+      - tuna-os/maintainers
+    labels:
+      - dependencies
+      - ci
