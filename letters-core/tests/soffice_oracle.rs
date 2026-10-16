@@ -2135,8 +2135,8 @@ fn paragraph_shading_and_borders_survive_writer_both_ways() {
     let mut d = Document::from_plain_text("shaded and boxed\nordinary");
     d.paragraphs[0].style.shading = Some("D9D9D9".into());
     d.paragraphs[0].style.borders = ParaBorders {
-        top: Some(ParaBorder { style: BorderStyle::Single, color: "FF0000".into(), width_pt: 0.75 }),
-        bottom: Some(ParaBorder { style: BorderStyle::Dashed, color: "0000FF".into(), width_pt: 1.0 }),
+        top: Some(ParaBorder { style: BorderStyle::Single, color: "FF0000".into(), width_pt: 0.75, space_pt: 0.0 }),
+        bottom: Some(ParaBorder { style: BorderStyle::Dashed, color: "0000FF".into(), width_pt: 1.0, space_pt: 0.0 }),
         ..Default::default()
     };
     let close = |got: &Document, how: &str| {

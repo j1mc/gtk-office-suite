@@ -887,7 +887,7 @@ fn bordered_paragraphs_open_their_box_where_they_split() {
     d.paragraphs.push(Paragraph {
         style: ParaStyle {
             borders: ParaBorders {
-                bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 0.75 }),
+                bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 0.75, space_pt: 0.0 }),
                 ..Default::default()
             },
             ..Default::default()
@@ -897,6 +897,39 @@ fn bordered_paragraphs_open_their_box_where_they_split() {
     let t = lay(&d);
     assert_eq!(lines_per_page(&t), vec![46, 3]);
     assert_eq!(para_boxes(&t).iter().map(|b| (b.2, b.3)).collect::<Vec<_>>(), vec![(true, false), (false, true)]);
+}
+
+/// Writer's border box (measured in LibreOffice at 10 px/pt): a top
+/// border stands its width plus gap above the first line, a bottom one
+/// its gap below the last line's natural foot, with that line's
+/// proportional extra below the border, and side borders stand off the
+/// text by their width plus gap.
+#[test]
+fn borders_stand_off_the_text_by_their_width_and_gap() {
+    let edge = |w: f64, gap: f64| Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: w, space_pt: gap });
+    let mut d = doc_of(3, "x");
+    d.paragraphs[1].style.line_spacing = 2.0;
+    d.paragraphs[1].style.borders = ParaBorders { top: edge(1.0, 4.0), bottom: edge(1.0, 4.0), left: edge(0.5, 1.0), right: edge(0.5, 1.0) };
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    let boxes: Vec<(f64, f64, f64, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::ParaBox { x_pt, y_pt, width_pt, height_pt, .. } => Some((*x_pt, *y_pt, *width_pt, *height_pt)),
+            _ => None,
+        })
+        .collect();
+    // MonoShaper lines are 15pt; the bordered one is 30pt at 2.0.
+    let (x, y, w, h) = boxes[0];
+    assert_eq!(y, tops[0] + 15.0, "the box opens where the paragraph does");
+    assert_eq!(tops[1], y + 5.0, "text below the top border's width and gap");
+    // Natural foot (15pt in), the gap and the width close the box ...
+    assert_eq!(h, 5.0 + 15.0 + 5.0);
+    // ... and the line's other 15pt follow it.
+    assert_eq!(tops[2], y + h + 15.0);
+    let text_x = line_items(&t.pages[0])[0].2;
+    assert_eq!((x, w), (text_x - 1.5, t.pages[0].width_pt - t.pages[0].geometry.margin_left_pt - t.pages[0].geometry.margin_right_pt + 3.0));
 }
 
 /// Give `doc` sections starting at `starts`, on `pages` (LET-005S).

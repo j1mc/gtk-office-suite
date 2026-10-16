@@ -911,6 +911,12 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         let chunk_top = flow.y;
         let chunk_x = flow.column_x();
         let chunk_at = flow.page_len();
+        let (opens, closes) = (line == 0, line + fit == n);
+        // Writer's border box: a top border stands its width and gap above
+        // the first line.
+        if let Some(b) = st.borders.top.as_ref().filter(|_| opens && fit > 0) {
+            flow.y += b.inset_pt();
+        }
         for (k, (lb, &height)) in shaped.lines.iter().zip(&heights).enumerate().skip(line).take(fit) {
             let top = flow.y;
             let baseline = top + lb.ascent_pt;
@@ -928,16 +934,30 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
             }
             flow.y += height;
         }
+        // A bottom border stands its gap below the last line's natural
+        // foot; that line's proportional extra goes below the border
+        // (Writer: measured 13.8pt lines at 1.15 and 2.0 spacing).
+        let mut below = 0.0;
+        if let Some(b) = st.borders.bottom.as_ref().filter(|_| closes && fit > 0) {
+            if para.style.line_height.is_none() {
+                let last = &shaped.lines[line + fit - 1];
+                below = (heights[line + fit - 1] - last.natural_height()).max(0.0);
+            }
+            flow.y += b.inset_pt() - below;
+        }
         // A shaded or bordered paragraph draws its box under this chunk's
         // lines: one box per page, opening where the paragraph continues.
+        // Side borders stand off the text by their width and gap.
         if (st.shading.is_some() || !st.borders.is_empty()) && fit > 0 {
+            let left = st.borders.left.as_ref().map_or(0.0, crate::model::ParaBorder::inset_pt);
+            let right = st.borders.right.as_ref().map_or(0.0, crate::model::ParaBorder::inset_pt);
             flow.insert(
                 chunk_at,
                 Item::ParaBox {
                     para: idx,
-                    x_pt: chunk_x + shaped.box_x,
+                    x_pt: chunk_x + shaped.box_x - left,
                     y_pt: chunk_top,
-                    width_pt: shaped.box_w,
+                    width_pt: shaped.box_w + left + right,
                     height_pt: flow.y - chunk_top,
                     fill: st.shading.clone(),
                     borders: st.borders.clone(),
@@ -946,6 +966,7 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
                 },
             );
         }
+        flow.y += below;
         line += fit;
         if line < n {
             flow.next_column();
