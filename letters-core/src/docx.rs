@@ -981,7 +981,7 @@ fn with_part(package: &[u8], name: &str, f: impl Fn(&str) -> String) -> Result<V
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut part = zin.by_index(i).map_err(|e| e.to_string())?;
-        let part_name = part.name().to_string();
+        let part_name = part.name().map_err(|e| e.to_string())?.into_owned();
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut part, &mut data).map_err(|e| e.to_string())?;
         if part_name == name {
@@ -1673,7 +1673,7 @@ fn with_sections(package: &[u8], sections: &[crate::model::DocSection]) -> Resul
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut part = zin.by_index(i).map_err(|e| e.to_string())?;
-        let name = part.name().to_string();
+        let name = part.name().map_err(|e| e.to_string())?.into_owned();
         let data = match name.as_str() {
             DOCUMENT => xml.as_bytes().to_vec(),
             RELS => rels.as_bytes().to_vec(),
@@ -2106,7 +2106,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // the edit-render journey's bullet showed it (#1201). The reader
             // takes the list's own indent back off.
             let text = para.style.left_indent_pt.max(0.0) + crate::lists::text_indent_pt(para.style.list_level);
-            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(crate::lists::HANGING_PT));
+            let hanging = para.style.list_hanging_pt.unwrap_or(crate::lists::HANGING_PT);
+            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(hanging));
         } else if para.style.left_indent_pt != 0.0 {
             p = p.indent_left(rdocx::Length::pt(para.style.left_indent_pt));
         }
@@ -2448,7 +2449,7 @@ fn with_letters_styles(package: &[u8], base: &crate::model::BaseFont, heading_st
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut f = zin.by_index(i).map_err(|e| e.to_string())?;
-        let name = f.name().to_string();
+        let name = f.name().map_err(|e| e.to_string())?.into_owned();
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut data).map_err(|e| e.to_string())?;
         if name == "word/styles.xml" {
@@ -2890,6 +2891,13 @@ fn list_indent_from_declared(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>,
         doc.numbering_level(num_id, level).and_then(|l| l.indent_left).map(twips_pt).unwrap_or(text)
     };
     style.left_indent_pt = (declared - text).max(0.0);
+    // The marker hangs as far as the paragraph says, else its level.
+    let hanging = if style.first_line_indent_pt < 0.0 {
+        Some(-style.first_line_indent_pt)
+    } else {
+        doc.numbering_level(num_id, level).and_then(|l| l.indent_hanging).map(twips_pt)
+    };
+    style.list_hanging_pt = hanging.filter(|h| h.is_finite() && *h > 0.0 && (h - crate::lists::HANGING_PT).abs() > 0.5);
     if style.first_line_indent_pt < 0.0 {
         style.first_line_indent_pt = 0.0;
     }
@@ -3500,7 +3508,7 @@ mod tests {
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         for i in 0..source.len() {
             let mut entry = source.by_index(i).unwrap();
-            let entry_name = entry.name().to_string();
+            let entry_name = entry.name().unwrap().into_owned();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             if entry_name == "word/document.xml" {
