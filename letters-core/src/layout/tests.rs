@@ -198,6 +198,23 @@ fn an_unruled_tables_rows_are_their_lines() {
     assert_eq!(cells, [(false, LINE)]);
 }
 
+/// A cell's bare sides reach the painter with it; its neighbours keep
+/// their own.
+#[test]
+fn a_cells_bare_sides_are_laid_with_it() {
+    use crate::model::{CellEdges, OpenEdges};
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 2);
+    let bare = OpenEdges { right: true, ..Default::default() };
+    d.table_open_edges.insert(table, vec![CellEdges { row: 0, col: 0, open: bare }]);
+    let open: Vec<(u32, OpenEdges)> = lay(&d).pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Cell { col, open, .. } => Some((*col, *open)), _ => None })
+        .collect();
+    assert_eq!(open, [(0, bare), (1, OpenEdges::default())]);
+}
+
 #[test]
 fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
     let mut d = doc_of(1, "after");

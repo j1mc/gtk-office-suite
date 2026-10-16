@@ -633,6 +633,11 @@ pub struct Document {
     /// answer box). A table not listed (any made here) is ruled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub table_unruled: std::collections::BTreeSet<u32>,
+    /// Each ruled table's cells that leave a side without a rule, by
+    /// table id: a form's header row whose two cells read as one band.
+    /// A cell not listed is ruled all round.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_open_edges: std::collections::BTreeMap<u32, Vec<CellEdges>>,
     /// The document's sections when its parts have different pages,
     /// headers or footers (`crate::sections`, LET-005S); empty for a
     /// document of one section, whose page is `page`.
@@ -691,6 +696,35 @@ pub struct CellFill {
     pub row: u32,
     pub col: u32,
     pub color: String,
+}
+
+/// The sides of a table cell drawn without a rule (`fo:border-right="none"`,
+/// `w:tcBorders/w:right w:val="nil"`). A side its neighbour rules still
+/// shows: each cell draws its own sides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenEdges {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub top: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bottom: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub right: bool,
+}
+
+impl OpenEdges {
+    pub fn any(&self) -> bool {
+        self.top || self.bottom || self.left || self.right
+    }
+}
+
+/// A table cell's open sides (`OpenEdges`), at its grid position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellEdges {
+    pub row: u32,
+    pub col: u32,
+    pub open: OpenEdges,
 }
 
 /// A table row's height from the file: at least `pt` (Word's `atLeast`,
@@ -788,6 +822,7 @@ impl Document {
             table_fills: Default::default(),
             table_padding: Default::default(),
             table_unruled: Default::default(),
+            table_open_edges: Default::default(),
             sections: Vec::new(),
             next_section_id: 0,
         }
@@ -1062,6 +1097,7 @@ impl Document {
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
         self.table_unruled.remove(&table);
+        self.table_open_edges.remove(&table);
         if rows == 0 || cols == 0 {
             return table;
         }
@@ -1244,6 +1280,16 @@ impl Document {
             fills.retain_mut(|f| match to(f.row, f.col) {
                 Some((row, col)) => {
                     (f.row, f.col) = (row, col);
+                    true
+                }
+                None => false,
+            });
+        }
+        // A cell's open sides go with it too.
+        if let Some(edges) = self.table_open_edges.get_mut(&table) {
+            edges.retain_mut(|e| match to(e.row, e.col) {
+                Some((row, col)) => {
+                    (e.row, e.col) = (row, col);
                     true
                 }
                 None => false,

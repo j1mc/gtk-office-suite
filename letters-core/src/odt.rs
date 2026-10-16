@@ -742,7 +742,9 @@ fn content_xml(doc: &Document) -> String {
                     });
                     // A ruled table (any made here) rules every cell, as
                     // Writer draws a cell only with a border of its own.
-                    let padding = if doc.table_unruled.contains(&c.table) { padding } else { format!("{padding} fo:border=\"0.5pt solid #000000\"") };
+                    let ruled = !doc.table_unruled.contains(&c.table);
+                    let pad_only = padding.clone();
+                    let padding = if ruled { format!("{padding} fo:border=\"0.5pt solid #000000\"") } else { padding };
                     let mut fill_styles: std::collections::HashMap<String, String> = Default::default();
                     let mut cell_styles: std::collections::HashMap<(u32, u32), String> = doc.table_fills.get(&c.table).into_iter().flatten().map(|f| {
                         let n = fill_styles.len();
@@ -764,6 +766,17 @@ fn content_xml(doc: &Document) -> String {
                                 cell_styles.entry((r, col)).or_insert_with(|| format!(" table:style-name=\"{name}\""));
                             }
                         }
+                    }
+                    // A cell with sides left open names each side itself.
+                    for (n, e) in doc.table_open_edges.get(&c.table).into_iter().flatten().filter(|_| ruled).enumerate() {
+                        let name = format!("Table{tables_written}.E{n}");
+                        let side = |open: bool| if open { "none" } else { "0.5pt solid #000000" };
+                        let fill = doc.table_fills.get(&c.table).into_iter().flatten().find(|f| (f.row, f.col) == (e.row, e.col)).map_or(String::new(), |f| format!(" fo:background-color=\"#{}\"", esc(&f.color)));
+                        auto.push_str(&format!(
+                            "<style:style style:name=\"{name}\" style:family=\"table-cell\"><style:table-cell-properties{fill}{pad_only} fo:border-top=\"{}\" fo:border-bottom=\"{}\" fo:border-left=\"{}\" fo:border-right=\"{}\"/></style:style>",
+                            side(e.open.top), side(e.open.bottom), side(e.open.left), side(e.open.right)
+                        ));
+                        cell_styles.insert((e.row, e.col), format!(" table:style-name=\"{name}\""));
                     }
                     let spans = doc.table_spans.get(&c.table).cloned().unwrap_or_default();
                     let mut t = OpenTable { id: c.table, rows, cols, row: 0, col: 0, filled: false, row_styles, cell_styles, spans };
@@ -1412,6 +1425,8 @@ struct AutoStyles {
     cell_fill: std::collections::HashMap<String, String>,
     /// Table-cell styles with a visible border on any side.
     cell_ruled: std::collections::HashSet<String>,
+    /// A ruled table-cell style's sides without a border.
+    cell_open: std::collections::HashMap<String, crate::model::OpenEdges>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
     /// A table-cell style's padding, when it gives one.
@@ -1581,7 +1596,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1632,6 +1647,15 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             .filter_map(|a| attr_val(&e, a))
                             .any(|v| !v.trim().eq_ignore_ascii_case("none") && parse_length_pt(v.split_whitespace().next().unwrap_or("")).is_none_or(|w| w > 0.0));
                         if let (Some(name), true) = (cur_name.clone(), ruled) {
+                            // A side is ruled by its own border, else by
+                            // fo:border; neither, or "none", leaves it open.
+                            let visible = |v: &str| !v.trim().eq_ignore_ascii_case("none") && parse_length_pt(v.split_whitespace().next().unwrap_or("")).is_none_or(|w| w > 0.0);
+                            let all = attr_val(&e, "fo:border");
+                            let open = |a: &str| !attr_val(&e, a).or_else(|| all.clone()).is_some_and(|v| visible(&v));
+                            let open = crate::model::OpenEdges { top: open("fo:border-top"), bottom: open("fo:border-bottom"), left: open("fo:border-left"), right: open("fo:border-right") };
+                            if open.any() {
+                                out.cell_open.insert(name.clone(), open);
+                            }
                             out.cell_ruled.insert(name);
                         }
                         let fill = attr_val(&e, "fo:background-color").map(|c| c.trim_start_matches('#').to_uppercase());
@@ -2464,7 +2488,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -2577,6 +2601,13 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     let note_fill = |fills: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellFill>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
         if let Some(color) = attr_val(e, "table:style-name").and_then(|n| auto.cell_fill.get(&n).cloned()) {
             fills.entry(t.0).or_default().push(crate::model::CellFill { row: t.1.max(0) as u32, col: t.2.max(0) as u32, color });
+        }
+    };
+    // A cell's sides without a rule, in a table with rules.
+    let mut open_edges: std::collections::BTreeMap<u32, Vec<crate::model::CellEdges>> = Default::default();
+    let note_open = |edges: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellEdges>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
+        if let Some(open) = attr_val(e, "table:style-name").and_then(|n| auto.cell_open.get(&n).or_else(|| named.cell_open.get(&n)).copied()) {
+            edges.entry(t.0).or_default().push(crate::model::CellEdges { row: t.1.max(0) as u32, col: t.2.max(0) as u32, open });
         }
     };
     let cell_of = |t: &Option<(u32, i64, i64, usize, bool)>| {
@@ -2808,6 +2839,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
                         note_rule(&mut ruled_tables, t, &e);
+                        note_open(&mut open_edges, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3109,6 +3141,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
                         note_rule(&mut ruled_tables, t, &e);
+                        note_open(&mut open_edges, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3692,6 +3725,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_fills = cell_fills;
     doc.table_padding = cell_padding;
     doc.table_unruled = doc.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| c.table)).filter(|t| !ruled_tables.contains(t)).collect();
+    doc.table_open_edges = open_edges;
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
     // an explicit page-wide count still wins; a document of several
@@ -4067,6 +4101,34 @@ mod tests {
         let mut d = Document::from_plain_text("after");
         d.insert_table_at(0, 1, 1);
         assert!(round_trip(&d).table_fills.is_empty());
+    }
+
+    /// A ruled table's cell that leaves a side bare keeps it bare: the
+    /// expression-of-interest form's header row is two cells, the first
+    /// with no right border and the second no left, which Writer draws as
+    /// one band. Ruled all round, a line split the band. The bare sides
+    /// survive a save, the cell's shading with them.
+    #[test]
+    fn a_cells_bare_side_stays_bare() {
+        use crate::model::{CellEdges, OpenEdges};
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"A\" style:family=\"table-cell\"><style:table-cell-properties fo:border-top=\"0.5pt solid #000000\" fo:border-left=\"0.5pt solid #000000\" fo:border-bottom=\"0.5pt solid #000000\" fo:border-right=\"none\" fo:background-color=\"#CFDCE3\"/></style:style>\
+             <style:style style:name=\"B\" style:family=\"table-cell\"><style:table-cell-properties fo:border=\"0.5pt solid #000000\" fo:border-left=\"none\"/></style:style>\
+             <style:style style:name=\"C\" style:family=\"table-cell\"><style:table-cell-properties fo:border=\"0.5pt solid #000000\"/></style:style>\
+             </office:automatic-styles><office:body><office:text><table:table>\
+             <table:table-row><table:table-cell table:style-name=\"A\"><text:p>EOI project details</text:p></table:table-cell><table:table-cell table:style-name=\"B\"><text:p/></table:table-cell></table:table-row>\
+             <table:table-row><table:table-cell table:style-name=\"C\"><text:p>Title</text:p></table:table-cell><table:table-cell table:style-name=\"C\"><text:p/></table:table-cell></table:table-row>\
+             </table:table><text:p/></office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let want = vec![
+            CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+            CellEdges { row: 0, col: 1, open: OpenEdges { left: true, ..Default::default() } },
+        ];
+        assert_eq!(d.table_open_edges.values().collect::<Vec<_>>(), [&want]);
+        assert!(d.table_unruled.is_empty());
+        let rt = round_trip(&d);
+        assert_eq!(rt.table_open_edges.values().cloned().collect::<Vec<_>>(), [want]);
+        assert_eq!(rt.table_fills.values().flatten().count(), 1, "the bare cell keeps its shading");
     }
 
     /// A table's cell padding survives a save and reopen, in every cell's
