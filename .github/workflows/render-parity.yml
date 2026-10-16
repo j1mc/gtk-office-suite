@@ -252,6 +252,17 @@ jobs:
       # lock in (merged, so the other apps' verdicts stay as committed): an
       # agent or reviewer can take `baseline.proposed.json` from the
       # artifact instead of re-running the lab locally.
+      # Main's last pixel scores (pixel_board.py), so the scoreboard shows
+      # what this pull request moved; none yet is fine.
+      - name: Main's pixel scores
+        if: steps.inscope.outputs.any == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p render-lab-out
+          python3 tools/render-lab/pixel_board.py previous --key fixtures \
+            --repo "${GITHUB_REPOSITORY}" > render-lab-out/pixel-previous.json || echo '{}' > render-lab-out/pixel-previous.json
+
       - name: Compare the apps in scope
         if: steps.inscope.outputs.any == 'true'
         id: compare
@@ -265,7 +276,14 @@ jobs:
             python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
               --baseline render-lab-out/baseline.proposed.json --update-baseline >/dev/null &&
             python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
-              --baseline tools/render-lab/baseline.json'
+              --baseline tools/render-lab/baseline.json
+            status=$?
+            # The pixel scoreboard, worst fixture first, whatever the ratchet said.
+            python3 tools/render-lab/pixel_diff.py render-lab-out $APP_ARGS --overlay \
+              --previous render-lab-out/pixel-previous.json \
+              --scoreboard render-lab-out/pixel-scoreboard.md \
+              --title "Pixel scoreboard: fixtures" >/dev/null || echo "(pixel scoring failed)"
+            exit $status'
 
       - name: Job summary
         if: always()
@@ -279,7 +297,26 @@ jobs:
           if [ "$ANY" = true ] && [ -n "$SKIPPED" ] && [ -f render-lab-out/summary.md ]; then
             { echo; echo "Not rendered: $SKIPPED. Nothing this pull request changes reaches them (tools/render-lab/real_scope.py)."; } >> render-lab-out/summary.md
           fi
+          # The pixel scoreboard, folded under the verdicts.
+          if [ -s render-lab-out/pixel-scoreboard.md ] && [ -f render-lab-out/summary.md ]; then
+            { echo; echo "<details><summary>Pixel scoreboard (worst first)</summary>"; echo
+              cat render-lab-out/pixel-scoreboard.md; echo; echo "</details>"; } >> render-lab-out/summary.md
+          fi
           cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      # The ranked pixel scoreboard in its pinned issue: the queue to fix
+      # from the top of. Only from main, and only from a run that rendered
+      # every app, so the board is never a partial list.
+      - name: Publish the pixel scoreboard
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.inscope.outputs.any == 'true' && steps.inscope.outputs.skipped == '' && hashFiles('render-lab-out/pixel-scores.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          python3 tools/render-lab/pixel_board.py publish
+          render-lab-out/pixel-scoreboard.md render-lab-out/pixel-scores.json
+          --key fixtures --title "Pixel scoreboard: fixtures"
+          --repo "${GITHUB_REPOSITORY}"
+          --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Upload report
         if: always() && steps.inscope.outputs.any == 'true'
@@ -292,6 +329,8 @@ jobs:
             render-lab-out/summary.json
             render-lab-out/summary.md
             render-lab-out/scorecard.json
+            render-lab-out/pixel-scoreboard.md
+            render-lab-out/pixel-*.json
             render-lab-out/baseline.proposed.json
             render-lab-out/*/*/*.png
             render-lab-out/*/*/*.log

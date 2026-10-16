@@ -20,7 +20,7 @@ struct Scenario {
 }
 
 fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.to_string(),
         background: "#ffffff".into(),
         background_picture: None,

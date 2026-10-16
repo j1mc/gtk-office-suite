@@ -285,7 +285,8 @@ fn slide_area(show: &Rc<Show>, offset: usize, label: &str) -> gtk::DrawingArea {
     area.set_draw_func(move |_, cr, w, h| {
         let Some(show) = weak.upgrade() else { return };
         // The current slide as it stands; "next" is what the next click
-        // shows: the next build on this slide, else the next slide.
+        // shows: the next build on this slide, else the next shown slide
+        // (a hidden one is stepped over).
         let (i, step) = (show.index(), show.state.borrow().build_step());
         let slide = &show.deck.slides[i];
         let (i, step) = if offset == 0 {
@@ -293,7 +294,7 @@ fn slide_area(show: &Rc<Show>, offset: usize, label: &str) -> gtk::DrawingArea {
         } else if step < decks_core::builds::steps(slide) {
             (i, step + 1)
         } else {
-            (i + 1, 0)
+            (decks_core::presenter::next_shown(&show.deck, i).unwrap_or(show.deck.slides.len()), 0)
         };
         if i < show.deck.slides.len() {
             let objects = decks_core::builds::frame(&show.deck.slides[i], step, 0.0);

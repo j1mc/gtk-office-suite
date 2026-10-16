@@ -1069,6 +1069,29 @@ def decks(img):
     save(p, "pay-centre-reduced-line-breaks",
          "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
 
+    # DCK-004, reduced from the same deck's figure tiles (#1397): a white
+    # separator rule between each tile's two figures is a connector
+    # (p:cxnSp, the `line` preset). The reader skipped connectors, so the
+    # rules were not drawn. A diagonal one checks it is drawn corner to
+    # corner, not as its box.
+    from pptx.enum.shapes import MSO_CONNECTOR
+
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    for i in range(3):
+        left = Inches(0.8 + 4 * i)
+        box = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, Inches(1.5), Inches(3.4), Inches(2.4))
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(23, 42, 69)
+        box.line.fill.background()
+        rule = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, left + Inches(0.4), Inches(2.7), left + Inches(3.0), Inches(2.7))
+        rule.line.color.rgb = RGBColor(255, 255, 255)
+        rule.line.width = Pt(1.5)
+    slash = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(1), Inches(4.6), Inches(12), Inches(6.6))
+    slash.line.color.rgb = RGBColor(200, 30, 30)
+    slash.line.width = Pt(3)
+    save(p, "pay-centre-reduced-connector-rules",
+         "Three navy tiles, each split by a white 1.5pt rule across its middle; one red 3pt diagonal below them")
     # DCK-004, reduced from the same deck's figure tiles (#1397): each tile
     # is a top-anchored box that opens with two empty 14pt paragraphs and
     # then the figure. Dropping the leading paragraphs drew the figure at
