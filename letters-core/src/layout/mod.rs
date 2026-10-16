@@ -1327,12 +1327,18 @@ impl Slice {
 /// top and bottom padding.
 fn cell_slices(doc: &Document, paras: &[CellParagraph], pad: &crate::model::CellPadding) -> Vec<Slice> {
     let mut out = vec![Slice::Gap(pad.top_pt)];
+    // Between two paragraphs of a cell the larger of the space after the
+    // first and the space before the second applies, as in the body
+    // (measured in Writer: 4.5pt before and after stand 4.5pt apart in a
+    // cell too, not 9pt).
+    let mut after = 0.0;
     for (k, (i, s, _)) in paras.iter().enumerate() {
         let p = &doc.paragraphs[*i];
-        out.push(Slice::Gap(p.style.space_before_pt.max(0.0)));
+        out.push(Slice::Gap(p.style.space_before_pt.max(0.0).max(after)));
         out.extend(s.lines.iter().enumerate().map(|(l, lb)| Slice::Line(k, l, line_height(p, lb.natural_height()))));
-        out.push(Slice::Gap(p.style.space_after_pt.max(0.0)));
+        after = p.style.space_after_pt.max(0.0);
     }
+    out.push(Slice::Gap(after));
     out.push(Slice::Gap(pad.bottom_pt));
     out
 }
