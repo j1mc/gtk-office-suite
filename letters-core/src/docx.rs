@@ -1905,13 +1905,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             for p in group {
                 let tc = p.style.table_cell.expect("grouped by table_cell");
                 if let Some(mut cell) = tbl.cell(tc.row as usize, tc.col as usize) {
-                    // A new cell already holds an empty paragraph: replace
-                    // it, or every cell opens with a blank line in Writer
-                    // and Word (our reader skipped empty cell paragraphs,
-                    // which hid it; #1296).
-                    if filled.insert((tc.row, tc.col)) {
-                        cell.remove_first_empty_paragraph();
-                    }
+                    filled.insert((tc.row, tc.col));
                     let mut cp = cell.add_paragraph("");
                     // A cell paragraph's typography, which the reader maps
                     // the same way it maps a body paragraph's: without
@@ -1975,6 +1969,16 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         if run.style.highlight { r = r.highlight("yellow"); }
                         if run.style.code { r = r.style("SourceText"); }
                     }
+                }
+            }
+            // A new cell already holds an empty paragraph: drop it once the
+            // cell has its own, or every cell opens with a blank line in
+            // Writer and Word (our reader skipped empty cell paragraphs,
+            // which hid it; #1296). rdocx 0.16 keeps a cell's last
+            // paragraph, so this has to come after the cell is filled.
+            for (row, col) in filled {
+                if let Some(mut cell) = tbl.cell(row as usize, col as usize) {
+                    cell.remove_first_empty_paragraph();
                 }
             }
             // Merged cells: the first spans its columns (`w:gridSpan`) and
@@ -2490,8 +2494,13 @@ fn patch_styles_xml(xml: &str, defaults: &str, headings: &str) -> String {
     } else if let Some(at) = xml.find("<w:style ") {
         xml.insert_str(at, defaults);
     }
-    for n in 1..=6 {
-        let id = format!("w:styleId=\"Heading{n}\"");
+    // rdocx's template (0.15 on) defines Word's look for these. Letters
+    // writes its own headings and quote below, and leaves Title and
+    // Subtitle undefined so a Letters Title reopens with Letters' look
+    // rather than as a file's own (`own_look`, #1599).
+    let replaced = (1..=6).map(|n| format!("Heading{n}")).chain(["Title", "Subtitle", "Quote"].map(String::from));
+    for style_id in replaced {
+        let id = format!("w:styleId=\"{style_id}\"");
         while let Some(at) = xml.find(&id) {
             let Some(start) = xml[..at].rfind("<w:style ") else { break };
             let Some(len) = xml[start..].find("</w:style>") else { break };
