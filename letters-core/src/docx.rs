@@ -1039,6 +1039,10 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     // Set when a paragraph ends with a run-level page break, and consumed
     // by the next paragraph this loop keeps.
     let mut carried_break = false;
+    // The body positions of tables a dropped page break comes right
+    // before: the break a paragraph of nothing but one makes, or one after
+    // a paragraph's text.
+    let mut table_breaks: Vec<usize> = Vec::new();
     // Per body paragraph: how many paragraphs were kept before it, which
     // is where a table that precedes it goes.
     let mut kept_before = Vec::with_capacity(body.len() + 1);
@@ -1088,8 +1092,16 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         let only_break = para.runs.iter().all(|r| {
             r.style.image.is_none() && r.style.footnote.is_none() && r.text.chars().all(|c| c == '\n')
         });
+        // A table next takes the break: it starts the new page.
+        let table_next = |carried: &mut bool, breaks_at: &mut Vec<usize>| {
+            if *carried && tables_at.as_ref().is_some_and(|t| t.contains(&(i + 1))) {
+                *carried = false;
+                breaks_at.push(i + 1);
+            }
+        };
         if only_break && breaks.leading && !pending_break && i + 1 < body.len() {
             carried_break = true;
+            table_next(&mut carried_break, &mut table_breaks);
             continue;
         }
         let style_id = p.style_id().map(str::to_string);
@@ -1100,6 +1112,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         word_numbers.push(counter.number(&doc, p, &mut para.style));
         paragraphs.push(para);
         carried_break = pending_break;
+        table_next(&mut carried_break, &mut table_breaks);
     }
 
     // Contextual spacing: no space between two paragraphs of one style
@@ -1238,7 +1251,13 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_lens: Vec<usize> = table_paragraphs.iter().map(Vec::len).collect();
     // In reverse, so each insertion leaves the earlier positions valid;
     // tables at one position keep their order.
-    for (ti, cells) in table_paragraphs.into_iter().enumerate().rev() {
+    for (ti, mut cells) in table_paragraphs.into_iter().enumerate().rev() {
+        // The first of the tables a page break comes before starts the page.
+        if tables_at.as_ref().is_some_and(|t| table_breaks.contains(&t[ti]) && (ti == 0 || t[ti - 1] != t[ti])) {
+            if let Some(first) = cells.first_mut() {
+                first.style.page_break_before = true;
+            }
+        }
         let at = tables_at.as_ref().map_or(paragraphs.len(), |t| kept_before[t[ti].min(body.len())]);
         word_numbers.splice(at..at, std::iter::repeat_n(None, cells.len()));
         paragraphs.splice(at..at, cells);
@@ -1865,6 +1884,12 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             let group = &paras[start..i];
             let rows = group.iter().filter_map(|p| p.style.table_cell.map(|t| t.row)).max().unwrap_or(0) as usize + 1;
             let cols = group.iter().filter_map(|p| p.style.table_cell.map(|t| t.col)).max().unwrap_or(0) as usize + 1;
+            // A table that starts a page: a paragraph of nothing but a page
+            // break before it, as Word writes one and the reader takes it.
+            if group[0].style.page_break_before {
+                out.add_paragraph("").add_run("").add_break(rdocx::BreakKind::Page);
+                post.push(ParaPost::trivial());
+            }
             let mut tbl = out.add_table(rows, cols);
             // The file's column widths, when the table still has as many
             // columns as it was read with; rdocx's own are equal.
@@ -2123,7 +2148,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // the edit-render journey's bullet showed it (#1201). The reader
             // takes the list's own indent back off.
             let text = para.style.left_indent_pt.max(0.0) + crate::lists::text_indent_pt(para.style.list_level);
-            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(crate::lists::HANGING_PT));
+            let hanging = para.style.list_hanging_pt.unwrap_or(crate::lists::HANGING_PT);
+            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(hanging));
         } else if para.style.left_indent_pt != 0.0 {
             p = p.indent_left(rdocx::Length::pt(para.style.left_indent_pt));
         }
@@ -2907,6 +2933,13 @@ fn list_indent_from_declared(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>,
         doc.numbering_level(num_id, level).and_then(|l| l.indent_left).map(twips_pt).unwrap_or(text)
     };
     style.left_indent_pt = (declared - text).max(0.0);
+    // The marker hangs as far as the paragraph says, else its level.
+    let hanging = if style.first_line_indent_pt < 0.0 {
+        Some(-style.first_line_indent_pt)
+    } else {
+        doc.numbering_level(num_id, level).and_then(|l| l.indent_hanging).map(twips_pt)
+    };
+    style.list_hanging_pt = hanging.filter(|h| h.is_finite() && *h > 0.0 && (h - crate::lists::HANGING_PT).abs() > 0.5);
     if style.first_line_indent_pt < 0.0 {
         style.first_line_indent_pt = 0.0;
     }
@@ -3532,6 +3565,29 @@ mod tests {
 
     fn para(text: &str) -> String {
         format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    /// A page break before a table starts the table on the new page: the
+    /// crime supervisor form puts a paragraph of nothing but a page break
+    /// between two tables. The break was carried past the table to the
+    /// paragraph after it, and the table ran on at the foot of page one.
+    /// The break survives a save, and the paragraph after the table keeps
+    /// its place.
+    #[test]
+    fn a_page_break_before_a_table_starts_it_on_the_new_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{}<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p><w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}",
+            para("before"), para("cell"), para("after")
+        );
+        let path = docx_with_body(dir.path(), &body, "break.docx");
+        let breaks = |d: &Document| d.paragraphs.iter().map(|p| (p.text(), p.style.page_break_before)).collect::<Vec<_>>();
+        let doc = super::read(path.to_str().unwrap()).unwrap();
+        let want = vec![("before".to_string(), false), ("cell".to_string(), true), ("after".to_string(), false)];
+        assert_eq!(breaks(&doc), want);
+        let saved = dir.path().join("saved.docx");
+        super::write(&doc, &saved).unwrap();
+        assert_eq!(breaks(&super::read(saved.to_str().unwrap()).unwrap()), want);
     }
 
     /// A table's columns are its grid's (`w:tblGrid`), as Writer lays them

@@ -198,6 +198,19 @@ fn an_unruled_tables_rows_are_their_lines() {
     assert_eq!(cells, [(false, LINE)]);
 }
 
+/// A table whose first cell has a page break before it starts a page.
+#[test]
+fn a_table_after_a_page_break_starts_a_page() {
+    let mut d = doc_of(2, "text");
+    let table = d.insert_table_at(1, 1, 1);
+    let first = d.paragraphs.iter().position(|p| p.style.table_cell.is_some_and(|c| c.table == table)).unwrap();
+    d.paragraphs[first].style.page_break_before = true;
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    assert!(!t.pages[0].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+    assert!(t.pages[1].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+}
+
 /// A cell's bare sides reach the painter with it; its neighbours keep
 /// their own.
 #[test]
@@ -236,6 +249,24 @@ fn a_cells_content_sits_where_the_cell_says() {
     };
     let (top, mid, bottom) = (y(0), y(1), y(2));
     assert!(mid > top + 30.0 && bottom > mid + 30.0, "{top} {mid} {bottom}");
+}
+
+/// A list item's marker hangs as far before its text as the file says,
+/// else `HANGING_PT`; the text stays where it was.
+#[test]
+fn a_list_marker_hangs_as_far_as_the_file_says() {
+    let mut d = doc_of(2, "item");
+    for p in &mut d.paragraphs {
+        p.style.list = crate::model::ListKind::Numbered;
+        p.style.list_level = 1;
+    }
+    d.paragraphs[1].style.list_hanging_pt = Some(36.0);
+    let t = lay(&d);
+    let markers: Vec<f64> = t.pages[0].items.iter().filter_map(|i| match i { Item::Marker { x_pt, .. } => Some(*x_pt), _ => None }).collect();
+    // Level 1's text is 36pt in: the default marker 18pt before it, the
+    // file's 36pt before it, at the margin.
+    assert_eq!(markers.len(), 2);
+    assert!((markers[0] - markers[1] - (36.0 - crate::lists::HANGING_PT)).abs() < 1e-6, "{markers:?}");
 }
 
 #[test]
