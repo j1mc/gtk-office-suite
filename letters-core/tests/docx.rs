@@ -511,8 +511,123 @@ fn page_breaks_and_named_styles_survive() {
     let rt = round_trip(&d);
     assert_eq!(rt.paragraphs[0].style.named_style.as_deref(), Some("Title"));
     assert_eq!(rt.paragraphs[1].style.named_style.as_deref(), Some("Subtitle"));
+    // Letters' own Title comes back with Letters' look, not a file's.
+    assert!(!rt.paragraphs[0].style.own_look && !rt.paragraphs[1].style.own_look);
     assert!(rt.paragraphs[2].style.page_break_before, "page break lost");
     assert!(!rt.paragraphs[0].style.page_break_before);
+}
+
+/// A border's gap to the text (`w:space`, points) is read and written:
+/// it sets where Writer draws the border and how tall the paragraph is.
+#[test]
+fn border_gaps_survive() {
+    let mut d = Document::from_plain_text("ruled\nboxed");
+    let edge = |gap: f64| Some(ParaBorder { style: BorderStyle::Single, color: "4F81BD".into(), width_pt: 1.0, space_pt: gap });
+    d.paragraphs[0].style.borders = ParaBorders { bottom: edge(4.0), ..Default::default() };
+    d.paragraphs[1].style.borders = ParaBorders { top: edge(1.0), left: edge(0.0), ..Default::default() };
+    let rt = round_trip(&d);
+    assert_eq!(rt.paragraphs[0].style.borders, d.paragraphs[0].style.borders);
+    assert_eq!(rt.paragraphs[1].style.borders, d.paragraphs[1].style.borders);
+}
+
+/// A file's own Title and Subtitle styles are its look: their runs carry
+/// the style's size, colour and letter spacing (python-docx's template:
+/// 26pt plain, 12pt italic spaced 0.75pt), and layout adds none of
+/// Letters' built-in bold, scaled look on top (render-lab
+/// `letters/named-styles`).
+#[test]
+fn a_files_own_title_and_subtitle_styles_are_its_look() {
+    let mut d = Document::from_plain_text("Quarterly Report\nThird quarter\nbody");
+    d.paragraphs[0].style.named_style = Some("Title".into());
+    d.paragraphs[1].style.named_style = Some("Subtitle".into());
+    let rt = doctor_parts(&d, |parts| {
+        let st = parts.get_mut("word/styles.xml").unwrap();
+        for id in ["Title", "Subtitle"] {
+            if let Some(a) = st.find(&format!("<w:style w:type=\"paragraph\" w:styleId=\"{id}\"")) {
+                let b = st[a..].find("</w:style>").unwrap() + a + "</w:style>".len();
+                st.replace_range(a..b, "");
+            }
+        }
+        *st = st.replace(
+            "</w:styles>",
+            "<w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/>\
+             <w:rPr><w:color w:val=\"17365D\"/><w:spacing w:val=\"5\"/><w:sz w:val=\"52\"/></w:rPr></w:style>\
+             <w:style w:type=\"paragraph\" w:styleId=\"Subtitle\"><w:name w:val=\"Subtitle\"/><w:basedOn w:val=\"Normal\"/>\
+             <w:rPr><w:i/><w:color w:val=\"4F81BD\"/><w:spacing w:val=\"15\"/></w:rPr></w:style></w:styles>",
+        );
+    });
+    let (title, sub) = (&rt.paragraphs[0], &rt.paragraphs[1]);
+    assert_eq!(title.style.named_style.as_deref(), Some("Title"));
+    assert!(title.style.own_look && sub.style.own_look, "the file defines both styles");
+    assert!(!rt.paragraphs[2].style.own_look);
+    assert_eq!(title.runs[0].style.font_size_hp, Some(52));
+    assert!(!title.runs[0].style.bold);
+    assert_eq!(title.runs[0].style.letter_spacing_tw, Some(5));
+    assert_eq!(sub.runs[0].style.letter_spacing_tw, Some(15));
+    assert!(sub.runs[0].style.italic);
+    // Laid out, neither is scaled: the Subtitle stays at body size.
+    let tree = letters_core::layout::layout(&rt, &Default::default(), &mut letters_core::layout::MonoShaper);
+    let heights: Vec<f64> = tree.pages[0]
+        .lines()
+        .filter_map(|l| match l {
+            letters_core::layout::Item::Line { height_pt, .. } => Some(*height_pt),
+            _ => None,
+        })
+        .collect();
+    assert!((heights[1] - heights[2]).abs() < 1e-9, "{heights:?}");
+    // Letter spacing survives a save.
+    assert_eq!(round_trip(&rt).paragraphs[1].runs[0].style.letter_spacing_tw, Some(15));
+}
+
+/// A page break in a table cell breaks nothing, as in Writer: the WGA
+/// form's logo cell opens with two, and its logo sits at the cell's top.
+/// They read as two blank lines and a page break before the table.
+#[test]
+fn a_page_break_in_a_table_cell_is_dropped() {
+    use letters_core::model::TableCell;
+    let mut d = Document::from_plain_text("");
+    d.paragraphs = vec![
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 0 }), ..Default::default() }, runs: vec![Run::plain("logo")] },
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 1 }), ..Default::default() }, runs: vec![Run::plain("Form CG02")] },
+        Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] },
+    ];
+    let rt = doctor_parts(&d, |parts| {
+        let doc = parts.get_mut("word/document.xml").unwrap();
+        let at = doc.find(">logo<").expect("the cell's text");
+        let run = doc[..at].rfind("<w:r>").or_else(|| doc[..at].rfind("<w:r ")).expect("its run");
+        doc.insert_str(run, "<w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"page\"/></w:r>");
+    });
+    let cell = &rt.paragraphs[0];
+    assert!(cell.style.table_cell.is_some());
+    assert_eq!(cell.text(), "logo");
+    assert!(!cell.style.page_break_before);
+}
+
+/// A border edge Word leaves off (`w:val="none"`) but gives a gap pads
+/// the paragraph above and below, as Writer does; the side edges do not
+/// set the text in. The questionnaire's Normal style puts 31pt of such
+/// padding on every paragraph that does not clear it.
+#[test]
+fn an_invisible_border_keeps_its_gap_above_and_below() {
+    let d = Document::from_plain_text("before\n\nafter");
+    let rt = doctor_parts(&d, |parts| {
+        let edges: String = ["top", "left", "bottom", "right"]
+            .iter()
+            .map(|s| format!("<w:{s} w:val=\"none\" w:sz=\"96\" w:space=\"31\" w:color=\"FFFFFF\" w:frame=\"1\"/>"))
+            .collect();
+        let st = parts.get_mut("word/styles.xml").unwrap();
+        let name = "<w:name w:val=\"Normal\"/>";
+        assert!(st.contains(name));
+        *st = st.replacen(name, &format!("{name}<w:pPr><w:pBdr>{edges}</w:pBdr></w:pPr>"), 1);
+    });
+    // The blank line between the two takes the Normal style's edges.
+    let b = &rt.paragraphs[1].style.borders;
+    let top = b.top.as_ref().expect("the top edge's gap is kept");
+    assert_eq!((top.style, top.space_pt), (BorderStyle::None, 31.0));
+    assert_eq!(b.bottom.as_ref().map(|e| e.style), Some(BorderStyle::None));
+    assert!(b.left.is_none() && b.right.is_none(), "{b:?}");
+    // It survives a save.
+    assert_eq!(round_trip(&rt).paragraphs[1].style.borders, *b);
 }
 
 #[test]
@@ -1682,6 +1797,44 @@ fn table_column_widths_survive() {
 /// A cell's empty paragraphs are lines of the cell: a form's answer box
 /// is a cell holding a label and a run of empty lines, and drawing only
 /// the label shrank every box to one line (the questionnaire, #1211).
+/// A table that declares no visible border, itself, through its style or
+/// on a cell, is Word's "Normal Table": drawn with no rules (a form's grey
+/// answer box in render-lab `real-questionnaire-2`). One with a style
+/// that rules it ("Table Grid") is ruled. Each keeps its look on a save.
+#[test]
+fn a_table_without_borders_is_drawn_without_rules() {
+    let mut d = Document::from_plain_text("after");
+    d.insert_table_at(0, 1, 1);
+    assert!(round_trip(&d).table_unruled.is_empty(), "a table made here is ruled");
+    let strip = |parts: &mut std::collections::BTreeMap<String, String>, style: Option<&str>| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        while let Some(a) = body.find("<w:tblBorders>") {
+            let b = body[a..].find("</w:tblBorders>").unwrap() + a + "</w:tblBorders>".len();
+            body.replace_range(a..b, "");
+        }
+        while let Some(a) = body.find("<w:tblStyle ") {
+            let b = body[a..].find("/>").unwrap() + a + 2;
+            body.replace_range(a..b, "");
+        }
+        if let Some(id) = style {
+            *body = body.replacen("<w:tblPr>", &format!("<w:tblPr><w:tblStyle w:val=\"{id}\"/>"), 1);
+            let st = parts.get_mut("word/styles.xml").unwrap();
+            *st = st.replace(
+                "</w:styles>",
+                &format!(
+                    "<w:style w:type=\"table\" w:styleId=\"Base{id}\"><w:tblPr><w:tblBorders><w:insideH w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPr></w:style>\
+                     <w:style w:type=\"table\" w:styleId=\"{id}\"><w:basedOn w:val=\"Base{id}\"/></w:style></w:styles>"
+                ),
+            );
+        }
+    };
+    let plain = doctor_parts(&d, |parts| strip(parts, None));
+    assert_eq!(plain.table_unruled.len(), 1, "no border anywhere: unruled");
+    assert_eq!(round_trip(&plain).table_unruled.len(), 1, "and written without rules");
+    let styled = doctor_parts(&d, |parts| strip(parts, Some("MyGrid")));
+    assert!(styled.table_unruled.is_empty(), "ruled through its style's base");
+}
+
 #[test]
 fn a_cells_empty_lines_survive() {
     let mut d = Document::from_plain_text("after");
@@ -1754,6 +1907,39 @@ fn table_cell_fills_survive() {
     assert!(round_trip(&d).table_fills.is_empty());
 }
 
+/// A cell's bare sides survive a save and reopen (`w:tcBorders` with
+/// `w:val="none"` over the table's grid).
+#[test]
+fn a_cells_bare_sides_survive() {
+    use letters_core::{CellEdges, OpenEdges};
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 2, 2);
+    let want = vec![
+        CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+        CellEdges { row: 0, col: 1, open: OpenEdges { left: true, top: true, ..Default::default() } },
+    ];
+    d.table_open_edges.insert(table, want.clone());
+    let rt = round_trip(&d);
+    assert_eq!(rt.table_open_edges.values().cloned().collect::<Vec<_>>(), [want]);
+    assert!(rt.table_unruled.is_empty(), "the rest of the grid stays ruled");
+}
+
+/// A table's cell padding survives a save and reopen (`w:tblCellMar`); a
+/// table with Word's default has none of its own.
+#[test]
+fn table_cell_padding_survives() {
+    use letters_core::CellPadding;
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 2, 2);
+    let want = CellPadding { top_pt: 4.0, bottom_pt: 4.0, left_pt: 4.0, right_pt: 4.0 };
+    d.table_padding.insert(table, want);
+    let rt = round_trip(&d);
+    assert_eq!(rt.table_padding.values().copied().collect::<Vec<_>>(), [want]);
+    let mut d = Document::from_plain_text("after");
+    d.insert_table_at(0, 1, 1);
+    assert!(round_trip(&d).table_padding.is_empty());
+}
+
 /// A table stays where the document has it, between the paragraphs around
 /// it, and the paragraph OOXML needs after a table that meets another or
 /// ends the document comes and goes with the save: a round trip neither
@@ -1792,4 +1978,129 @@ fn tables_keep_their_place() {
         assert_eq!(shape(&once), shape(&doc));
         assert_eq!(shape(&round_trip(&once)), shape(&doc));
     }
+}
+
+/// The text of `name` in the package at `path`.
+fn package_part(path: &std::path::Path, name: &str) -> String {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name(name).unwrap(), &mut xml).unwrap();
+    xml
+}
+
+/// A report with a landscape, two-column appendix carrying its own header
+/// and a closing table section with no footer (LET-005S): each section's
+/// page, header and footer survive a save and reopen, the breaks land
+/// where they were (one before a table), and the file has one `w:sectPr`
+/// per section.
+#[test]
+fn multi_section_docx_round_trips_geometry_and_headers() {
+    let mut d = Document::from_plain_text("Introduction\nAppendix\na1\nb1");
+    for (k, col) in [(2usize, 0u32), (3, 1)] {
+        d.paragraphs[k].style.table_cell = Some(TableCell { table: 0, row: 0, col });
+    }
+    d.header = Some("Report".into());
+    let portrait = PageGeometry { margin_top_pt: 72.0, margin_bottom_pt: 72.0, margin_left_pt: 72.0, margin_right_pt: 72.0, ..Default::default() };
+    let landscape = PageGeometry {
+        width_pt: 842.0,
+        height_pt: 595.0,
+        margin_top_pt: 36.0,
+        margin_bottom_pt: 36.0,
+        margin_left_pt: 36.0,
+        margin_right_pt: 36.0,
+        columns: 2,
+        column_gap_pt: 24.0,
+    };
+    d.sections = vec![
+        DocSection { id: 0, range: ParagraphRange::new(0, 1), geometry: portrait, header: None, footer: None },
+        DocSection { id: 1, range: ParagraphRange::new(1, 2), geometry: landscape, header: Some("Appendix {page}".into()), footer: None },
+        DocSection { id: 2, range: ParagraphRange::new(2, 4), geometry: portrait, header: None, footer: Some(String::new()) },
+    ];
+    d.next_section_id = 3;
+    d.page = Some(portrait);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sections.docx");
+    docx::write(&d, &path).expect("write docx");
+    let xml = package_part(&path, "word/document.xml");
+    assert_eq!(xml.matches("<w:sectPr").count(), 3, "{xml}");
+    assert_eq!(xml.matches("w:orient=\"landscape\"").count(), 1, "{xml}");
+
+    let rt = docx::read(path.to_str().unwrap()).expect("read docx");
+    assert_eq!(rt.paragraphs.len(), 4);
+    assert_eq!(rt.sections.len(), 3);
+    for (read, written) in rt.sections.iter().zip(&d.sections) {
+        assert_eq!(read.range, written.range);
+        assert!(read.geometry.approx_eq(&written.geometry), "{:?} vs {:?}", read.geometry, written.geometry);
+        assert_eq!(read.header, written.header);
+        assert_eq!(read.footer, written.footer);
+    }
+    assert_eq!(rt.header.as_deref(), Some("Report"));
+    assert_eq!(rt.footer, None);
+    assert_eq!(rt.page, Some(rt.sections[0].geometry));
+    assert_eq!(rt.next_section_id, 3);
+    assert!(rt.paragraphs[2].style.table_cell.is_some() && rt.paragraphs[1].style.table_cell.is_none());
+}
+
+/// A document of one section writes one `w:sectPr` and no section parts,
+/// and reads back as one section.
+#[test]
+fn single_section_docx_writes_one_section_properties() {
+    let mut d = Document::from_plain_text("one section\nstill one");
+    d.page = Some(PageGeometry { width_pt: 612.0, height_pt: 792.0, ..Default::default() });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("single.docx");
+    docx::write(&d, &path).expect("write docx");
+    assert_eq!(package_part(&path, "word/document.xml").matches("<w:sectPr").count(), 1);
+    let zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert!(!zip.file_names().any(|n| n.contains("lettersSection")));
+    let rt = docx::read(path.to_str().unwrap()).expect("read docx");
+    assert!(rt.sections.is_empty());
+    assert!(rt.page.unwrap().approx_eq(&d.page.unwrap()));
+}
+
+/// Word's own section breaks: a `w:sectPr` in a paragraph's properties
+/// ends its section there, the body's last ends the document. A section
+/// that leaves out its margins keeps the one before's; one without a
+/// header reference continues the one before's, and the first without
+/// one has none.
+#[test]
+fn word_section_breaks_read_as_sections() {
+    let mut d = Document::from_plain_text("one\ntwo\nthree");
+    d.header = Some("Second part".into());
+    let rt = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        let start = body.find("<w:sectPr").expect("the body's section properties");
+        let end = body[start..].find("</w:sectPr>").map(|e| start + e + "</w:sectPr>".len()).expect("closed");
+        let sect = body[start..end].to_string();
+        let r_start = sect.find("<w:headerReference").expect("rdocx's header reference");
+        let r_end = r_start + sect[r_start..].find("/>").unwrap() + 2;
+        let reference = sect[r_start..r_end].to_string();
+        let letter = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#;
+        body.replace_range(start..end, letter);
+        let a4 = r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:pPr>"#;
+        let landscape = format!(r#"<w:pPr><w:sectPr>{reference}<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr></w:pPr>"#);
+        for (text, props) in [("one", a4.to_string()), ("two", landscape)] {
+            let marker = format!("<w:p><w:r><w:t>{text}</w:t>");
+            assert!(body.contains(&marker), "{body}");
+            *body = body.replacen(&marker, &format!("<w:p>{props}<w:r><w:t>{text}</w:t>"), 1);
+        }
+    });
+    assert_eq!(rt.to_plain_text(), "one\ntwo\nthree");
+    assert_eq!(rt.sections.len(), 3);
+    let ranges: Vec<(usize, usize)> = rt.sections.iter().map(|s| (s.range.start, s.range.end)).collect();
+    assert_eq!(ranges, [(0, 1), (1, 2), (2, 3)]);
+    let a4 = PageGeometry { width_pt: 595.3, height_pt: 841.9, margin_top_pt: 36.0, margin_bottom_pt: 36.0, margin_left_pt: 36.0, margin_right_pt: 36.0, ..Default::default() };
+    let a4_landscape = PageGeometry { width_pt: 841.9, height_pt: 595.3, ..a4 };
+    let letter = PageGeometry { width_pt: 612.0, height_pt: 792.0, ..Default::default() };
+    for (read, want) in rt.sections.iter().zip([a4, a4_landscape, letter]) {
+        assert!(read.geometry.approx_eq(&want), "{:?} vs {want:?}", read.geometry);
+    }
+    assert_eq!(rt.page, Some(rt.sections[0].geometry));
+    assert_eq!(rt.header, None, "the first section has no header reference");
+    assert_eq!(rt.sections[0].header, None);
+    assert_eq!(rt.sections[1].header.as_deref(), Some("Second part"));
+    assert_eq!(rt.sections[2].header, None, "continues the second section's");
+    assert_eq!(rt.next_section_id, 3);
+    assert_eq!(letters_core::sections::header(&rt, 2), (Some("Second part"), false));
 }

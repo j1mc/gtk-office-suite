@@ -32,11 +32,23 @@
     "B": "green",
     "C": "green"
   },
+  "decks/pay-centre-reduced-connector-rules": {
+    "A": "green",
+    "B": "green"
+  },
+  "decks/pay-centre-reduced-leading-blank-paragraphs": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/pay-centre-reduced-line-breaks": {
     "A": "amber",
     "B": "amber"
   },
   "decks/pay-centre-reduced-picture-background": {
+    "A": "green",
+    "B": "green"
+  },
+  "decks/preset-shapes": {
     "A": "green",
     "B": "green"
   },
@@ -104,8 +116,8 @@
     "B": "green"
   },
   "letters/exact-line-spacing": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/font-families": {
     "A": "green",
@@ -113,8 +125,8 @@
     "C": "green"
   },
   "letters/font-sizes": {
-    "A": "green",
-    "B": "green",
+    "A": "amber",
+    "B": "amber",
     "C": "green"
   },
   "letters/footnote-continued": {
@@ -170,6 +182,10 @@
     "A": "green",
     "B": "green",
     "C": "green"
+  },
+  "letters/mixed-sections": {
+    "A": "green",
+    "B": "green"
   },
   "letters/named-styles": {
     "A": "green",

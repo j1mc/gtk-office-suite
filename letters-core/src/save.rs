@@ -278,6 +278,7 @@ struct Present {
     revision: bool,
     comment: bool,
     toc: bool,
+    sections: bool,
 }
 
 fn styled(run: &Run) -> bool {
@@ -315,9 +316,10 @@ fn laid_out(paragraph: &Paragraph) -> bool {
 fn survey(doc: &Document) -> Present {
     let mut present = Present {
         footnote: !doc.footnotes.is_empty(),
-        header_footer: doc.header.is_some() || doc.footer.is_some(),
+        header_footer: doc.header.is_some() || doc.footer.is_some() || doc.sections.iter().any(|s| s.header.is_some() || s.footer.is_some()),
         page_layout: doc.page.is_some(),
         comment: !doc.comments.is_empty(),
+        sections: !doc.sections.is_empty(),
         ..Present::default()
     };
     for paragraph in &doc.paragraphs {
@@ -375,6 +377,9 @@ pub fn compatibility_report(doc: &Document, format: SaveFormat) -> Compatibility
         lost(&mut report, present.comment, "comments", "Comments", "comments and their replies are not saved; the text they are on is");
         // .docx (a TOC field) and .odt (an index) keep it updatable.
         lost(&mut report, present.toc, "table-of-contents", "Table of contents", "saved as its text; it opens as ordinary paragraphs that no longer update");
+        // .docx (a w:sectPr per section) and .odt (a master page per
+        // section) keep them (LET-005S).
+        lost(&mut report, present.sections, "sections", "Sections", "every part with its own page size, margins, columns, header or footer is saved as one run of text; it opens on one page setup");
     }
     match format {
         // The package formats are the reference targets: they carry the
@@ -1103,6 +1108,23 @@ mod tests {
                 .collect();
             assert!(ids.iter().any(|id| id == "page-layout"), "{format:?}: {ids:?}");
             assert!(ids.iter().any(|id| id == "header-footer"), "{format:?}: {ids:?}");
+        }
+    }
+
+    /// A document of several sections saved as text says so once, in the
+    /// one loss dialog (LET-001); the package formats keep the sections.
+    #[test]
+    fn sections_are_one_loss_finding_for_the_text_formats() {
+        let mut doc = formatted();
+        let ops = crate::sections::insert_break(&doc, crate::edit::paragraph_start(&doc, 1), crate::model::PageGeometry::default()).unwrap();
+        crate::edit::apply_all(&mut doc, &ops).unwrap();
+        assert_eq!(doc.sections.len(), 2);
+        for format in [SaveFormat::Markdown, SaveFormat::Html, SaveFormat::PlainText] {
+            let report = compatibility_report(&doc, format);
+            assert_eq!(report.features.iter().filter(|f| f.id == "sections").count(), 1, "{format:?}");
+        }
+        for format in [SaveFormat::Docx, SaveFormat::Odt] {
+            assert!(compatibility_report(&doc, format).features.iter().all(|f| f.id != "sections"), "{format:?}");
         }
     }
 

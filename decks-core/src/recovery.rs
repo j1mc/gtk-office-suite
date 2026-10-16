@@ -479,7 +479,7 @@ mod tests {
 
     fn text_deck(text: &str) -> Deck {
         let mut deck = Deck {
-            slides: vec![crate::engine::Slide {
+            slides: vec![crate::engine::Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,

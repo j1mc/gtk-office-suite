@@ -8,7 +8,7 @@
 //! marker, and the anchor needs the block's height before anything is drawn.
 
 use crate::canvas::set_styled_text;
-use decks_core::engine::text_body::{markers, paragraphs};
+use decks_core::engine::text_body::{markers, paragraph_lead_styles, paragraphs};
 use decks_core::engine::{shrink_font_to_fit, Autofit, ParaAlign, Run, TextBody};
 use gtk4::{cairo, pango};
 
@@ -94,6 +94,7 @@ fn place_inner(
     } else {
         paragraphs(runs)
     };
+    let lead = paragraph_lead_styles(runs);
     let styles: Vec<_> = (0..paras.len()).map(|i| body.para(i)).collect();
     let empty: Vec<bool> = paras.iter().map(|p| p.iter().all(|r| r.text.trim().is_empty())).collect();
     let marks = markers(&styles, &empty);
@@ -128,9 +129,10 @@ fn place_inner(
             ParaAlign::Right => layout.set_alignment(pango::Alignment::Right),
             ParaAlign::Justify => layout.set_justify(true),
         }
-        // An empty paragraph still has its runs' height: give it a space.
+        // An empty paragraph still has its runs' height: give it a space,
+        // in the run its break was written in.
         if para_text.is_empty() {
-            let style = para.first().map(|r| r.style.clone()).unwrap_or_default();
+            let style = para.first().map(|r| r.style.clone()).or_else(|| lead.get(i).cloned().flatten()).unwrap_or_default();
             set_styled_text(&layout, " ", &[Run { text: " ".into(), style }], text_scale);
         } else {
             set_styled_text(&layout, &para_text, para, text_scale);
@@ -316,5 +318,20 @@ mod tests {
         assert_eq!(placed[1].layout.alignment(), pango::Alignment::Right);
         assert!(placed[1].y > placed[0].y);
         assert_eq!(placed[0].x, PLAIN_INSET, "no insets stated: the plain inset");
+    }
+
+    /// #1397's figure tiles: two blank paragraphs written at 14pt lead a
+    /// 14pt figure in a box whose default is larger. The blank lines are
+    /// the figure's height, so it sits where three 14pt lines put it.
+    #[test]
+    fn a_leading_blank_paragraph_is_as_tall_as_the_run_it_was_written_in() {
+        let small = RunStyle { font_size_hp: Some(14), ..Default::default() };
+        let mut big = desc();
+        big.set_absolute_size(36.0 * pango::SCALE as f64);
+        let body = TextBody { paras: vec![ParaStyle::default(); 3], ..Default::default() };
+        let blank = place(&ctx(), "\n\n6", &[Run { text: "\n\n6".into(), style: small.clone() }], &body, (0.0, 0.0, 300.0, 300.0), 1.0, &big);
+        let full = place(&ctx(), "4\n5\n6", &[Run { text: "4\n5\n6".into(), style: small }], &body, (0.0, 0.0, 300.0, 300.0), 1.0, &big);
+        assert_eq!(blank.len(), 3);
+        assert!((blank[2].y - full[2].y).abs() < 1e-9, "blank {} vs text {}", blank[2].y, full[2].y);
     }
 }

@@ -47,7 +47,7 @@ fn deck_of(slides: Vec<Slide>) -> Deck {
 
 /// A slide carrying only what the caller cares about.
 fn slide_of(objects: Vec<SlideObject>, notes: &str, background: &str) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: String::new(),
         background: background.to_string(),
         background_picture: None,
@@ -351,7 +351,7 @@ fn masters_survive_a_snapshot() {
                 },
             ],
             slides: vec![
-                Slide {
+                Slide { hidden: false,
                     title: String::new(),
                     background: String::new(),
                     background_picture: None,
@@ -368,7 +368,7 @@ fn masters_survive_a_snapshot() {
                 // testable: a reader that loses it falls back to master 0,
                 // and a deck where every slide is already on master 0
                 // cannot tell that apart from working.
-                Slide {
+                Slide { hidden: false,
                     title: String::new(),
                     background: String::new(),
                     background_picture: None,
@@ -574,7 +574,7 @@ fn the_masters_font_survives_a_snapshot() {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -640,7 +640,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
             },
         ],
         slides: vec![
-            Slide {
+            Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -652,7 +652,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 ids: Default::default(),
                 layout_id: None,
             },
-            Slide {
+            Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -715,7 +715,7 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             color_map: Default::default(),
             layouts: Vec::new(),
         }],
-        slides: vec![Slide {
+        slides: vec![Slide { hidden: false,
             title: String::new(),
             background: String::new(),
             background_picture: None,
@@ -1438,8 +1438,9 @@ fn placeholder_paragraphs_inherit_their_layout_and_master_styles() {
             "<p:ph idx=\"2\"/>",
             xfrm,
             "",
-            // A leading empty paragraph (dropped), two levels, and a run
-            // that overrides its size.
+            // A leading empty paragraph (a blank line of its own, as
+            // PowerPoint and Impress keep it), two levels, and a run that
+            // overrides its size.
             "<a:p/><a:p><a:r><a:t>One</a:t></a:r></a:p>\
              <a:p><a:pPr lvl=\"1\"/><a:r><a:rPr sz=\"1000\"/><a:t>Two</a:t></a:r></a:p>",
         );
@@ -1484,11 +1485,11 @@ fn placeholder_paragraphs_inherit_their_layout_and_master_styles() {
     assert_eq!(body.anchor, Anchor::Bottom, "the master placeholder's anchor");
 
     let (text, runs, body) = &boxes[1];
-    assert_eq!(text, "One\nTwo");
-    assert_eq!(body.paras.len(), 2, "one style per line, the dropped empty paragraph excluded");
-    assert_eq!((body.paras[0].level, &body.paras[0].bullet), (0, &Bullet::Char("•".into())));
-    assert_eq!((body.paras[1].level, &body.paras[1].bullet), (1, &Bullet::Char("–".into())));
-    assert!((body.paras[0].margin_left - 36.0).abs() < 1e-9 && (body.paras[0].indent + 36.0).abs() < 1e-9);
+    assert_eq!(text, "\nOne\nTwo", "the leading blank paragraph keeps its line");
+    assert_eq!(body.paras.len(), 3, "one style per line, the blank one included");
+    assert_eq!((body.paras[1].level, &body.paras[1].bullet), (0, &Bullet::Char("•".into())));
+    assert_eq!((body.paras[2].level, &body.paras[2].bullet), (1, &Bullet::Char("–".into())));
+    assert!((body.paras[1].margin_left - 36.0).abs() < 1e-9 && (body.paras[1].indent + 36.0).abs() < 1e-9);
     assert_eq!(runs.iter().map(|r| r.style.font_size_hp).collect::<Vec<_>>(), [Some(64), Some(20)]);
 }
 
@@ -1934,6 +1935,7 @@ fn recovery_rich_state_round_trip() {
                     band_row: false,
                     accent: None,
                     cell_margins: None,
+                    style_id: None,
                 },
             },
         ],
