@@ -894,7 +894,7 @@ fn content_xml(doc: &Document) -> String {
                 continue;
             }
             // A tab is an element in ODF: a raw one is only whitespace.
-            let mut run_xml = esc(&r.text).replace('\t', "<text:tab/>");
+            let mut run_xml = esc(&r.text).replace('\t', "<text:tab/>").replace('\n', "<text:line-break/>");
             let plain = RunStyle { revision: None, comments: Vec::new(), ..r.style.clone() };
             if plain != RunStyle::default() {
                 let ti = run_styles.iter().position(|s| *s == plain).unwrap() + 1;
@@ -2506,6 +2506,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     text(&" ".repeat(n));
                 }
                 Ok(Event::Empty(e)) if e.name().as_ref() == "text:tab" => text("\t"),
+                Ok(Event::Empty(e)) if e.name().as_ref() == "text:line-break" => text("\n"),
                 Err(e) => return Err(format!("XML parse error: {e}")),
                 _ => {}
             }
@@ -2966,6 +2967,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 }
                 "text:tab" if para.is_some() => {
                     push_text(&mut para, &span_stack, &link_stack, &rev_stack, "\t");
+                }
+                // A line break within the paragraph, as the DOCX reader
+                // gives `w:br`: a newline in the run's text.
+                "text:line-break" if para.is_some() => {
+                    push_text(&mut para, &span_stack, &link_stack, &rev_stack, "\n");
                 }
                 "text:p" if note.is_some() => {}
                 "text:p" | "text:h" if in_body => {
@@ -4345,6 +4351,26 @@ mod tests {
             assert_eq!(d.footer.as_deref(), Some("OFFICIAL"));
             assert!((d.page.unwrap().margin_left_pt - left).abs() < 1e-6, "{first:?}: {:?}", d.page);
         }
+    }
+
+    /// A line break keeps the lines it parts: the W1 notes' address is one
+    /// paragraph of four lines, which read as "HM Revenue and
+    /// CustomsExcise Processing Team…" on one. It reads as the DOCX
+    /// reader's `w:br` does, a newline in the text, and writes back.
+    #[test]
+    fn a_line_break_parts_its_lines() {
+        let content = "<office:document-content><office:body><office:text><text:p>\
+             <text:span>HM Revenue</text:span><text:span><text:line-break/></text:span>BX9 1GL</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, "");
+        let text: String = d.paragraphs[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "HM Revenue\nBX9 1GL");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.odt");
+        let path = path.to_str().unwrap();
+        write(&d, path).unwrap();
+        let back: String = read(path).unwrap().paragraphs[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(back, "HM Revenue\nBX9 1GL");
     }
 
     /// A span named by a style of styles.xml takes its look, with what its
