@@ -20,6 +20,11 @@ import tomllib
 import unittest
 
 DENY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deny.toml")
+def name(entry):
+    """An advisory id, or `crate@version` for a yanked-crate entry."""
+    return entry.get("id") or entry.get("crate")
+
+
 REVIEW = re.compile(r"review by (\d{4}-\d{2}-\d{2})")
 ISSUE = re.compile(r"#\d+")
 
@@ -35,9 +40,9 @@ class EveryAdvisoryWaiverIsDated(unittest.TestCase):
     def test_every_waiver_names_an_issue_and_a_review_date(self):
         for entry in ignored():
             reason = entry.get("reason", "")
-            with self.subTest(advisory=entry.get("id")):
-                self.assertRegex(reason, ISSUE, f"{entry.get('id')} names no tracking issue")
-                self.assertRegex(reason, REVIEW, f"{entry.get('id')} has no `review by YYYY-MM-DD`")
+            with self.subTest(advisory=name(entry)):
+                self.assertRegex(reason, ISSUE, f"{name(entry)} names no tracking issue")
+                self.assertRegex(reason, REVIEW, f"{name(entry)} has no `review by YYYY-MM-DD`")
 
     def test_no_waiver_is_past_its_review_date(self):
         today = datetime.date.today()
@@ -45,11 +50,11 @@ class EveryAdvisoryWaiverIsDated(unittest.TestCase):
             match = REVIEW.search(entry.get("reason", ""))
             if not match:
                 continue  # reported by the test above
-            with self.subTest(advisory=entry.get("id")):
+            with self.subTest(advisory=name(entry)):
                 due = datetime.date.fromisoformat(match.group(1))
                 self.assertGreaterEqual(
                     due, today,
-                    f"{entry['id']} was due for review on {due}. Re-check the upstream "
+                    f"{name(entry)} was due for review on {due}. Re-check the upstream "
                     "blocker named in its reason: remove the entry if it is fixed, "
                     "otherwise set a new date and say what you checked.",
                 )
