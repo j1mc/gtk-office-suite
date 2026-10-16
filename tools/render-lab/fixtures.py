@@ -125,16 +125,6 @@ EXPORT = {
 # shaping). There is no geometry miss to fix, so no thresholds are tuned and
 # no geometry is churned to chase the OCR: the ambers stand as documented.
 
-# NOTE (letters/exact-line-spacing, documented amber): line pitch is
-# identical (28pt exact/minimum boxes in both renderers, 1.5-spacing
-# pixel-identical), but the trailing gap after a fixed-height paragraph
-# differs by a few px after exact and ~18px after minimum: Writer packs
-# the next paragraph tighter there while keeping the same pitch, an
-# inconsistency inside Writer itself (13pt after exact vs 0 after
-# minimum against identical 10pt style spacing). Our model follows
-# Word's rule (fixed box, normal spacing after). Words all present,
-# page counts agree; the amber records the trailing-gap miss.
-
 
 def add(app, feature, path, expect):
     entry = {
