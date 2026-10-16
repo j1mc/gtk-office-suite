@@ -1258,7 +1258,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_rows = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, row_heights(t)?))).collect();
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
-    let table_unruled = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
+    let table_unruled: std::collections::BTreeSet<u32> = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
+    let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
 
     let mut read = Document {
         paragraphs,
@@ -1279,6 +1280,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_fills,
         table_padding,
         table_unruled,
+        table_open_edges,
         sections: Vec::new(),
         next_section_id: 0,
     };
@@ -1421,6 +1423,28 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
         }
     }
     (!fills.is_empty()).then_some(fills)
+}
+
+/// The cells whose own borders (`w:tcBorders`) leave a side without a
+/// rule (`w:val="nil"` or `"none"`), at their grid columns.
+fn cell_open_edges(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellEdges>> {
+    use rdocx::CellBorderEdge as C;
+    let mut edges = Vec::new();
+    for ri in 0..table.row_count() {
+        let Some(row) = table.row(ri) else { continue };
+        let mut col = 0u32;
+        for ci in 0..row.cell_count() {
+            let Some(cell) = row.cell(ci) else { continue };
+            let at = col;
+            col += cell.grid_span().unwrap_or(1).max(1);
+            let open = |e: C| cell.border(e).is_some_and(|b| matches!(b.style(), "none" | "nil"));
+            let open = crate::model::OpenEdges { top: open(C::Top), bottom: open(C::Bottom), left: open(C::Left), right: open(C::Right) };
+            if open.any() {
+                edges.push(crate::model::CellEdges { row: ri as u32, col: at, open });
+            }
+        }
+    }
+    (!edges.is_empty()).then_some(edges)
 }
 
 /// Whether a table draws any rule: a visible edge of its own borders
@@ -1817,6 +1841,17 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             for fill in doc.table_fills.get(&tc0.table).into_iter().flatten() {
                 if let Some(mut cell) = tbl.cell(fill.row as usize, fill.col as usize) {
                     cell.set_shading(&fill.color);
+                }
+            }
+            // A cell's open sides, over the table's grid.
+            for e in doc.table_open_edges.get(&tc0.table).into_iter().flatten().filter(|_| !doc.table_unruled.contains(&tc0.table)) {
+                use rdocx::CellBorderEdge as C;
+                if let Some(mut cell) = tbl.cell(e.row as usize, e.col as usize) {
+                    for (open, side) in [(e.open.top, C::Top), (e.open.bottom, C::Bottom), (e.open.left, C::Left), (e.open.right, C::Right)] {
+                        if open {
+                            let _ = cell.set_border_checked(side, rdocx::BorderStyle::None, 0, "auto");
+                        }
+                    }
                 }
             }
             if let Some(heights) = doc.table_rows.get(&tc0.table) {

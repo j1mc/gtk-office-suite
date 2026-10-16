@@ -266,7 +266,7 @@ pub enum Item {
     /// A table cell's border box.
     /// A table cell's box and its background colour (six hex digits), if
     /// the file shades it.
-    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, ruled: bool },
+    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, ruled: bool, open: crate::model::OpenEdges },
     /// A paragraph's shading and borders: the text box of one run of its
     /// lines on this page (`x_pt`, `y_pt`, `width_pt`, `height_pt`), drawn
     /// under the text. A paragraph split across pages gets one box per
@@ -1173,6 +1173,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 row_cells.push((col, width, paras));
             }
         }
+        let open = |col: u32| open_edges(doc, first.table, row, col);
         let fill = |col: u32| doc.table_fills.get(&first.table).and_then(|f| f.iter().find(|f| f.row == row && f.col == col)).map(|f| f.color.clone());
         // Lay the merged cells that start in this row down from its top.
         let mut start_tall = |flow: &mut Flow, tall: &mut Vec<Tall>, top: f64| {
@@ -1196,12 +1197,12 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             start_tall(flow, &mut tall, top);
             for (col, width, paras) in &row_cells {
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col), ruled });
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col), ruled, open: open(*col) });
                 let slices = cell_slices(doc, paras, &pad);
                 place_slices(flow, doc, paras, &slices, cx + pad.left_pt, top);
             }
             flow.y = top + h.pt;
-            close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt, ruled);
+            close_tall(flow, doc, &mut tall, first.table, row, &col_x, pad.left_pt);
             continue;
         }
         // Otherwise the row splits across pages, as Word and LibreOffice
@@ -1260,7 +1261,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
             for (((col, width, paras), cell), (&from, &(to, _))) in row_cells.iter().zip(&slices).zip(next.iter().zip(&takes)) {
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col), ruled });
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col), ruled, open: open(*col) });
                 place_slices(flow, doc, paras, &cell[from..to], cx + pad.left_pt, top);
             }
             for (n, (to, _)) in next.iter_mut().zip(&takes) {
@@ -1273,7 +1274,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
             flow.next_column();
         }
-        close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt, ruled);
+        close_tall(flow, doc, &mut tall, first.table, row, &col_x, pad.left_pt);
     }
 }
 
@@ -1293,16 +1294,22 @@ struct Tall {
     fill: Option<String>,
 }
 
+/// A cell's sides the file draws no rule on.
+fn open_edges(doc: &Document, table: u32, row: u32, col: u32) -> crate::model::OpenEdges {
+    doc.table_open_edges.get(&table).and_then(|e| e.iter().find(|e| (e.row, e.col) == (row, col))).map(|e| e.open).unwrap_or_default()
+}
+
 /// Draw the box of each merged cell whose last row is `row`, now placed:
 /// from its first row's top to here, when both are in this column of this
 /// page. One that crossed a page keeps its content and loses its box.
-fn close_tall(flow: &mut Flow, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64], left_pad: f64, ruled: bool) {
+fn close_tall(flow: &mut Flow, doc: &Document, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64], left_pad: f64) {
+    let ruled = !doc.table_unruled.contains(&table);
     let (page, column, y, x0) = (flow.pages.len(), flow.column, flow.y, flow.column_x());
     let (ending, rest): (Vec<Tall>, Vec<Tall>) = std::mem::take(tall).into_iter().partition(|t| t.last_row == row);
     *tall = rest;
     for t in ending.into_iter().filter(|t| (t.page, t.column) == (page, column)) {
         let cx = x0 - left_pad + col_x[t.col as usize];
-        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone(), ruled });
+        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone(), ruled, open: open_edges(doc, table, t.row, t.col) });
     }
 }
 

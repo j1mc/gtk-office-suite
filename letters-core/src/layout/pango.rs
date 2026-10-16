@@ -1139,7 +1139,7 @@ impl Typeset {
                     let _ = cr.stroke();
                     let _ = cr.restore();
                 }
-                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, ruled, .. } => {
+                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, ruled, open, .. } => {
                     // The cell's shading first, under its rule and text.
                     if let Some((r, g, b)) = fill.as_deref().and_then(parse_hex) {
                         let _ = cr.save();
@@ -1169,7 +1169,24 @@ impl Typeset {
                     let _ = cr.save();
                     cr.set_source_rgb(0.0, 0.0, 0.0);
                     cr.set_line_width(lw);
-                    cr.rectangle(x0, y0, x1 - x0, y1 - y0);
+                    if open.any() {
+                        // Only the sides the cell rules; a neighbour draws
+                        // a shared side it rules itself.
+                        for (shut, (ax, ay), (bx, by)) in [
+                            (!open.top, (x0, y0), (x1, y0)),
+                            (!open.right, (x1, y0), (x1, y1)),
+                            (!open.bottom, (x0, y1), (x1, y1)),
+                            (!open.left, (x0, y0), (x0, y1)),
+                        ] {
+                            if shut {
+                                cr.move_to(ax, ay);
+                                cr.line_to(bx, by);
+                            }
+                        }
+                        cr.set_line_cap(cairo::LineCap::Square);
+                    } else {
+                        cr.rectangle(x0, y0, x1 - x0, y1 - y0);
+                    }
                     let _ = cr.stroke();
                     let _ = cr.restore();
                 }
