@@ -198,6 +198,19 @@ fn an_unruled_tables_rows_are_their_lines() {
     assert_eq!(cells, [(false, LINE)]);
 }
 
+/// A table whose first cell has a page break before it starts a page.
+#[test]
+fn a_table_after_a_page_break_starts_a_page() {
+    let mut d = doc_of(2, "text");
+    let table = d.insert_table_at(1, 1, 1);
+    let first = d.paragraphs.iter().position(|p| p.style.table_cell.is_some_and(|c| c.table == table)).unwrap();
+    d.paragraphs[first].style.page_break_before = true;
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    assert!(!t.pages[0].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+    assert!(t.pages[1].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+}
+
 /// A cell's bare sides reach the painter with it; its neighbours keep
 /// their own.
 #[test]

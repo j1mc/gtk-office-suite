@@ -1123,6 +1123,10 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let cells: Vec<(usize, crate::model::TableCell)> =
         range.clone().filter_map(|i| doc.paragraphs[i].style.table_cell.map(|c| (i, c))).collect();
     let Some(&(_, first)) = cells.first() else { return };
+    // A table that starts a page (a page break the file put before it).
+    if doc.paragraphs[range.start].style.page_break_before && !flow.page_is_empty() {
+        flow.new_page();
+    }
     let cols = cells.iter().map(|(_, c)| c.col).max().unwrap_or(0) + 1;
     let rows = cells.iter().map(|(_, c)| c.row).max().unwrap_or(0) + 1;
     let table_w = flow.column_width();
