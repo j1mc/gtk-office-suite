@@ -88,6 +88,17 @@ impl PangoShaper {
         let mut base = pango::FontDescription::new();
         base.set_family(if req.code { "Liberation Mono" } else { &req.defaults.font_family });
         let mut size = req.defaults.font_size_pt;
+        // A blank paragraph is as tall as its own (empty) run's font.
+        if req.runs.iter().all(|r| r.text.is_empty() && !super::is_object(r)) {
+            if let Some(st) = req.runs.first().map(|r| &r.style) {
+                if let Some(hp) = st.font_size_hp {
+                    size = f64::from(hp) / 2.0;
+                }
+                if let Some(f) = &st.font_family {
+                    base.set_family(f);
+                }
+            }
+        }
         // A heading's look: the document's own heading style if it has
         // one (family, size, weight, slant, colour), else bold and scaled.
         let mut heading_color = None;
@@ -191,6 +202,9 @@ impl PangoShaper {
             let run_size = st.font_size_hp.map_or(size, |hp| f64::from(hp) / 2.0);
             if st.font_size_hp.is_some() {
                 add(pango::AttrSize::new(to_units(run_size)).into());
+            }
+            if let Some(tw) = st.letter_spacing_tw {
+                add(pango::AttrInt::new_letter_spacing(to_units(f64::from(tw) / 20.0)).into());
             }
             if let Some((r, g, b)) = st.color.as_deref().and_then(parse_hex) {
                 add(pango::AttrColor::new_foreground(r, g, b).into());
@@ -453,6 +467,18 @@ fn edge_offset((x0, y0): (f64, f64), (x1, y1): (f64, f64), bounds: (f64, f64, f6
     let (dx, dy) = ((left + right) / 2.0 - (x0 + x1) / 2.0, (top + bottom) / 2.0 - (y0 + y1) / 2.0);
     let len = (dx * dx + dy * dy).sqrt().max(1e-6);
     (dx / len * by, dy / len * by)
+}
+
+/// Fill a tab's gap `from..to` with leader glyph `glyph` (`w` points
+/// wide) as Writer does (`SwTabPortion::Paint`): as many whole glyphs as
+/// fit, packed at their own advance from the tab's start, the remainder
+/// left before the text.
+fn fill_leader(cr: &cairo::Context, glyph: &pango::LayoutLine, from: f64, to: f64, w: f64, baseline_pt: f64) {
+    let n = ((to - from) / w + 1e-6).floor().max(0.0) as usize;
+    for k in 0..n {
+        cr.move_to(from + k as f64 * w, baseline_pt);
+        pangocairo::functions::show_layout_line(cr, glyph);
+    }
 }
 
 /// The built-in image loader: PNG through Cairo.
@@ -872,13 +898,7 @@ impl Typeset {
         let dot = self.shaper.layout(&req);
         let Some(dot_line) = dot.line_readonly(0) else { return };
         let w = to_pt(dot_line.index_to_x(1, false)).max(1.0);
-        let step = w * 1.5;
-        let mut x = to - w - step * 0.5;
-        while x >= from + w * 0.5 {
-            cr.move_to(x, baseline_pt);
-            pangocairo::functions::show_layout_line(cr, &dot_line);
-            x -= step;
-        }
+        fill_leader(cr, &dot_line, from, to, w, baseline_pt);
     }
 
     /// A tab stop's leader across its tab's gap on `line`: the stop's
@@ -918,14 +938,7 @@ impl Typeset {
             let glyph_layout = self.shaper.layout(&req);
             let Some(glyph_line) = glyph_layout.line_readonly(0) else { at = tab + 1; continue };
             let w = to_pt(glyph_line.index_to_x(glyph.len() as i32, false)).max(1.0);
-            // Dots breathe; rules join up.
-            let step = if glyph == "." || glyph == "·" { w * 1.5 } else { w };
-            let mut x = to - w - step * 0.5;
-            while x >= from + w * 0.5 {
-                cr.move_to(x, baseline_pt);
-                pangocairo::functions::show_layout_line(cr, &glyph_line);
-                x -= step;
-            }
+            fill_leader(cr, &glyph_line, from, to, w, baseline_pt);
             at = tab + 1;
         }
     }
@@ -1481,6 +1494,22 @@ mod tests {
         assert!(end.x_pt > start.x_pt + 10.0, "seven CJK characters take room: {} -> {}", start.x_pt, end.x_pt);
     }
 
+    /// A blank paragraph is as tall as its own empty run's font (an
+    /// imported 14pt blank line), not the body size.
+    #[test]
+    fn a_blank_paragraph_is_as_tall_as_its_own_font() {
+        let mut d = doc(2, "");
+        d.paragraphs[0].runs = vec![];
+        d.paragraphs[1].runs = vec![Run { text: String::new(), style: crate::model::RunStyle { font_size_hp: Some(56), ..Default::default() } }];
+        let t = Typeset::new(d, LayoutOptions::default());
+        let h: Vec<f64> = t.tree().pages[0]
+            .items
+            .iter()
+            .filter_map(|i| match i { Item::Line { height_pt, .. } => Some(*height_pt), _ => None })
+            .collect();
+        assert!(h[1] > h[0] * 2.0, "a 28pt blank line under a 12pt one: {h:?}");
+    }
+
     /// Tab leaders and paragraph boxes draw without panic: leaders
     /// across the tab's gap, the box under the text.
     #[test]
@@ -1500,5 +1529,50 @@ mod tests {
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.paint().unwrap();
         t.draw_page(&cr, 0);
+    }
+
+    /// A dot leader as Writer fills it: whole dots packed at their own
+    /// advance from the tab's start (render-lab `letters/tab-leaders`),
+    /// not spaced out and pulled back from the text.
+    #[test]
+    fn dot_leaders_pack_from_the_tab_start() {
+        let mut d = doc(1, "one\ttwo");
+        d.paragraphs[0].style.tab_stops_pt = vec![crate::model::TabStop {
+            pos_pt: 300.0,
+            align: crate::model::TabAlign::Right,
+            leader: crate::model::TabLeader::Dot,
+        }];
+        let t = Typeset::new(d, LayoutOptions::default());
+        let page = &t.tree().pages[0];
+        let tab = t.caret(TextPos { para: 0, offset: 3 }).unwrap();
+        let two = t.caret(TextPos { para: 0, offset: 4 }).unwrap();
+        // Drawn at 8 px per point, so a dot's advance is many pixels.
+        let scale = 8.0;
+        let (w, h) = ((page.width_pt * scale) as i32, ((tab.top_pt + tab.height_pt + 2.0) * scale) as i32);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, w, h).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.paint().unwrap();
+            cr.scale(scale, scale);
+            t.draw_page(&cr, 0);
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().unwrap();
+        let rows = (tab.top_pt * scale) as usize..((tab.top_pt + tab.height_pt) * scale) as usize;
+        let inked = |x: usize| rows.clone().any(|y| data[y * stride + x * 4] < 128);
+        // Dot starts (ink after paper) between the tab and the next word.
+        let (from, to) = ((tab.x_pt * scale) as usize + 1, (two.x_pt * scale) as usize - 1);
+        let starts: Vec<usize> = (from..to).filter(|&x| inked(x) && !inked(x - 1)).collect();
+        assert!(starts.len() > 20, "{starts:?}");
+        let pitch = (starts[starts.len() - 1] - starts[0]) as f64 / (starts.len() - 1) as f64 / scale;
+        let dot = {
+            let runs = [Run::plain(".")];
+            let mut req = super::super::paragraph_request(&t.doc.paragraphs[0], 1000.0, &t.opts);
+            req.runs = &runs;
+            to_pt(t.shaper.layout(&req).line_readonly(0).unwrap().index_to_x(1, false))
+        };
+        assert!((pitch - dot).abs() < 0.1, "dots every {pitch}pt, a dot is {dot}pt");
+        assert!((starts[0] as f64 / scale - tab.x_pt) < dot, "the first dot opens the gap: {} vs {}", starts[0] as f64 / scale, tab.x_pt);
     }
 }

@@ -583,6 +583,30 @@ fn with_note(text: &str, n: usize) -> Paragraph {
     }
 }
 
+/// Writer at the foot: a note's last line stands on the bottom margin by
+/// its natural foot, its proportional extra hanging below; and a Word
+/// note's own leading space is the only one after its number.
+#[test]
+fn a_spaced_note_stands_on_the_margin_by_its_natural_foot() {
+    let mut d = doc_of(2, "body");
+    d.paragraphs.insert(1, with_note("noted", 0));
+    for p in &mut d.paragraphs {
+        p.style.line_spacing = 2.0;
+    }
+    d.footnotes = vec![" The note.".into()];
+    assert_eq!(note_paragraph(&d, 0, &opts()).runs[1].text, " The note.");
+    let t = lay(&d);
+    let foot = 841.9 - 72.0;
+    let note: Vec<(f64, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Line { source: Source::Footnote(0), top_pt, height_pt, .. } => Some((*top_pt, *height_pt)), _ => None })
+        .collect();
+    // A 30pt line (15pt natural at 2.0): its top is 15pt above the foot.
+    assert_eq!(note.len(), 1);
+    assert!((note[0].1 - 30.0).abs() < 1e-9 && (note[0].0 + 15.0 - foot).abs() < 1e-6, "{note:?}");
+}
+
 #[test]
 fn footnotes_sit_at_the_foot_of_the_page_that_references_them() {
     let mut d = doc_of(2, "body");
@@ -840,6 +864,31 @@ fn exact_and_minimum_line_heights_size_lines() {
     // A fixed 30pt line, a 30pt minimum, and a 5pt minimum the 15pt
     // natural line outgrows.
     assert_eq!(tops, vec![72.0, 102.0, 132.0]);
+}
+
+#[test]
+fn fixed_and_grown_lines_place_the_baseline_as_writer_does() {
+    let mut d = doc_of(4, "x");
+    d.paragraphs[0].style.line_height = Some(LineHeight::Exact(30.0));
+    d.paragraphs[1].style.line_height = Some(LineHeight::Minimum(30.0));
+    d.paragraphs[2].style.line_height = Some(LineHeight::Minimum(5.0));
+    let t = lay(&d);
+    let drops: Vec<f64> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Line { source: Source::Paragraph(_), top_pt, baseline_pt, .. } => Some(baseline_pt - top_pt),
+            _ => None,
+        })
+        .collect();
+    // The plain last paragraph shows the natural ascent; its line is 15pt.
+    let natural = drops[3];
+    // Exact: four fifths of the fixed height, whatever the font.
+    assert!((drops[0] - 24.0).abs() < 1e-9, "{drops:?}");
+    // atLeast grown from 15pt to 30pt: the 15pt growth goes above the text.
+    assert!((drops[1] - (natural + 15.0)).abs() < 1e-9, "{drops:?}");
+    // atLeast the natural line outgrows: unchanged.
+    assert!((drops[2] - natural).abs() < 1e-9, "{drops:?}");
 }
 
 #[test]

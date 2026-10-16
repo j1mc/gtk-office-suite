@@ -56,6 +56,8 @@ pub fn restyled(style: &ParaStyle, name: &str) -> ParaStyle {
         heading,
         keep_with_next: titled || (style.keep_with_next && heading.is_some()),
         named_style: titled.then(|| name.to_string()),
+        // The picked style's look is ours, not a file's.
+        own_look: false,
         block_quote: name == "Quote",
         // A code block keeps its language if it was one already.
         code_block: (name == "Code").then(|| style.code_block.clone().unwrap_or_default()),
