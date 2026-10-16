@@ -2081,7 +2081,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // the edit-render journey's bullet showed it (#1201). The reader
             // takes the list's own indent back off.
             let text = para.style.left_indent_pt.max(0.0) + crate::lists::text_indent_pt(para.style.list_level);
-            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(crate::lists::HANGING_PT));
+            let hanging = para.style.list_hanging_pt.unwrap_or(crate::lists::HANGING_PT);
+            p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(hanging));
         } else if para.style.left_indent_pt != 0.0 {
             p = p.indent_left(rdocx::Length::pt(para.style.left_indent_pt));
         }
@@ -2865,6 +2866,13 @@ fn list_indent_from_declared(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>,
         doc.numbering_level(num_id, level).and_then(|l| l.indent_left).map(twips_pt).unwrap_or(text)
     };
     style.left_indent_pt = (declared - text).max(0.0);
+    // The marker hangs as far as the paragraph says, else its level.
+    let hanging = if style.first_line_indent_pt < 0.0 {
+        Some(-style.first_line_indent_pt)
+    } else {
+        doc.numbering_level(num_id, level).and_then(|l| l.indent_hanging).map(twips_pt)
+    };
+    style.list_hanging_pt = hanging.filter(|h| h.is_finite() && *h > 0.0 && (h - crate::lists::HANGING_PT).abs() > 0.5);
     if style.first_line_indent_pt < 0.0 {
         style.first_line_indent_pt = 0.0;
     }

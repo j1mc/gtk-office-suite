@@ -215,6 +215,24 @@ fn a_cells_bare_sides_are_laid_with_it() {
     assert_eq!(open, [(0, bare), (1, OpenEdges::default())]);
 }
 
+/// A list item's marker hangs as far before its text as the file says,
+/// else `HANGING_PT`; the text stays where it was.
+#[test]
+fn a_list_marker_hangs_as_far_as_the_file_says() {
+    let mut d = doc_of(2, "item");
+    for p in &mut d.paragraphs {
+        p.style.list = crate::model::ListKind::Numbered;
+        p.style.list_level = 1;
+    }
+    d.paragraphs[1].style.list_hanging_pt = Some(36.0);
+    let t = lay(&d);
+    let markers: Vec<f64> = t.pages[0].items.iter().filter_map(|i| match i { Item::Marker { x_pt, .. } => Some(*x_pt), _ => None }).collect();
+    // Level 1's text is 36pt in: the default marker 18pt before it, the
+    // file's 36pt before it, at the margin.
+    assert_eq!(markers.len(), 2);
+    assert!((markers[0] - markers[1] - (36.0 - crate::lists::HANGING_PT)).abs() < 1e-6, "{markers:?}");
+}
+
 #[test]
 fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
     let mut d = doc_of(1, "after");
