@@ -79,6 +79,8 @@ fn run_style_props(st: &RunStyle) -> String {
     let mut props = String::new();
     if st.bold {
         props.push_str(" fo:font-weight=\"bold\"");
+    } else if st.regular {
+        props.push_str(" fo:font-weight=\"normal\"");
     }
     if st.italic {
         props.push_str(" fo:font-style=\"italic\"");
@@ -1705,8 +1707,11 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                     "style:text-properties" => {
                         if let Some(name) = cur_name.clone().filter(|_| cur_family == "text" || cur_family == "paragraph") {
                             let mut st = RunStyle::default();
-                            if attr_val(&e, "fo:font-weight").as_deref() == Some("bold") {
-                                st.bold = true;
+                            match attr_val(&e, "fo:font-weight").as_deref() {
+                                Some("bold") => st.bold = true,
+                                // Undoes a parent's bold, and a heading's.
+                                Some("normal") => st.regular = true,
+                                _ => {}
                             }
                             if attr_val(&e, "fo:font-style").as_deref() == Some("italic") {
                                 st.italic = true;
@@ -3771,6 +3776,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     }
 
     continue_numbering(&mut doc.paragraphs, &top_lists);
+    // A regular weight matters only where the paragraph is drawn bold (a
+    // heading, the Title); LibreOffice writes "normal" on body text too.
+    for p in &mut doc.paragraphs {
+        let bold_look = p.style.heading.is_some() || p.style.named_style.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("title"));
+        if !bold_look {
+            p.runs.iter_mut().for_each(|r| r.style.regular = false);
+        }
+    }
     doc.ensure_non_empty();
     doc.table_columns = column_widths.into_iter().filter_map(|(t, w)| Some((t, w.filter(|w| !w.is_empty())?))).collect();
     doc.table_rows = row_heights;
@@ -3817,7 +3830,8 @@ fn text_style(name: &str, auto: &AutoStyles, named: &AutoStyles) -> RunStyle {
 fn inherit(outer: Option<&RunStyle>, own: RunStyle) -> RunStyle {
     let Some(outer) = outer else { return own };
     RunStyle {
-        bold: own.bold || outer.bold,
+        bold: own.bold || (outer.bold && !own.regular),
+        regular: own.regular || (outer.regular && !own.bold),
         italic: own.italic || outer.italic,
         underline: own.underline || outer.underline,
         strikethrough: own.strikethrough || outer.strikethrough,
@@ -4781,6 +4795,28 @@ mod tests {
             assert_eq!(d.footer.as_deref(), Some("OFFICIAL"));
             assert!((d.page.unwrap().margin_left_pt - left).abs() < 1e-6, "{first:?}: {:?}", d.page);
         }
+    }
+
+    /// A heading paragraph whose style says `fo:font-weight="normal"` is
+    /// drawn regular, as Writer draws it: the vessel declaration's table
+    /// cells are Heading 3 paragraphs set back to normal weight, and came
+    /// out bold. Elsewhere "normal" is the default and is not kept. The
+    /// weight survives a save.
+    #[test]
+    fn a_normal_weight_undoes_a_headings_bold() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Heading3\" style:family=\"paragraph\"><style:text-properties fo:font-weight=\"bold\"/></style:style>\
+             </office:styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P1\" style:family=\"paragraph\" style:parent-style-name=\"Heading3\"><style:text-properties fo:font-weight=\"normal\"/></style:style>\
+             <style:style style:name=\"P2\" style:family=\"paragraph\"><style:text-properties fo:font-weight=\"normal\"/></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:h text:style-name=\"P1\" text:outline-level=\"3\">Towing Operations</text:h><text:h text:style-name=\"Heading3\" text:outline-level=\"3\">Bold</text:h><text:p text:style-name=\"P2\">Body</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        let regular: Vec<(bool, bool)> = d.paragraphs.iter().map(|p| (p.runs[0].style.bold, p.runs[0].style.regular)).collect();
+        assert_eq!(regular, [(false, true), (false, false), (false, false)], "Heading 3 itself stays bold by its look");
+        assert!(round_trip(&d).paragraphs[0].runs[0].style.regular);
     }
 
     /// The automatic font colour undoes a parent style's: a heading whose
