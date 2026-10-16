@@ -62,7 +62,7 @@ are not all green, and any fixture name the baseline does not have.
 |---|---|---|---|
 | Tables in documents (cell-tagged model) | ✅ | I1+I2 round-trip, I3 structural (table-2x2 asserts coordinates). Interleaved position + UI editing remain | 🟠 letters/table (accepted metric artifact) |
 | Named paragraph styles (Title, Subtitle, Quote) | ✅ | I1+I2 round-trip | ✅ letters/named-styles, letters/block-quote |
-| Font size / color per run | ✅ | I1 + I3 scenarios | ✅ letters/font-sizes, letters/text-color |
+| Font size / color per run | ✅ | I1 + I3 scenarios | 🟠 letters/font-sizes (accepted metric artifact), letters/text-color |
 | Superscript / subscript | ✅ | I1 + I3 (incl. LO w:position encoding) | ✅ letters/super-subscript |
 | Headers & footers with fields ({page}) | ✅ | I2 round-trip (Document.header/footer) | ✅ letters/header-footer, letters/page-numbers |
 | Page setup | ✅ | breaks I2 round-trip; size/margins I2 docx_page_geometry_round_trips (letters-core/tests/docx.rs) and odt page_geometry_survives (PageGeometry in docx sectPr + odt page-layout) + I4 page_geometry_survives_lo_conversion (letters-core/tests/soffice_oracle.rs) | ✅ letters/page-break, letters/page-margins, letters/landscape |

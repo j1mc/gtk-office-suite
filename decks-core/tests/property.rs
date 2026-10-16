@@ -46,7 +46,7 @@ fn deck_strategy() -> impl Strategy<Value = Vec<Vec<String>>> {
 fn build_deck(slides: &[Vec<String>]) -> Deck {
     let slides = slides
         .iter()
-        .map(|texts| Slide {
+        .map(|texts| Slide { hidden: false,
             title: "Slide".into(),
             background: "#ffffff".into(),
             background_picture: None,

@@ -204,6 +204,13 @@ images show our rendering matches LibreOffice's and the metric is what
 disagrees. Recorded here with the measurement, so nobody "fixes" them by
 loosening a budget:
 
+- **`letters/font-sizes`** (2026-10-16, #1606). Pixel comparison
+  (`pixel_diff.py`): within each line our ink matches LibreOffice's to the
+  pixel (band miss 0.000), and the page as a whole to 0.041 (the 40pt line
+  sits 2px high; the 8–28pt lines 0–1px). Tesseract reads the 8pt label
+  as "spt text" in LibreOffice's render and "bpetext" in ours, and "40pt"
+  as "aopt" against "a4opt", so 4 of 5 words match and the mismatched
+  word's displacement is 13.9pt. SSIM is 0.997.
 - **`letters/table`** (2026-09-25, re-measured 2026-09-26). Cell text sits
   within 0.2 pt of LibreOffice's; Tesseract misreads one cell label in ours
   ("R1C1" as "rici", unhinted glyphs at 12 px) and so 8 of 9 cell words
@@ -317,6 +324,34 @@ line. CI uploads it as an artifact and links it from the PR comment
 (`tests/gui/pr_comment.py`). A reviewer can see in ten seconds whether a
 PR made rendering better or worse.
 
+### Pixel scoreboard: fix from the worst
+
+The verdicts above lean on OCR, which misreads small or unhinted text on
+either side (see "Known metric artifacts"). The pixel scoreboard
+(`tools/render-lab/pixel_diff.py`) does not read anything: it compares each
+page with LibreOffice's pixel by pixel and ranks every document, worst
+first.
+
+- **Pixel miss**: ink in one render with no ink within 1 px in the other,
+  over all ink, per page, averaged over the document's pages. A page
+  either side has and the other lacks counts 1.0. 0.000 is LibreOffice's
+  pages to the pixel.
+- **Within lines**: the same with each line band free to slide 40 px, so
+  one early vertical miss does not hide everything after it. A document
+  high on pixel miss but low here is drifting (spacing, line heights,
+  borders); one high on both differs inside its lines (fonts, wrapping,
+  indents, tables).
+- Each page gets `pixel-N.png` beside its captures: red where only
+  LibreOffice has ink, blue where only we do.
+
+Every render run computes it from the captures it already has (`run.sh`
+and the fixture compare step; no extra jobs). On main, `pixel_board.py`
+keeps one pinned `pixel-scoreboard` issue per board (fixtures, and each
+app's real documents) with the full ranking; a pull request's render
+comment and job summary show the same table with each score's change
+against main. The loop: take the top row, open its overlays, find the
+cause, fix it with a reduced fixture and a test, watch it drop.
+
 ## The gate: everything is verified in CI
 
 The render lab is built so that agents (the hive) and humans can drive
@@ -329,7 +364,7 @@ development from CI output alone, without anyone looking at screenshots.
 | Job summary + sticky PR comment | every PR | what this PR made better or worse, with a link to the side-by-side report |
 | **Ratchet** (`compare.py --baseline tools/render-lab/baseline.json`) | every PR, gating | fails if any fixture's verdict gets worse (**regressed**), or gets better or is new without the baseline being updated in the same PR (**stale**). Every gain is locked in by the PR that made it. |
 | **One issue per non-green fixture** (`sync_issues.py`) | every push to main and nightly | labels `render-parity`, `app:<app>`, and `blocked` when the fixture needs a Phase 1 architecture item. The acceptance criterion is "CI reports this fixture green". Deduplicated by a hidden marker; closes itself when the fixture turns green on main. |
-| Real-document ratchet (`render-real.yml`, `baseline-real.json`) | nightly, manual dispatch, PRs touching the corpus | the same verdicts over about 30 published documents per app; on main one `render-real` issue per document that is not green, closing when it turns green. Each cause is reduced to a single-feature fixture to fix it. |
+| Real-document ratchet (`render-real.yml`, `baseline-real.json`) | nightly, manual dispatch, every PR (an app the change cannot reach passes without rendering) | the same verdicts over about 30 published documents per app; on main one `render-real` issue per document that is not green, closing when it turns green. Each cause is reduced to a single-feature fixture to fix it. |
 | Tier C VM report | nightly + manual dispatch | shipped Flatpak on a real GNOME Wayland session. Non-gating until it has run green for a week. |
 
 The baseline stores verdicts only (green/amber/red/missing), not raw
@@ -529,6 +564,7 @@ Tier A and B, and the tiers agree on every fixture. The other three are
 amber in both tiers and accepted as metric artifacts, each recorded under
 "Known metric artifacts" with its measurement:
 
+- `letters/font-sizes`: OCR misreads the 8pt and 40pt labels differently on each side; the pixels match within 1px.
 - `letters/table`: OCR misreads one 12 px cell label.
 - `tables/number-formats`: "###" is a non-word to OCR.
 - `tables/wrap-text`: SSIM on a one-word line-break difference against the

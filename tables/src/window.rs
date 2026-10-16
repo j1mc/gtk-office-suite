@@ -261,6 +261,7 @@ impl TablesWindow {
         name_box.set_text("A1");
         name_box.set_tooltip_text(Some(&suite_common::i18n("Cell Reference or Name")));
         name_box.update_property(&[gtk4::accessible::Property::Label("Cell reference")]);
+        let name_box_view = crate::name_box::NameBox::new(&name_box);
 
         let fx_label = gtk4::Label::new(Some(" fx"));
         fx_label.add_css_class("dim-label");
@@ -302,7 +303,7 @@ impl TablesWindow {
         let inspector_sync: crate::format_inspector::SyncSlot = Rc::default();
         let refresh_sel: Rc<dyn Fn()> = {
             let s = state.clone();
-            let nb = name_box.clone();
+            let nb = name_box_view.clone();
             let stats = stats_label.clone();
             let (ga, h, v) = (grid_area.clone(), h_adj.clone(), v_adj.clone());
             let isync = inspector_sync.clone();
@@ -312,7 +313,7 @@ impl TablesWindow {
                     let sh = st.sheet();
                     ga.sync_cells(&sh.data, &sh.formats, &sh.notes, sh.selection_rect());
                     crate::grid_render::follow_selection(&ga, &sh, &h, &v);
-                    nb.set_text(&format!("{}{}", tables_core::sheet::col_label(sh.selected_col), sh.selected_row + 1));
+                    nb.show(&format!("{}{}", tables_core::sheet::col_label(sh.selected_col), sh.selected_row + 1));
                     stats.set_text(&sh.selection_status());
                 }
                 if let Some(sync) = isync.borrow().as_ref() {
@@ -1634,6 +1635,9 @@ impl TablesWindow {
                                 // collapsing to a single "Sheet1".
                                 match load_workbook(&path_str) {
                                     Ok((engine, sheets)) => {
+                                        // The sheet the file was left on,
+                                        // never a hidden one (`opening_sheet`).
+                                        let opening = tables_core::io::opening_sheet(&path_str);
                                         let names = sheets
                                             .iter()
                                             .map(|sheet| sheet.name.clone())
@@ -1651,11 +1655,12 @@ impl TablesWindow {
                                                 .collect();
                                             attach_xlsx_sidecars(&path_str, &ss.sheets);
                                             ss.active_sheet = 0;
+                                            let _ = ss.switch_sheet(opening.min(names.len().saturating_sub(1)));
                                         }
                                         // Update sheet switcher
                                         sm.splice(0, sm.n_items(), &[]);
                                         for name in &names { sm.append(name); }
-                                        sd.set_selected(0);
+                                        sd.set_selected(opening.min(names.len().saturating_sub(1)) as u32);
                                         fx.set_text("");
                                         st.set_visible_child_name("editor");
                                         let name = std::path::Path::new(&path_str)
@@ -2128,6 +2133,14 @@ impl TablesWindow {
         // Format dispatch lives in tables_core::io::load_workbook so every
         // open route (CLI, dialog, drag-and-drop) supports the same formats.
         let (engine, sheets) = load_workbook(path)?;
+        // The sheet the file was left on, never a hidden one; for the
+        // render lab's dump, the first sheet Calc prints.
+        let opening = if suite_common::render_dump::active() {
+            tables_core::io::first_printed_sheet(path)
+        } else {
+            tables_core::io::opening_sheet(path)
+        }
+        .min(sheets.len().saturating_sub(1));
         let names = sheets
             .iter()
             .map(|sheet| sheet.name.clone())
@@ -2141,12 +2154,13 @@ impl TablesWindow {
                 .collect();
             attach_xlsx_sidecars(path, &state.sheets);
             state.active_sheet = 0;
+            let _ = state.switch_sheet(opening);
         }
         self.sheet_model.splice(0, self.sheet_model.n_items(), &[]);
         for name in names {
             self.sheet_model.append(&name);
         }
-        self.sheet_switcher.set_selected(0);
+        self.sheet_switcher.set_selected(opening as u32);
         self.fx_entry.set_text("");
         self.stack.set_visible_child_name("editor");
         let name = std::path::Path::new(path)

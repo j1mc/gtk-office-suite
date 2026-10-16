@@ -23,6 +23,11 @@ on:
       - 'suite-common/src/lib.rs'
   push:
     tags: ['v*']
+  # Nightly on main as well: a pull request runs the builds below only when
+  # it changes a release input, so this is where a Rust change that breaks
+  # a reproducible or offline build shows up, within a day.
+  schedule:
+    - cron: '20 2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -35,10 +40,43 @@ concurrency:
 jobs:
   contract:
     runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.scope.outputs.release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+      # The module-ceiling files trigger this workflow so that this job's
+      # contract counts their lines, but they are not release inputs: a pull
+      # request that changes only them gets this job and none of the builds
+      # below (two clean release builds, the source archive, two offline
+      # Flatpaks, the aarch64 tests). RELEASE_INPUTS is the trigger's
+      # `paths:` without the ceiling files; tests/test_release_gate.py
+      # holds the two lists to that. Not a pull request: everything runs.
+      - name: Does the change reach a release input?
+        id: scope
+        env:
+          RELEASE_INPUTS: >-
+            flatpak flathub po scripts/release_gate.py tools/release docs/RELEASE.md
+            Cargo.lock .github/workflows/release-gate.yml
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rev-parse --verify -q HEAD^2 >/dev/null || {
+            echo "::error::expected the pull request's merge commit at HEAD; cannot tell what it changes"
+            exit 1
+          }
+          # shellcheck disable=SC2086 # one pathspec per word
+          changed=$(git diff --no-renames --name-only HEAD^1 HEAD -- $RELEASE_INPUTS)
+          if [ -n "$changed" ]; then
+            printf 'Release inputs changed:\n%s\n' "$changed"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Only module-ceiling files changed: the release contract ran, the release builds did not." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Set reproducibility timestamp
         run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct \"$GITHUB_SHA\")" >> "$GITHUB_ENV"
       - name: Install release validators
@@ -81,6 +119,10 @@ jobs:
   # directories gave the same sha256.
   reproducible-build:
     name: Reproducible build (${{ matrix.run }})
+    needs: contract
+    # Release inputs only (the contract job's scope step); still runs when
+    # the contract itself fails, so one finding does not hide the other.
+    if: ${{ !cancelled() && needs.contract.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -141,6 +183,8 @@ jobs:
   # (tools/release/source_archive.sh): the tracked files and every crate
   # Cargo.lock names, vendored. Reproducible, so its sha256 names it.
   source-archive:
+    needs: contract
+    if: ${{ !cancelled() && needs.contract.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -197,6 +241,8 @@ jobs:
   # The core crates' tests on aarch64 itself, not just a build for it: the
   # readers, writers and layout run where the published aarch64 bundle runs.
   aarch64-tests:
+    needs: contract
+    if: ${{ !cancelled() && needs.contract.outputs.release == 'true' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

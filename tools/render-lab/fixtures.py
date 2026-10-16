@@ -125,16 +125,6 @@ EXPORT = {
 # shaping). There is no geometry miss to fix, so no thresholds are tuned and
 # no geometry is churned to chase the OCR: the ambers stand as documented.
 
-# NOTE (letters/exact-line-spacing, documented amber): line pitch is
-# identical (28pt exact/minimum boxes in both renderers, 1.5-spacing
-# pixel-identical), but the trailing gap after a fixed-height paragraph
-# differs by a few px after exact and ~18px after minimum: Writer packs
-# the next paragraph tighter there while keeping the same pitch, an
-# inconsistency inside Writer itself (13pt after exact vs 0 after
-# minimum against identical 10pt style spacing). Our model follows
-# Word's rule (fixed box, normal spacing after). Words all present,
-# page counts agree; the amber records the trailing-gap miss.
-
 
 def add(app, feature, path, expect):
     entry = {
@@ -527,6 +517,33 @@ def letters(img):
         x.add_paragraph(LOREM * 2)
     save(x, "columns", "Text in two columns half an inch apart, filling the left column before the right")
 
+    # LET-005S: a document of two sections. A portrait part with its own
+    # header, then a next-page section break into a landscape part with
+    # narrower margins, two columns and a header of its own (unlinked from
+    # the first, as Word's "Link to Previous" off writes it).
+    from docx.enum.section import WD_SECTION
+    x = doc()
+    first = x.sections[0]
+    first.header.paragraphs[0].text = "PORTRAIT PART"
+    for i in range(3):
+        x.add_paragraph(f"Portrait paragraph {i + 1}. " + LOREM)
+    second = x.add_section(WD_SECTION.NEW_PAGE)
+    second.orientation = WD_ORIENT.LANDSCAPE
+    second.page_width, second.page_height = first.page_height, first.page_width
+    second.left_margin = second.right_margin = Inches(0.75)
+    second.top_margin = second.bottom_margin = Inches(0.75)
+    second.header.is_linked_to_previous = False
+    second.header.paragraphs[0].text = "LANDSCAPE APPENDIX"
+    cols = second._sectPr.find(qn("w:cols"))
+    if cols is None:
+        cols = OxmlElement("w:cols")
+        second._sectPr.append(cols)
+    cols.set(qn("w:num"), "2")
+    cols.set(qn("w:space"), "480")
+    for i in range(6):
+        x.add_paragraph(f"Landscape paragraph {i + 1}. " + LOREM * 2)
+    save(x, "mixed-sections", "Page 1 portrait under 'PORTRAIT PART'; page 2 landscape with 0.75in margins, two columns and 'LANDSCAPE APPENDIX' above them")
+
     x = doc()
     x.add_paragraph("Page one.")
     x.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
@@ -875,6 +892,7 @@ def decks(img):
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.oxml.ns import qn
     from pptx.util import Inches, Pt
 
     d = os.path.join(OUT, "decks")
@@ -927,7 +945,6 @@ def decks(img):
     # What PowerPoint records after shrinking an overflowing body: 62.5%
     # text, 20% less line spacing. Stated, not computed by the renderer.
     from lxml import etree
-    from pptx.oxml.ns import qn
     fit = etree.SubElement(body._bodyPr, qn("a:normAutofit"))
     fit.set("fontScale", "62500")
     fit.set("lnSpcReduction", "20000")
@@ -952,6 +969,22 @@ def decks(img):
         sh.fill.solid()
         sh.fill.fore_color.rgb = RGBColor(*color)
     save(p, "shapes", "Red rectangle, green ellipse, blue rounded rectangle in a row")
+
+    # The presets drawn with BetterOffice's DrawingML outlines
+    # (decks-core shape.rs, borrowed_outline): stars, polygons, arrows,
+    # a donut's hole, a cube's faces, callouts. Without them each was its box.
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    presets = ["star4", "star6", "star8", "star10", "star12",
+               "heptagon", "decagon", "dodecagon", "leftRightArrow", "bentArrow",
+               "corner", "foldedCorner", "noSmoking", "donut", "cube",
+               "flowChartTerminator", "wedgeRoundRectCallout", "wedgeEllipseCallout", "cloudCallout", "mathMultiply"]
+    for i, prst in enumerate(presets):
+        sh = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.4 + (i % 5) * 2.6), Inches(0.4 + (i // 5) * 1.8), Inches(2.0), Inches(1.2))
+        sh._element.spPr.find(qn("a:prstGeom")).set("prst", prst)
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = RGBColor(40, 80, 220)
+    save(p, "preset-shapes", "Twenty preset shapes in four rows: stars, polygons, arrows, a donut, a cube, callouts; none a plain box")
 
     p = deck()
     s = p.slides.add_slide(p.slide_layouts[6])
@@ -1035,6 +1068,58 @@ def decks(img):
         run.font.size, run.font.name = Pt(36), "Arial"
     save(p, "pay-centre-reduced-line-breaks",
          "One 36pt paragraph on three lines, broken after '–' and after 'and'; no words run together")
+
+    # DCK-004, reduced from the same deck's figure tiles (#1397): a white
+    # separator rule between each tile's two figures is a connector
+    # (p:cxnSp, the `line` preset). The reader skipped connectors, so the
+    # rules were not drawn. A diagonal one checks it is drawn corner to
+    # corner, not as its box.
+    from pptx.enum.shapes import MSO_CONNECTOR
+
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    for i in range(3):
+        left = Inches(0.8 + 4 * i)
+        box = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, Inches(1.5), Inches(3.4), Inches(2.4))
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(23, 42, 69)
+        box.line.fill.background()
+        rule = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, left + Inches(0.4), Inches(2.7), left + Inches(3.0), Inches(2.7))
+        rule.line.color.rgb = RGBColor(255, 255, 255)
+        rule.line.width = Pt(1.5)
+    slash = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(1), Inches(4.6), Inches(12), Inches(6.6))
+    slash.line.color.rgb = RGBColor(200, 30, 30)
+    slash.line.width = Pt(3)
+    save(p, "pay-centre-reduced-connector-rules",
+         "Three navy tiles, each split by a white 1.5pt rule across its middle; one red 3pt diagonal below them")
+    # DCK-004, reduced from the same deck's figure tiles (#1397): each tile
+    # is a top-anchored box that opens with two empty 14pt paragraphs and
+    # then the figure. Dropping the leading paragraphs drew the figure at
+    # the top of the tile instead of two lines down.
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+
+    p = deck()
+    s = p.slides.add_slide(p.slide_layouts[6])
+    for i, figure in enumerate(("6,046", "1,288", "312")):
+        box = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8 + 4 * i), Inches(1.5), Inches(3.4), Inches(2.4))
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(23, 42, 69)
+        box.line.fill.background()
+        tf = box.text_frame
+        tf.vertical_anchor = MSO_ANCHOR.TOP
+        tf.word_wrap = True
+        for k in range(3):
+            para = tf.paragraphs[0] if k == 0 else tf.add_paragraph()
+            para.alignment = PP_ALIGN.CENTER
+            if k < 2:
+                para._p.get_or_add_endParaRPr().set("sz", "1400")
+                continue
+            run = para.add_run()
+            run.text = figure
+            run.font.size, run.font.bold, run.font.name = Pt(14), True, "Arial"
+            run.font.color.rgb = RGBColor(255, 255, 255)
+    save(p, "pay-centre-reduced-leading-blank-paragraphs",
+         "Three navy tiles, each with a bold white 14pt figure two blank lines below the tile's top edge")
 
     # DCK-004, reduced from the 2024-2025 delegated authorities report: its
     # theme was saved on a machine in a dark mode, so lt1 is the system

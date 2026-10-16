@@ -25,6 +25,11 @@ ignore = [
     # once citationberg moves off 0.38; see the note in suite-export/Cargo.toml.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38.4 via citationberg 0.7.0 (typst bibliography); no patched 0.38.x; our generated Typst never parses CSL (#225); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38.4 via citationberg 0.7.0 (typst bibliography); no patched 0.38.x; our generated Typst never parses CSL (#225); review by 2027-01-01" },
+    # unsafe-libyaml: typst -> hayagriva 0.10.1 (the latest) -> serde_yaml,
+    # which is deprecated and has no maintained release. It parses CSL/YAML
+    # bibliographies, and our generated Typst never loads one (as for the
+    # quick-xml entries above, #225).
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained via serde_yaml/hayagriva 0.10.1 (typst bibliography); no maintained release; our generated Typst never parses YAML bibliographies (#225); review by 2027-01-01" },
     # syntect (syntax highlighting) pulls both; not in the untrusted-input path.
     { id = "RUSTSEC-2025-0141", reason = "bincode development ceased, no patched release; via syntect — build/display only (#1197); review by 2027-01-01" },
     { id = "RUSTSEC-2024-0320", reason = "yaml-rust unmaintained, no patched release; via syntect — display only (#1197); review by 2027-01-01" },
@@ -42,4 +47,9 @@ ignore = [
     { id = "RUSTSEC-2026-0255", reason = "sized-chunks panic-safety (unsound); via im/loro, collab feature only, not shipped — resolve before collab ships (#1043); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained; via im/loro, collab feature only, not shipped (#1043); review by 2027-01-01" },
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill unmaintained; reached only with the collab feature's dependencies enabled (--all-features), not in shipped builds (#1043); review by 2027-01-01" },
+    # zip: upstream yanked every 8.x from 8.5.0 on after 9.0 shipped, and
+    # calamine 0.36.1 and rust_xlsxwriter 0.99.1 (both latest) still require
+    # ^8.5, so Cargo.lock cannot leave 8.6.0. No advisory names it; remove
+    # once those crates move to zip 9 (renovate #1537).
+    { crate = "zip@8.6.0", reason = "yanked with no non-yanked 8.x left; calamine/rust_xlsxwriter latest still need ^8.5 — move to zip 9 with #1537; review by 2027-01-01" },
 ]

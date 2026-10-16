@@ -88,8 +88,15 @@ fn element(e: &BytesStart) -> Node {
     }
 }
 
-/// The element tree of `xml`. Text is kept only inside `a:t`, untrimmed:
-/// a run ending in a space is a word boundary.
+/// The elements whose text the tree keeps: a run's text, and the GUID of
+/// the style a table names.
+fn keeps_text(name: &str) -> bool {
+    matches!(name, "a:t" | "a:tableStyleId")
+}
+
+/// The element tree of `xml`. Text is kept only inside `a:t` (and a
+/// table's `a:tableStyleId`), untrimmed: a run ending in a space is a word
+/// boundary.
 pub(super) fn parse_tree(xml: &str) -> Node {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -105,12 +112,12 @@ pub(super) fn parse_tree(xml: &str) -> Node {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if let Some(top) = stack.last_mut().filter(|n| n.name == "a:t") {
+                if let Some(top) = stack.last_mut().filter(|n| keeps_text(&n.name)) {
                     top.text.push_str(&super::parse::unescape_text(t));
                 }
             }
             Ok(Event::GeneralRef(ref r)) => {
-                if let Some(top) = stack.last_mut().filter(|n| n.name == "a:t") {
+                if let Some(top) = stack.last_mut().filter(|n| keeps_text(&n.name)) {
                     top.text.push_str(&super::parse::resolve_general_ref(r));
                 }
             }
@@ -669,6 +676,8 @@ pub(crate) fn frame_tables(xml: &str, theme: &Theme) -> Vec<FrameTable> {
             let tbl = frame.find("a:tbl")?;
             let tbl_pr = tbl.child("a:tblPr");
             let flag = |k: &str| matches!(tbl_pr.and_then(|p| p.attr(k)), Some("1") | Some("true"));
+            let style_id = tbl_pr.and_then(|p| p.child("a:tableStyleId")).map(|n| n.text.trim().to_string());
+            let style = style_id.as_deref().and_then(super::table::builtin_style);
             let col_widths = tbl
                 .child("a:tblGrid")
                 .map(|g| g.children_named("a:gridCol").filter_map(|c| c.attr("w")?.parse().ok()).collect())
@@ -708,8 +717,11 @@ pub(crate) fn frame_tables(xml: &str, theme: &Theme) -> Vec<FrameTable> {
                     rows,
                     first_row: flag("firstRow"),
                     band_row: flag("bandRow"),
-                    accent: theme.slot("accent1"),
+                    // The style's own colour: an accent, or the dark text
+                    // colour for a family's plain style.
+                    accent: theme.slot(style.map_or("accent1", |(_, slot)| slot)),
                     cell_margins: None,
+                    style_id: style_id.filter(|_| style.is_some()),
                 },
             })
         })
@@ -765,6 +777,17 @@ pub(crate) fn frame_charts(xml: &str) -> Vec<FrameChart> {
 /// The painting of every `p:sp` in a slide, layout or master part, in
 /// document order. `scale` converts EMU to model units (for line widths).
 pub(crate) fn sp_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
+    styles_of(xml, "p:sp", theme, scale)
+}
+
+/// The painting of every connector (`p:cxnSp`) in a part, in document
+/// order: its outline from `a:ln` over the theme's `a:lnRef`, as a shape's.
+/// Counted apart from the `p:sp`s so their order is untouched.
+pub(crate) fn cxn_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
+    styles_of(xml, "p:cxnSp", theme, scale)
+}
+
+fn styles_of(xml: &str, tag: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
     let root = parse_tree(xml);
     // Every p:sp in document order, as `find_all` finds them, each with the
     // fill of the group it is in: a shape filled `a:grpFill` takes it.
@@ -776,7 +799,7 @@ pub(crate) fn sp_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
             None => {
                 stack.pop();
             }
-            Some(c) if c.name == "p:sp" => out.push(resolve_sp(c, theme, scale, group_fill.as_ref())),
+            Some(c) if c.name == tag => out.push(resolve_sp(c, theme, scale, group_fill.as_ref())),
             Some(c) => {
                 // A group's own fill, or the one around it, for its shapes.
                 let fill = if c.name == "p:grpSp" {
@@ -791,9 +814,90 @@ pub(crate) fn sp_styles(xml: &str, theme: &Theme, scale: f64) -> Vec<SpStyle> {
     out
 }
 
+/// Each p:sp's custom geometry (`a:custGeom`), in document order like
+/// `sp_styles`: its paths, or `None` for a preset or a geometry we cannot
+/// draw.
+pub(crate) fn sp_geometries(xml: &str) -> Vec<Option<Vec<super::freeform::FreePath>>> {
+    let root = parse_tree(xml);
+    let mut sps = Vec::new();
+    root.find_all("p:sp", &mut sps);
+    sps.into_iter().map(|sp| sp.child("p:spPr").and_then(|p| p.child("a:custGeom")).and_then(cust_geom)).collect()
+}
+
+/// The paths of one `a:custGeom`: each `a:path` in `a:pathLst`. A
+/// coordinate given by a guide's name rather than a number makes the
+/// geometry one we cannot draw, and `None`; so does one with no path. A
+/// path of no size (`w`, `h` 0 or absent) is in the shape's own EMU, which
+/// the caller knows: it is left 0.
+pub(super) fn cust_geom(geom: &Node) -> Option<Vec<super::freeform::FreePath>> {
+    use super::freeform::{FreePath, PathCmd};
+    let num = |n: &Node, k: &str| n.attr(k).and_then(|v| v.parse::<f64>().ok());
+    let mut paths = Vec::new();
+    for path in geom.child("a:pathLst")?.children_named("a:path") {
+        let mut cmds = Vec::new();
+        for c in &path.children {
+            let pts: Option<Vec<(f64, f64)>> = c.children_named("a:pt").map(|p| Some((num(p, "x")?, num(p, "y")?))).collect();
+            let cmd = match (c.name.as_str(), pts?.as_slice()) {
+                ("a:moveTo", [a]) => PathCmd::Move(a.0, a.1),
+                ("a:lnTo", [a]) => PathCmd::Line(a.0, a.1),
+                ("a:cubicBezTo", [a, b, d]) => PathCmd::Cubic(a.0, a.1, b.0, b.1, d.0, d.1),
+                ("a:quadBezTo", [a, b]) => PathCmd::Quad(a.0, a.1, b.0, b.1),
+                ("a:arcTo", []) => PathCmd::Arc {
+                    wr: num(c, "wR")?,
+                    hr: num(c, "hR")?,
+                    start: num(c, "stAng")? / 60_000.0,
+                    swing: num(c, "swAng")? / 60_000.0,
+                },
+                ("a:close", []) => PathCmd::Close,
+                _ => return None,
+            };
+            cmds.push(cmd);
+        }
+        if !cmds.is_empty() {
+            paths.push(FreePath {
+                w: num(path, "w").unwrap_or(0.0),
+                h: num(path, "h").unwrap_or(0.0),
+                cmds,
+                fill: path.attr("fill") != Some("none"),
+                stroke: !matches!(path.attr("stroke"), Some("0" | "false")),
+            });
+        }
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table names its style by GUID: the reader keeps it and takes the
+    /// style's own colour (dark 1 for a plain style).
+    #[test]
+    fn a_table_keeps_its_built_in_style() {
+        let xml = r#"<p:spTree><p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData><a:tbl>
+            <a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{616DA210-FB5B-4158-B5E0-FEB733F419BA}</a:tableStyleId></a:tblPr>
+            <a:tblGrid><a:gridCol w="100"/></a:tblGrid><a:tr h="50"><a:tc><a:txBody><a:p><a:r><a:t>Year</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+            </a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree>"#;
+        let tables = frame_tables(xml, &Theme::default());
+        let t = &tables[0].table;
+        assert_eq!(t.style_id.as_deref(), Some("{616DA210-FB5B-4158-B5E0-FEB733F419BA}"));
+        assert_eq!(t.family(), super::super::table::StyleFamily::LightStyle3);
+    }
+
+    #[test]
+    fn a_custom_geometry_reads_as_its_paths_and_back() {
+        use super::super::freeform::{tests::wedge, to_cust_geom};
+        let xml = format!("<p:spTree><p:sp><p:spPr>{}</p:spPr></p:sp><p:sp><p:spPr><a:prstGeom prst=\"rect\"/></p:spPr></p:sp></p:spTree>", to_cust_geom(&wedge()));
+        assert_eq!(sp_geometries(&xml), [Some(wedge()), None]);
+    }
+
+    /// A coordinate named by a guide is not one we can place: the shape is
+    /// left to its box rather than drawn wrong.
+    #[test]
+    fn a_guide_coordinate_is_not_drawn() {
+        let xml = r#"<p:sp><p:spPr><a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="l" y="t"/></a:moveTo><a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp>"#;
+        assert_eq!(sp_geometries(xml), [None]);
+    }
 
     /// The 2007 Office theme python-pptx ships: fill style 3 is a gradient.
     const THEME_2007: &str = r#"<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="Office">

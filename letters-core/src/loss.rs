@@ -122,6 +122,85 @@ fn docx_typography(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
     }
 }
 
+const SECTION_KINDS: (&str, &str) = ("section-kinds", "Section break kinds");
+const SECTION_COLUMNS: (&str, &str) = ("section-unequal-columns", "Columns of different widths");
+const PAGE_NUMBER_RESTART: (&str, &str) = ("page-number-restart", "Page numbering restarts");
+
+/// The `<w:sectPr ...>...</w:sectPr>` regions of the document part, in
+/// order (`w:sectPrChange` holds an old value and is not one).
+fn sect_pr_regions(xml: &[u8]) -> Vec<&[u8]> {
+    const CLOSE: &[u8] = b"</w:sectPr>";
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = find(rest, b"<w:sectPr") {
+        if !matches!(rest.get(at + 9), Some(b'>' | b' ' | b'/')) {
+            rest = &rest[at + 9..];
+            continue;
+        }
+        let Some(open) = rest[at..].iter().position(|&b| b == b'>').map(|e| at + e + 1) else { break };
+        if rest[at..open].ends_with(b"/>") {
+            rest = &rest[open..];
+            continue;
+        }
+        let Some(close) = find(&rest[open..], CLOSE).map(|e| open + e) else { break };
+        out.push(&rest[open..close]);
+        rest = &rest[close + CLOSE.len()..];
+    }
+    out
+}
+
+/// The open tags of each `tag` element in `xml` (`<w:type` matches
+/// `<w:type …>`, not `<w:types`), attributes and all.
+fn element_tags<'a>(xml: &'a [u8], tag: &[u8]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = find(&xml[from..], tag).map(|a| from + a) {
+        let end = xml[at..].iter().position(|&b| b == b'>').map_or(xml.len(), |e| at + e);
+        if matches!(xml.get(at + tag.len()), Some(b' ' | b'/' | b'>')) {
+            out.push(&xml[at..end]);
+        }
+        from = end;
+    }
+    out
+}
+
+/// What a DOCX of several sections holds that the section model
+/// (`crate::sections`, LET-005S) draws otherwise: a later section that
+/// starts on the same page, in the next column or on the next odd or
+/// even page (each starts on the next page), columns of different widths
+/// (drawn equal), and page numbering a later section restarts (numbering
+/// continues).
+fn docx_sections(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
+    let regions = sect_pr_regions(xml);
+    if regions.len() < 2 {
+        return;
+    }
+    let later = &regions[1..];
+    if later.iter().flat_map(|r| element_tags(r, b"<w:type")).any(|t| attr_values(t, b"w:val=\"").first().is_some_and(|v| *v != b"nextPage")) {
+        record_why(report, SECTION_KINDS, member, "every section starts on a new page; one meant to continue on the same page, in the next column, or on an odd or even page does not");
+    }
+    if regions.iter().any(|r| !element_tags(r, b"<w:col").is_empty() || find(r, b"w:equalWidth=\"0\"").is_some() || find(r, b"w:equalWidth=\"false\"").is_some()) {
+        record_why(report, SECTION_COLUMNS, member, "a section's columns are drawn and saved equally wide");
+    }
+    if later.iter().flat_map(|r| element_tags(r, b"<w:pgNumType")).any(|t| !attr_values(t, b"w:start=\"").is_empty()) {
+        record_why(report, PAGE_NUMBER_RESTART, member, "page numbers continue through every section");
+    }
+}
+
+/// What an ODF document of several master pages holds that the section
+/// model draws otherwise: page numbering restarted where a master page
+/// starts (`style:page-number` with a number, not "auto"); numbering
+/// continues.
+fn odt_sections(xml: &[u8], member: &str, report: &mut CompatibilityReport) {
+    let restarts = para_prop_regions(xml)
+        .iter()
+        .flat_map(|r| attr_values(r, b"style:page-number=\""))
+        .any(|v| !v.is_empty() && v.iter().all(u8::is_ascii_digit));
+    if restarts && find(xml, b"style:master-page-name=\"").is_some() {
+        record_why(report, PAGE_NUMBER_RESTART, member, "page numbers continue through every section");
+    }
+}
+
 /// What an ODF style part holds that the model drops: widow/orphan
 /// counts past two (which collapse to controlled), leader styles past
 /// dotted, dashed and solid (wave draws as its character, if any), and
@@ -231,6 +310,7 @@ pub fn content_a_save_drops(path: &std::path::Path) -> CompatibilityReport {
         }
         if let Some(xml) = member_bytes(&mut zip, "word/document.xml") {
             docx_typography(&xml, "word/document.xml", &mut report);
+            docx_sections(&xml, "word/document.xml", &mut report);
         }
     } else if names.contains("META-INF/manifest.xml") {
         if let Some(n) = any("Basic/").or_else(|| any("Scripts/")) {
@@ -247,6 +327,9 @@ pub fn content_a_save_drops(path: &std::path::Path) -> CompatibilityReport {
         for member in ["content.xml", "styles.xml"] {
             if let Some(xml) = member_bytes(&mut zip, member) {
                 odt_typography(&xml, member, &mut report);
+                if member == "content.xml" {
+                    odt_sections(&xml, member, &mut report);
+                }
             }
         }
     }
@@ -393,5 +476,37 @@ mod tests {
              </style:style></office:body>",
         )]);
         assert!(ids(&content_a_save_drops(&p)).is_empty());
+    }
+
+    /// A Word file of several sections says what the section model draws
+    /// otherwise: a continuous break, unequal columns and a numbering
+    /// restart in a later section. One section, or next-page breaks with
+    /// equal columns (what Letters writes), loses nothing.
+    #[test]
+    fn unmodelled_section_kinds_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sections.docx");
+        package_with(&p, "[Content_Types].xml", &[(
+            "word/document.xml",
+            "<w:body><w:p><w:pPr><w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr></w:pPr></w:p>\
+             <w:p/><w:sectPr><w:type w:val=\"continuous\"/><w:pgNumType w:start=\"1\"/>\
+             <w:cols w:num=\"2\" w:equalWidth=\"0\"><w:col w:w=\"3000\"/><w:col w:w=\"5000\"/></w:cols></w:sectPr></w:body>",
+        )]);
+        assert_eq!(ids(&content_a_save_drops(&p)), ["section-kinds", "section-unequal-columns", "page-number-restart"]);
+
+        let quiet = dir.path().join("quiet.docx");
+        package_with(&quiet, "[Content_Types].xml", &[(
+            "word/document.xml",
+            "<w:body><w:p><w:pPr><w:sectPr><w:type w:val=\"nextPage\"/><w:cols w:num=\"2\" w:space=\"480\"/></w:sectPr></w:pPr></w:p>\
+             <w:p/><w:sectPr><w:type w:val=\"nextPage\"/><w:pgNumType w:fmt=\"decimal\"/></w:sectPr></w:body>",
+        )]);
+        assert!(ids(&content_a_save_drops(&quiet)).is_empty());
+
+        let mut doc = crate::model::Document::from_plain_text("one\ntwo");
+        let ops = crate::sections::insert_break(&doc, crate::edit::paragraph_start(&doc, 1), crate::model::PageGeometry::default()).unwrap();
+        crate::edit::apply_all(&mut doc, &ops).unwrap();
+        let ours = dir.path().join("ours.docx");
+        crate::save::write(&doc, &ours).unwrap();
+        assert!(ids(&content_a_save_drops(&ours)).is_empty(), "a file Letters wrote loses nothing");
     }
 }

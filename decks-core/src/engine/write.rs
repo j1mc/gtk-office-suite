@@ -570,18 +570,24 @@ fn write_geometry_and_paint<W: std::io::Write>(
     style: &super::shape::ShapeStyle,
 ) -> Result<(), quick_xml::Error> {
     use super::shape::ShapeKind;
-    let mut prst_geom = BytesStart::new("a:prstGeom");
-    prst_geom.push_attribute(("prst", kind.prst()));
-    writer.write_event(Event::Start(prst_geom))?;
-    writer.write_event(Event::Start(BytesStart::new("a:avLst")))?;
-    if let ShapeKind::RoundRect { radius } = kind {
-        let mut gd = BytesStart::new("a:gd");
-        gd.push_attribute(("name", "adj"));
-        gd.push_attribute(("fmla", format!("val {}", (radius * 100_000.0).round() as i64).as_str()));
-        writer.write_event(Event::Empty(gd))?;
+    if let ShapeKind::Freeform(paths) = kind {
+        // Its own paths, written as they were read.
+        let geom = super::freeform::to_cust_geom(paths);
+        writer.write_event(Event::Text(quick_xml::events::BytesText::from_escaped(geom.as_str())))?;
+    } else {
+        let mut prst_geom = BytesStart::new("a:prstGeom");
+        prst_geom.push_attribute(("prst", kind.prst()));
+        writer.write_event(Event::Start(prst_geom))?;
+        writer.write_event(Event::Start(BytesStart::new("a:avLst")))?;
+        if let ShapeKind::RoundRect { radius } = kind {
+            let mut gd = BytesStart::new("a:gd");
+            gd.push_attribute(("name", "adj"));
+            gd.push_attribute(("fmla", format!("val {}", (radius * 100_000.0).round() as i64).as_str()));
+            writer.write_event(Event::Empty(gd))?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("a:avLst")))?;
+        writer.write_event(Event::End(BytesEnd::new("a:prstGeom")))?;
     }
-    writer.write_event(Event::End(BytesEnd::new("a:avLst")))?;
-    writer.write_event(Event::End(BytesEnd::new("a:prstGeom")))?;
 
     let solid = |writer: &mut Writer<W>, color: super::shape::Color| -> Result<(), quick_xml::Error> {
         writer.write_event(Event::Start(BytesStart::new("a:solidFill")))?;
@@ -723,7 +729,8 @@ fn write_table<W: std::io::Write>(
     }
     writer.write_event(Event::Start(tbl_pr))?;
     writer.write_event(Event::Start(BytesStart::new("a:tableStyleId")))?;
-    writer.write_event(Event::Text(BytesText::new("{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}")))?;
+    let style_id = table.style_id.as_deref().unwrap_or(super::table::DEFAULT_STYLE_ID);
+    writer.write_event(Event::Text(BytesText::new(style_id)))?;
     writer.write_event(Event::End(BytesEnd::new("a:tableStyleId")))?;
     writer.write_event(Event::End(BytesEnd::new("a:tblPr")))?;
 
@@ -1558,6 +1565,11 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
             sld.push_attribute(("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main"));
             sld.push_attribute(("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships"));
             sld.push_attribute(("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main"));
+            // PowerPoint's "Hide Slide"; a shown slide writes nothing, so a
+            // deck with none hidden is written as before.
+            if slide.hidden {
+                sld.push_attribute(("show", "0"));
+            }
             writer.write_event(Event::Start(sld)).map_err(|e| e.to_string())?;
 
             // The slide's name, which is what `Slide::title` is. The master
@@ -1832,7 +1844,7 @@ mod emu_rounding_tests {
     /// One slide holding a single text box at (`at`, `at`).
     fn deck_with_box(text: &str, at: f64, w: f64, h: f64) -> Deck {
         Deck {
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,

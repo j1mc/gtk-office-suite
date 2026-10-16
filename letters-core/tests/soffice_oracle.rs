@@ -2135,8 +2135,8 @@ fn paragraph_shading_and_borders_survive_writer_both_ways() {
     let mut d = Document::from_plain_text("shaded and boxed\nordinary");
     d.paragraphs[0].style.shading = Some("D9D9D9".into());
     d.paragraphs[0].style.borders = ParaBorders {
-        top: Some(ParaBorder { style: BorderStyle::Single, color: "FF0000".into(), width_pt: 0.75 }),
-        bottom: Some(ParaBorder { style: BorderStyle::Dashed, color: "0000FF".into(), width_pt: 1.0 }),
+        top: Some(ParaBorder { style: BorderStyle::Single, color: "FF0000".into(), width_pt: 0.75, space_pt: 0.0 }),
+        bottom: Some(ParaBorder { style: BorderStyle::Dashed, color: "0000FF".into(), width_pt: 1.0, space_pt: 0.0 }),
         ..Default::default()
     };
     let close = |got: &Document, how: &str| {
@@ -2162,4 +2162,97 @@ fn paragraph_shading_and_borders_survive_writer_both_ways() {
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
     let Some(rt) = through_lo_to_docx(&d, "box") else { return };
     close(&rt, "odt → Writer → docx");
+}
+
+/// A table's cell padding survives Writer both ways: our docx converted to
+/// odt (`w:tblCellMar` to `fo:padding`), and our odt converted to docx.
+/// The questionnaire's cells are 4pt in from every edge; the expression of
+/// interest form's 0.0784in (5.65pt) all round.
+#[test]
+fn table_cell_padding_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("after the table");
+    let table = d.insert_table_at(0, 2, 2);
+    for p in d.paragraphs.iter_mut().filter(|p| p.style.table_cell.is_some()) {
+        p.runs = vec![Run::plain("cell")];
+    }
+    let want = letters_core::CellPadding { top_pt: 4.0, bottom_pt: 4.0, left_pt: 5.65, right_pt: 5.65 };
+    d.table_padding.insert(table, want);
+    let close = |got: &Document, how: &str| {
+        let pads: Vec<&letters_core::CellPadding> = got.table_padding.values().collect();
+        assert_eq!(pads.len(), 1, "{how}: {:?}", got.table_padding);
+        let p = pads[0];
+        // Writer keeps lengths in hundredths of a millimetre, Word in twips.
+        for (g, w) in [(p.top_pt, want.top_pt), (p.bottom_pt, want.bottom_pt), (p.left_pt, want.left_pt), (p.right_pt, want.right_pt)] {
+            assert!((g - w).abs() < 0.1, "{how}: {p:?} for {want:?}");
+        }
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("pad.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("pad.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+
+    let Some(rt) = through_lo_to_docx(&d, "pad") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
+/// A two-section document through Writer both ways (LET-005S): a portrait
+/// part with the document's header, then a landscape part in two columns
+/// with narrower margins and a header of its own. Each section keeps its
+/// page, columns, margins and header, starts where it did, and the pages
+/// lay out as the sections say: one portrait page, one landscape.
+#[test]
+fn multi_section_geometry_survives_writer_both_ways() {
+    use letters_core::layout::{layout, LayoutOptions, MonoShaper};
+    use letters_core::model::{DocSection, PageGeometry, ParagraphRange};
+    let Some(bin) = require_or_skip() else { return };
+    let portrait = PageGeometry::default();
+    let landscape = PageGeometry {
+        width_pt: 841.9,
+        height_pt: 595.3,
+        margin_top_pt: 54.0,
+        margin_bottom_pt: 54.0,
+        margin_left_pt: 36.0,
+        margin_right_pt: 36.0,
+        columns: 2,
+        column_gap_pt: 24.0,
+    };
+    let mut d = Document::from_plain_text("Portrait part.\nLandscape part, first column.\nMore landscape text.");
+    d.header = Some("Report".into());
+    d.sections = vec![
+        DocSection { id: 0, range: ParagraphRange::new(0, 1), geometry: portrait, header: None, footer: None },
+        DocSection { id: 1, range: ParagraphRange::new(1, 3), geometry: landscape, header: Some("Appendix".into()), footer: None },
+    ];
+    d.page = Some(portrait);
+    d.next_section_id = 2;
+    let check = |got: &Document, how: &str| {
+        assert_eq!(got.sections.len(), 2, "{how}: {:?}", got.sections);
+        let second = got.paragraphs.iter().position(|p| p.text().starts_with("Landscape part")).expect("the landscape text");
+        assert_eq!(got.sections[1].range.start, second, "{how}: the second section starts at its first paragraph");
+        assert!(got.sections[0].geometry.approx_eq(&portrait), "{how}: {:?}", got.sections[0].geometry);
+        assert!(got.sections[1].geometry.approx_eq(&landscape), "{how}: {:?}", got.sections[1].geometry);
+        assert_eq!(got.page, Some(got.sections[0].geometry), "{how}: the page is the first section's");
+        assert_eq!(got.next_section_id, 2, "{how}: a file's sections are numbered from 0");
+        let header = |k| letters_core::sections::header(got, k).0.map(str::trim).map(str::to_string);
+        assert_eq!(header(0).as_deref(), Some("Report"), "{how}");
+        assert_eq!(header(1).as_deref(), Some("Appendix"), "{how}");
+        let tree = layout(got, &LayoutOptions::default(), &mut MonoShaper);
+        let sizes: Vec<(i64, i64)> = tree.pages.iter().map(|p| (p.width_pt.round() as i64, p.height_pt.round() as i64)).collect();
+        assert_eq!(sizes, vec![(595, 842), (842, 595)], "{how}: one portrait page, one landscape");
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("sections.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("sections.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    check(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+
+    let Some(rt) = through_lo_to_docx(&d, "sections") else { return };
+    check(&rt, "odt → Writer → docx");
 }

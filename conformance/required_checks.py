@@ -14,7 +14,9 @@ modes a list does not show:
     forever* and blocks every pull request it did not run on.
   - A job skipped because a job it `needs` failed reports *skipped*, which
     branch protection counts as success. Requiring it proves nothing unless
-    the job it needs is required too.
+    the job it needs is required too — or unless it is not skipped at all:
+    an aggregator that runs after a failed need (`if: ${{ !cancelled() }}`)
+    and fails on that need's result is the verdict for it.
   - Two jobs with one check name satisfy one rule; requiring the name
     requires neither in particular.
   - `continue-on-error` marks a job advisory by design.
@@ -30,7 +32,8 @@ classification against the workflows themselves:
       filter, no `types` that omit ordinary pushes, no conditional `if:`,
       no `continue-on-error`, no reusable-workflow indirection, and every
       job it needs is required (or, for a pending job, required or
-      pending).
+      pending), unless it runs after that job fails and a step reads
+      `needs.<job>.result`.
   R3  The check names of required and pending jobs are unique among all
       pull-request jobs, and derivable (matrix values expanded).
   R4  Every lane conformance/lanes.json says runs on every revision is
@@ -198,11 +201,20 @@ def inventory(workflows: dict) -> list:
             if problem:
                 gaps.append(problem)
             needs = job.get("needs") or []
+            needs = [needs] if isinstance(needs, str) else list(needs)
+            # Needs this job cannot be skipped by and whose result it reads:
+            # it runs after they fail (always(), !cancelled()) and a step
+            # judges `needs.<job>.result`.
+            runs_after_failure = job.get("if") is not None and _if_is_unconditional(job.get("if"))
+            steps = str(job.get("steps") or [])
+            judged = [need for need in needs
+                      if runs_after_failure and f"needs.{need}.result" in steps]
             jobs.append({
                 "workflow": path,
                 "job": job_id,
                 "names": names,
-                "needs": [needs] if isinstance(needs, str) else list(needs),
+                "needs": needs,
+                "judged": judged,
                 "gaps": gaps,
             })
     return jobs
@@ -255,7 +267,7 @@ def check_policy(policy: dict, jobs: list, lanes: dict | None) -> list:
         allowed = ("required",) if decision == "required" else ("required", "pending")
         for need in job["needs"]:
             upstream = by_key.get((key[0], need), {}).get("policy")
-            if upstream not in allowed:
+            if upstream not in allowed and need not in job["judged"]:
                 errors.append(
                     f"{label}: {decision}, but it needs {need!r}, which is {upstream or 'unclassified'} "
                     "— if that job fails this one is skipped, and a skipped check counts as passing"

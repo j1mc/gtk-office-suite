@@ -351,7 +351,7 @@ mod tests {
     }
 
     fn slide(objects: Vec<SlideObject>) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: "s".into(),
             background: "#ffffff".into(),
             background_picture: None,

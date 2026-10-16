@@ -24,7 +24,7 @@ use super::model::*;
 use super::notes::{extract_notes_text, parse_run_style};
 use super::placeholders::{inherited_rect, parse_placeholders, PhKey, Placeholder};
 use super::shape::ShapeKind;
-use super::shape_xml::{frame_charts, frame_tables, sp_styles, theme as read_theme, Theme};
+use super::shape_xml::{cxn_styles, frame_charts, frame_tables, sp_geometries, sp_styles, theme as read_theme, Theme};
 use super::text_xml::{sp_texts, Inherited};
 use crate::layouts::PlaceholderKey;
 
@@ -226,8 +226,9 @@ pub fn parse_slide_size(xml: &str) -> Option<(f64, f64)> {
 /// The break is carried *inside* the runs rather than only in the derived
 /// text, because `SlideObject::TextBox` requires concatenated run text to
 /// equal `text`. A paragraph that contributed no run of its own cannot
-/// carry it, so nothing is recorded for it and a wholly empty paragraph
-/// (a blank line) is still dropped — as it was before this.
+/// carry it: a blank paragraph between runs becomes a second break on the
+/// run before, and blank paragraphs ahead of the first run lead its text
+/// (`push_run`).
 fn close_paragraphs(runs: &mut [Run], count: usize) {
     if let Some(last) = runs.last_mut() {
         for _ in 0..count {
@@ -293,10 +294,19 @@ impl PendingShape {
 
     /// Record one `a:t`'s text as a run, breaking the line first if a
     /// paragraph closed since the last one.
-    fn push_run(&mut self, text: String) {
+    fn push_run(&mut self, mut text: String) {
         let cur = self.paras_seen.saturating_sub(1);
         if self.runs.is_empty() {
+            // Blank paragraphs ahead of the first run are lines too: a
+            // top-anchored tile that opens with two empty paragraphs sets
+            // its figure two lines down (#1397), so they lead this run's
+            // text as breaks of their own, sized like it.
+            let lead = std::mem::take(&mut self.pending_breaks);
+            for k in 0..lead {
+                self.line_paras.push((cur + k).saturating_sub(lead));
+            }
             self.line_paras.push(cur);
+            text.insert_str(0, &"\n".repeat(lead));
         } else {
             // n closed paragraphs since the last run: the n-1 empty ones
             // between, then this one.
@@ -770,7 +780,12 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         let mut objects = Vec::new();
         let mut object_ids: Vec<Option<u32>> = Vec::new();
         let sp_paint = sp_styles(&slide_xml, &slide_theme, scale.x);
+        let sp_geom = sp_geometries(&slide_xml);
         let mut sp_index = 0usize;
+        // Connectors (p:cxnSp) are counted apart, so the p:sp order the
+        // text and paint passes share stays as it was.
+        let cxn_paint = cxn_styles(&slide_xml, &slide_theme, scale.x);
+        let mut cxn_index = 0usize;
         // Tables live in p:graphicFrame, which the walker used to skip.
         let mut tables = frame_tables(&slide_xml, &slide_theme);
         for t in &mut tables {
@@ -861,7 +876,9 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     g.note(e);
                                 }
                             }
-                            "p:sp" => {
+                            // A connector (p:cxnSp) is read as a shape:
+                            // its frame and preset, and no text.
+                            "p:sp" | "p:cxnSp" => {
                                 current_shape = Some(PendingShape {
                                     is_tx_box: false,
                                     has_tx_body: false,
@@ -1146,11 +1163,25 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                         if name.as_ref() == "a:rPr" {
                             in_rpr = false;
                         }
-                        if name.as_ref() == "p:sp" {
+                        if name.as_ref() == "p:cxnSp" {
+                            // A connector: a line (or bent line) between
+                            // two shapes, which the walker used to skip, so
+                            // a deck's separator rules were not drawn
+                            // (#1397). Its outline is its whole look.
+                            let paint = cxn_paint.get(cxn_index).cloned().unwrap_or_default();
+                            cxn_index += 1;
+                            if let Some(shape) = current_shape.take() {
+                                let (x, y, w, h) = in_groups(&groups, (shape.x.unwrap_or(0.0), shape.y.unwrap_or(0.0), shape.w.unwrap_or(0.0), shape.h.unwrap_or(0.0)));
+                                let (x, y, w, h) = (x * scale.x, y * scale.y, w * scale.x, h * scale.y);
+                                let kind = ShapeKind::from_prst(shape.prst.as_deref().unwrap_or("line"));
+                                objects.push(SlideObject::Shape { kind, x, y, w, h, rotation: shape.rotation.unwrap_or(0.0), style: paint.style });
+                            }
+                        } else if name.as_ref() == "p:sp" {
                             // This shape's fill and outline, resolved by the
                             // shape_xml pass over the same part (Nth p:sp).
                             let paint = sp_paint.get(sp_index).cloned().unwrap_or_default();
                             let text_style = sp_text.get(sp_index);
+                            let geometry = sp_geom.get(sp_index).cloned().flatten();
                             sp_index += 1;
                             if let Some(mut shape) = current_shape.take() {
                                 let text = text_of(&shape.runs);
@@ -1178,6 +1209,27 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                         }
                                     }
                                 }
+                                // Its kind: its own paths (a custom geometry,
+                                // a path of no size in the shape's EMU), or
+                                // its preset with the corner the paint read.
+                                let (raw_w, raw_h) = (shape.w.unwrap_or(0.0), shape.h.unwrap_or(0.0));
+                                let kind_of = |prst: Option<String>| match geometry.clone() {
+                                    Some(mut paths) => {
+                                        for p in &mut paths {
+                                            if p.w <= 0.0 || p.h <= 0.0 {
+                                                (p.w, p.h) = (raw_w.max(1.0), raw_h.max(1.0));
+                                            }
+                                        }
+                                        ShapeKind::Freeform(paths)
+                                    }
+                                    None => {
+                                        let mut kind = ShapeKind::from_prst(&prst.unwrap_or_else(|| "rect".to_string()));
+                                        if let (ShapeKind::RoundRect { radius }, Some(adj)) = (&mut kind, paint.round_adj) {
+                                            *radius = adj.clamp(0.0, 0.5);
+                                        }
+                                        kind
+                                    }
+                                };
                                 let (x, y, w, h) = in_groups(&groups, (shape.x.unwrap_or(0.0), shape.y.unwrap_or(0.0), shape.w.unwrap_or(0.0), shape.h.unwrap_or(0.0)));
                                 let (x, y, w, h) = (x * scale.x, y * scale.y, w * scale.x, h * scale.y);
                                 
@@ -1195,12 +1247,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     // white figures used to lose the tile.
                                     let painted = paint.style.fill.is_some() || paint.style.gradient.is_some() || paint.style.stroke.is_some();
                                     if painted {
-                                        let prst = shape.prst.clone().unwrap_or_else(|| "rect".to_string());
-                                        let mut kind = ShapeKind::from_prst(&prst);
-                                        if let (ShapeKind::RoundRect { radius }, Some(adj)) = (&mut kind, paint.round_adj) {
-                                            *radius = adj.clamp(0.0, 0.5);
-                                        }
-                                        body.frame = Some(super::text_body::Frame { kind, style: paint.style.clone() });
+                                        body.frame = Some(super::text_body::Frame { kind: kind_of(shape.prst.clone()), style: paint.style.clone() });
                                     }
                                     let blank = role.is_some() && !has_text;
                                     let text = if blank { String::new() } else { text };
@@ -1211,11 +1258,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     // preset and paint. It used to become a
                                     // plain Rect or a Circle of the width's
                                     // diameter, painted in the app's colours.
-                                    let prst = shape.prst.unwrap_or_else(|| "rect".to_string());
-                                    let mut kind = ShapeKind::from_prst(&prst);
-                                    if let (ShapeKind::RoundRect { radius }, Some(adj)) = (&mut kind, paint.round_adj) {
-                                        *radius = adj.clamp(0.0, 0.5);
-                                    }
+                                    let kind = kind_of(shape.prst.clone());
                                     objects.push(SlideObject::Shape { kind, x, y, w, h, rotation, style: paint.style });
                                 }
                             }
@@ -1358,6 +1401,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             builds: super::timing::read_builds(&slide_xml, |spid| object_ids.iter().position(|id| *id == Some(spid)).and_then(|i| ids.objects.get(i).copied())),
             ids,
             layout_id: None,
+            hidden: slide_is_hidden(&slide_xml),
         });
     }
 
@@ -1528,7 +1572,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     }
 
     if slides.is_empty() {
-        slides.push(Slide {
+        slides.push(Slide { hidden: false,
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -1734,7 +1778,11 @@ fn master_shapes(
     let paints = sp_styles(xml, theme, scale.x);
     let mut sp_count = 0usize;
     impl Pending {
-        fn push_run(&mut self, text: String) {
+        fn push_run(&mut self, mut text: String) {
+            // Leading blank paragraphs keep their lines, as on a slide.
+            if self.runs.is_empty() {
+                text.insert_str(0, &"\n".repeat(self.pending_breaks));
+            }
             close_paragraphs(&mut self.runs, self.pending_breaks);
             self.pending_breaks = 0;
             self.runs.push(Run { text, style: self.cur_style.clone() });
@@ -2064,6 +2112,15 @@ impl GroupFrame {
         let sy = if ch_ext.1 > 0.0 { ext.1 / ch_ext.1 } else { 1.0 };
         (off.0 + (x - ch_off.0) * sx, off.1 + (y - ch_off.1) * sy, w * sx, h * sy)
     }
+}
+
+/// Whether a slide part is hidden: `show="0"` (or `false`) on its `p:sld`,
+/// which PowerPoint writes for "Hide Slide".
+fn slide_is_hidden(slide_xml: &str) -> bool {
+    let Some(at) = slide_xml.find("<p:sld") else { return false };
+    let Some(len) = slide_xml[at..].find('>') else { return false };
+    let tag = &slide_xml[at..at + len];
+    tag.contains(" show=\"0\"") || tag.contains(" show=\"false\"")
 }
 
 /// A rectangle given in the innermost of `groups`, on the slide.
