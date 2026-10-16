@@ -28,7 +28,7 @@
     "B": "green"
   },
   "decks/real-2024-11-20-presentation-pay-centre-impact-assess": {
-    "A": "amber",
+    "A": "green",
     "B": "amber"
   },
   "decks/real-2024-11-presentation-pay-centre-innovation": {
@@ -160,7 +160,7 @@
     "B": "amber"
   },
   "letters/real-expression-of-interest-form": {
-    "A": "red",
+    "A": "amber",
     "B": "amber"
   },
   "letters/real-notes-on-the-completion-of-form-w1-excise-wareho": {
@@ -268,8 +268,8 @@
     "B": "amber"
   },
   "tables/real-dpas-return-2025-to-2026-data-template-for-refer": {
-    "A": "red",
-    "B": "red"
+    "A": "amber",
+    "B": "amber"
   },
   "tables/real-draft-schedule-4-complaint-log": {
     "A": "amber",

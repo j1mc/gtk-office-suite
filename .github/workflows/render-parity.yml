@@ -273,6 +273,9 @@ jobs:
           ANY: ${{ steps.inscope.outputs.any }}
           SKIPPED: ${{ steps.inscope.outputs.skipped }}
         run: |
+          # The compare step's container wrote render-lab-out as root; the
+          # runner's user cannot append to it until it owns it.
+          sudo chown -R "$(id -u):$(id -g)" render-lab-out 2>/dev/null || true
           if [ "$ANY" = true ] && [ -n "$SKIPPED" ] && [ -f render-lab-out/summary.md ]; then
             { echo; echo "Not rendered: $SKIPPED. Nothing this pull request changes reaches them (tools/render-lab/real_scope.py)."; } >> render-lab-out/summary.md
           fi
@@ -524,6 +527,9 @@ jobs:
           ANY: ${{ steps.inscope.outputs.any }}
           SKIPPED: ${{ steps.inscope.outputs.skipped }}
         run: |
+          # The compare step's container wrote render-lab-out as root; the
+          # runner's user cannot append to it until it owns it.
+          sudo chown -R "$(id -u):$(id -g)" render-lab-out 2>/dev/null || true
           if [ "$ANY" = true ] && [ -n "$SKIPPED" ] && [ -f render-lab-out/summary-export.md ]; then
             { echo; echo "Not exported: $SKIPPED. Nothing this pull request changes reaches them (tools/render-lab/real_scope.py)."; } >> render-lab-out/summary-export.md
           fi
