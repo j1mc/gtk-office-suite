@@ -413,6 +413,7 @@ fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
         }
     }
     let style = match val.as_deref().unwrap_or("single") {
+        "none" if space.is_some_and(|s| s > 0.0) => BorderStyle::None,
         "nil" | "none" => return None,
         "single" | "thick" => BorderStyle::Single,
         "double" => BorderStyle::Double,
@@ -464,19 +465,31 @@ fn para_borders(raw: Option<&RawPara>, styled: &rdocx_oxml::properties::CT_PPr) 
     let pick = |direct: &Option<Option<RawBorder>>, fallback: Option<ParaBorder>| {
         direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt, space_pt: b.space_pt })).unwrap_or(fallback)
     };
-    ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) }
+    padding_only_above_and_below(ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) })
+}
+
+/// An invisible edge's gap pads a paragraph above and below only: Writer
+/// sets no text in from an invisible side edge (measured: a `none` edge
+/// with `w:space="31"` on every side moves the text down 31pt, not in).
+fn padding_only_above_and_below(mut b: ParaBorders) -> ParaBorders {
+    for side in [&mut b.left, &mut b.right] {
+        if side.as_ref().is_some_and(|e| e.style == BorderStyle::None) {
+            *side = None;
+        }
+    }
+    b
 }
 
 /// A style chain's `w:pBdr` edges as modelled borders.
 fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
     let edge = |b: Option<&rdocx_oxml::borders::CT_BorderEdge>| b.and_then(styled_edge_border);
     match &styled.borders {
-        Some(b) => ParaBorders {
+        Some(b) => padding_only_above_and_below(ParaBorders {
             top: edge(b.top.as_ref()),
             left: edge(b.left.as_ref()),
             bottom: edge(b.bottom.as_ref()),
             right: edge(b.right.as_ref()),
-        },
+        }),
         None => ParaBorders::default(),
     }
 }
@@ -486,6 +499,7 @@ fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
 fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBorder> {
     use rdocx_oxml::shared::ST_Border;
     let style = match e.val {
+        ST_Border::None if e.space.is_some_and(|s| s > 0) => BorderStyle::None,
         ST_Border::None => return None,
         ST_Border::Single | ST_Border::Thick => BorderStyle::Single,
         ST_Border::Double => BorderStyle::Double,
@@ -840,7 +854,16 @@ fn para_post_pass(xml: &str, specs: &[ParaPost]) -> String {
         let self_closed = out.ends_with("/>");
         let Some(spec) = specs.get(n) else { n += 1; continue };
         n += 1;
-        if !spec.nontrivial() || self_closed {
+        if !spec.nontrivial() {
+            continue;
+        }
+        // A blank paragraph is written self-closed: open it for its
+        // borders (a blank line's padding is all it shows).
+        if self_closed {
+            if let Some(borders) = spec.borders.as_ref() {
+                out.truncate(out.len() - 2);
+                out.push_str(&format!("><w:pPr>{}</w:pPr></w:p>", pbdr_xml(borders)));
+            }
             continue;
         }
         // The paragraph's extent: to its closing tag. A `w:p` never
@@ -910,6 +933,7 @@ fn find_ppr(xml: &str) -> Option<usize> {
 fn pbdr_xml(borders: &ParaBorders) -> String {
     let edge = |name: &str, e: &ParaBorder| {
         let val = match e.style {
+            BorderStyle::None => "none",
             BorderStyle::Single => "single",
             BorderStyle::Dashed => "dashed",
             BorderStyle::Dotted => "dotted",

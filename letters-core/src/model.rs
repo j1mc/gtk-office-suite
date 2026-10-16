@@ -281,7 +281,9 @@ pub struct ParaBorder {
 impl ParaBorder {
     /// How far this side stands off the text: its gap plus its width.
     pub fn inset_pt(&self) -> f64 {
-        self.space_pt.max(0.0) + self.width_pt.max(0.0)
+        // An invisible edge has no width, whatever size it names.
+        let width = if self.style == BorderStyle::None { 0.0 } else { self.width_pt.max(0.0) };
+        self.space_pt.max(0.0) + width
     }
 }
 
@@ -290,6 +292,11 @@ impl ParaBorder {
 /// save dialog reports (`crate::loss`), never a silent restyle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BorderStyle {
+    /// No line, but the edge keeps its gap: Word's `w:val="none"` with a
+    /// `w:space`, which Writer still pads a paragraph's top and bottom
+    /// with (render-lab `real-questionnaire`: 31pt above and below the
+    /// blank line between its tables).
+    None,
     Single,
     Dashed,
     Dotted,

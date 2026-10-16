@@ -622,7 +622,8 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
         } else {
             None
         };
-        place_paragraph(&mut flow, i, para, &shaped, ordinals[i], keep_next);
+        let group = border_group(doc, i, section_end);
+        place_paragraph(&mut flow, i, para, &shaped, ordinals[i], keep_next, group);
         i += 1;
     }
     flow.finish(doc, opts, shaper)
@@ -838,7 +839,33 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
 /// Place a shaped paragraph in the flow, splitting it across columns and
 /// pages with orphan and widow control. `keep_next` is the height that must
 /// fit below the paragraph on the same page (a heading's follower).
-fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shaped, ordinal: u32, keep_next: Option<f64>) {
+/// How paragraph `i` joins the bordered group around it: whether the
+/// paragraph before it has the same borders and indents (so no top edge or
+/// top gap here), and, when the one after does, the space between them,
+/// which the group's box spans. Writer and Word draw a run of paragraphs
+/// with identical borders as one box, its gaps at its top and bottom only.
+fn border_group(doc: &Document, i: usize, section_end: usize) -> (bool, Option<f64>) {
+    let p = &doc.paragraphs[i];
+    if p.style.borders.is_empty() {
+        return (false, None);
+    }
+    let same = |o: &Paragraph| {
+        o.style.table_cell.is_none()
+            && o.style.borders == p.style.borders
+            && (o.style.left_indent_pt - p.style.left_indent_pt).abs() < 0.01
+            && (o.style.right_indent_pt - p.style.right_indent_pt).abs() < 0.01
+    };
+    let joins_prev = i > 0 && same(&doc.paragraphs[i - 1]) && !p.style.page_break_before;
+    let next_gap = doc
+        .paragraphs
+        .get(i + 1)
+        .filter(|n| i + 1 < section_end && same(n) && !n.style.page_break_before)
+        .map(|n| p.style.space_after_pt.max(0.0).max(n.style.space_before_pt.max(0.0)));
+    (joins_prev, next_gap)
+}
+
+fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shaped, ordinal: u32, keep_next: Option<f64>, group: (bool, Option<f64>)) {
+    let (joins_prev, next_gap) = group;
     let st = &para.style;
     if st.page_break_before && !flow.page_is_empty() {
         flow.new_page();
@@ -931,7 +958,7 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         let chunk_top = flow.y;
         let chunk_x = flow.column_x();
         let chunk_at = flow.page_len();
-        let (opens, closes) = (line == 0, line + fit == n);
+        let (opens, closes) = (line == 0 && !joins_prev, line + fit == n && next_gap.is_none());
         // Writer's border box: a top border stands its width and gap above
         // the first line.
         if let Some(b) = st.borders.top.as_ref().filter(|_| opens && fit > 0) {
@@ -978,11 +1005,13 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
                     x_pt: chunk_x + shaped.box_x - left,
                     y_pt: chunk_top,
                     width_pt: shaped.box_w + left + right,
-                    height_pt: flow.y - chunk_top,
+                    // A group's box runs on over the gap to its next
+                    // paragraph, so its sides do not break there.
+                    height_pt: flow.y - chunk_top + if line + fit == n { next_gap.unwrap_or(0.0) } else { 0.0 },
                     fill: st.shading.clone(),
                     borders: st.borders.clone(),
-                    top_edge: line == 0,
-                    bottom_edge: line + fit == n,
+                    top_edge: opens,
+                    bottom_edge: closes,
                 },
             );
         }

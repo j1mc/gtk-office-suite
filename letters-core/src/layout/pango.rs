@@ -991,6 +991,8 @@ impl Typeset {
             let _ = cr.save();
             cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
             match edge.style {
+                // An invisible edge only keeps its gap.
+                BorderStyle::None => {}
                 BorderStyle::Single => {
                     cr.set_line_width(lw);
                     cr.move_to(x0, y0);
