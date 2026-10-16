@@ -1907,6 +1907,19 @@ fn table_cell_fills_survive() {
     assert!(round_trip(&d).table_fills.is_empty());
 }
 
+/// A heading's run set back to regular weight stays regular through a
+/// save and reopen (`<w:b w:val="0"/>`).
+#[test]
+fn a_regular_run_in_a_heading_survives() {
+    use letters_core::RunStyle;
+    let mut d = Document::from_plain_text("Towing Operations");
+    d.paragraphs[0].style.heading = Some(3);
+    d.paragraphs[0].runs[0].style = RunStyle { regular: true, ..Default::default() };
+    let rt = round_trip(&d);
+    assert!(rt.paragraphs[0].runs[0].style.regular);
+    assert!(!rt.paragraphs[0].runs[0].style.bold);
+}
+
 /// A table's cell padding survives a save and reopen (`w:tblCellMar`); a
 /// table with Word's default has none of its own.
 #[test]
