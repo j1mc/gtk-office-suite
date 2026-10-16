@@ -859,6 +859,31 @@ fn exact_and_minimum_line_heights_size_lines() {
 }
 
 #[test]
+fn fixed_and_grown_lines_place_the_baseline_as_writer_does() {
+    let mut d = doc_of(4, "x");
+    d.paragraphs[0].style.line_height = Some(LineHeight::Exact(30.0));
+    d.paragraphs[1].style.line_height = Some(LineHeight::Minimum(30.0));
+    d.paragraphs[2].style.line_height = Some(LineHeight::Minimum(5.0));
+    let t = lay(&d);
+    let drops: Vec<f64> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Line { source: Source::Paragraph(_), top_pt, baseline_pt, .. } => Some(baseline_pt - top_pt),
+            _ => None,
+        })
+        .collect();
+    // The plain last paragraph shows the natural ascent; its line is 15pt.
+    let natural = drops[3];
+    // Exact: four fifths of the fixed height, whatever the font.
+    assert!((drops[0] - 24.0).abs() < 1e-9, "{drops:?}");
+    // atLeast grown from 15pt to 30pt: the 15pt growth goes above the text.
+    assert!((drops[1] - (natural + 15.0)).abs() < 1e-9, "{drops:?}");
+    // atLeast the natural line outgrows: unchanged.
+    assert!((drops[2] - natural).abs() < 1e-9, "{drops:?}");
+}
+
+#[test]
 fn tab_requests_carry_alignment_and_default_grid() {
     let mut d = doc_of(1, "a\tb");
     d.paragraphs[0].style.tab_stops_pt =
