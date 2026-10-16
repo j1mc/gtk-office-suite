@@ -1907,6 +1907,23 @@ fn table_cell_fills_survive() {
     assert!(round_trip(&d).table_fills.is_empty());
 }
 
+/// A cell's bare sides survive a save and reopen (`w:tcBorders` with
+/// `w:val="none"` over the table's grid).
+#[test]
+fn a_cells_bare_sides_survive() {
+    use letters_core::{CellEdges, OpenEdges};
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 2, 2);
+    let want = vec![
+        CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+        CellEdges { row: 0, col: 1, open: OpenEdges { left: true, top: true, ..Default::default() } },
+    ];
+    d.table_open_edges.insert(table, want.clone());
+    let rt = round_trip(&d);
+    assert_eq!(rt.table_open_edges.values().cloned().collect::<Vec<_>>(), [want]);
+    assert!(rt.table_unruled.is_empty(), "the rest of the grid stays ruled");
+}
+
 /// A table's cell padding survives a save and reopen (`w:tblCellMar`); a
 /// table with Word's default has none of its own.
 #[test]
