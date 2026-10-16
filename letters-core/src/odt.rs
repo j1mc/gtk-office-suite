@@ -85,6 +85,9 @@ fn run_style_props(st: &RunStyle) -> String {
     if st.italic {
         props.push_str(" fo:font-style=\"italic\"");
     }
+    if st.caps {
+        props.push_str(" fo:text-transform=\"uppercase\"");
+    }
     if st.underline {
         props.push_str(" style:text-underline-style=\"solid\"");
     }
@@ -1748,6 +1751,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             if attr_val(&e, "fo:font-style").as_deref() == Some("italic") {
                                 st.italic = true;
                             }
+                            if attr_val(&e, "fo:text-transform").as_deref() == Some("uppercase") {
+                                st.caps = true;
+                            }
                             if attr_val(&e, "style:text-underline-style")
                                 .map(|v| v != "none")
                                 .unwrap_or(false)
@@ -2537,6 +2543,7 @@ fn para_text_style(name: &str, auto: &AutoStyles, named: &AutoStyles) -> RunStyl
         if let Some(own) = auto.para_text.get(&n).or_else(|| named.para_text.get(&n)) {
             style.bold |= own.bold;
             style.italic |= own.italic;
+            style.caps |= own.caps;
             style.font_size_hp = style.font_size_hp.or(own.font_size_hp);
             style.color = style.color.clone().or_else(|| own.color.clone());
             style.font_family = style.font_family.clone().or_else(|| own.font_family.clone());
@@ -4004,6 +4011,7 @@ fn inherit(outer: Option<&RunStyle>, own: RunStyle) -> RunStyle {
         bold: own.bold || (outer.bold && !own.regular),
         regular: own.regular || (outer.regular && !own.bold),
         italic: own.italic || outer.italic,
+        caps: own.caps || outer.caps,
         underline: own.underline || outer.underline,
         strikethrough: own.strikethrough || outer.strikethrough,
         highlight: own.highlight || outer.highlight,
@@ -4158,6 +4166,16 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
         assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+    }
+
+    /// Capitals survive a save and reopen, the text in its own case.
+    #[test]
+    fn capitals_round_trip() {
+        let mut d = Document::from_plain_text("Crime supervisor standard\nplain");
+        d.paragraphs[0].runs[0].style.caps = true;
+        let rt = round_trip(&d);
+        assert_eq!((rt.paragraphs[0].text(), rt.paragraphs[0].runs[0].style.caps), ("Crime supervisor standard".to_string(), true));
+        assert!(!rt.paragraphs[1].runs[0].style.caps);
     }
 
     /// A floating picture is a frame anchored to its paragraph, placed by

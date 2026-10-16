@@ -182,6 +182,23 @@ fn a_cells_paragraphs_collapse_the_space_between_them() {
     assert_eq!(height, 4.5 + LINE + 4.5 + LINE + 4.5 + CELL_RULE_PT);
 }
 
+/// A list item in a cell has its marker, as in the body: the crime
+/// supervisor form's bullets beside its logo, numbered items counted.
+#[test]
+fn a_list_item_in_a_cell_has_its_marker() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let item = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, list: crate::model::ListKind::Numbered, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [item("one"), item("two")]);
+    let t = lay(&d);
+    let markers: Vec<(String, f64)> = t.pages[0].items.iter().filter_map(|i| match i { Item::Marker { text, x_pt, .. } => Some((text.clone(), *x_pt)), _ => None }).collect();
+    assert_eq!(markers.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), ["1.", "2."]);
+    let text_x = line_items(&t.pages[0])[0].2;
+    assert!(markers[0].1 < text_x, "the marker hangs before the text: {markers:?} {text_x}");
+}
+
 /// An unruled table's cells draw no rule, and its rows hold no rule's
 /// height: a one-line row is its line.
 #[test]

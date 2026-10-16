@@ -2349,6 +2349,29 @@ fn a_regular_run_in_a_heading_survives_writer_both_ways() {
     close(&rt, "odt → Writer → docx");
 }
 
+/// Capitals through Writer both ways, the text in its own case: the crime
+/// supervisor form's title.
+#[test]
+fn capitals_survive_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("Crime supervisor standard\nplain after");
+    d.paragraphs[0].runs[0].style.caps = true;
+    let close = |got: &Document, how: &str| {
+        let p = para_with_text(got, "Crime supervisor standard");
+        assert!(p.runs.iter().all(|r| r.style.caps), "{how}: {:?}", p.runs);
+        assert!(para_with_text(got, "plain after").runs.iter().all(|r| !r.style.caps), "{how}: only the title");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("caps.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("caps.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "caps") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// A table cell's bare sides and its place in the row through Writer,
 /// both ways: the expression-of-interest form's two-cell header band, and
 /// the vessel declaration's labels set in the middle of their rows.
