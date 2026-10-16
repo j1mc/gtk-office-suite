@@ -32,6 +32,10 @@
     "B": "green",
     "C": "green"
   },
+  "decks/pay-centre-reduced-leading-blank-paragraphs": {
+    "A": "green",
+    "B": "green"
+  },
   "decks/pay-centre-reduced-line-breaks": {
     "A": "amber",
     "B": "amber"
