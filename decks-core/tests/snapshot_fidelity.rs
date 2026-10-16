@@ -47,7 +47,7 @@ fn deck_of(slides: Vec<Slide>) -> Deck {
 
 /// A slide carrying only what the caller cares about.
 fn slide_of(objects: Vec<SlideObject>, notes: &str, background: &str) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: String::new(),
         background: background.to_string(),
         background_picture: None,
@@ -351,7 +351,7 @@ fn masters_survive_a_snapshot() {
                 },
             ],
             slides: vec![
-                Slide {
+                Slide { hidden: false,
                     title: String::new(),
                     background: String::new(),
                     background_picture: None,
@@ -368,7 +368,7 @@ fn masters_survive_a_snapshot() {
                 // testable: a reader that loses it falls back to master 0,
                 // and a deck where every slide is already on master 0
                 // cannot tell that apart from working.
-                Slide {
+                Slide { hidden: false,
                     title: String::new(),
                     background: String::new(),
                     background_picture: None,
@@ -574,7 +574,7 @@ fn the_masters_font_survives_a_snapshot() {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -640,7 +640,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
             },
         ],
         slides: vec![
-            Slide {
+            Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -652,7 +652,7 @@ fn masters_keep_their_own_font_in_pptx_but_share_one_in_odp() {
                 ids: Default::default(),
                 layout_id: None,
             },
-            Slide {
+            Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,
@@ -715,7 +715,7 @@ fn the_pptx_declares_the_theme_part_it_ships() {
             color_map: Default::default(),
             layouts: Vec::new(),
         }],
-        slides: vec![Slide {
+        slides: vec![Slide { hidden: false,
             title: String::new(),
             background: String::new(),
             background_picture: None,

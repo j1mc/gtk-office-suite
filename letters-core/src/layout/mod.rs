@@ -522,7 +522,8 @@ pub const NOTE_REF_RISE: f64 = 0.33;
 /// separator rule `NOTE_RULE_GAP_PT` above the first note (LibreOffice's
 /// footnote area: a thin line and a small gap).
 pub const NOTE_SEPARATOR_PT: f64 = 6.0;
-pub const NOTE_RULE_GAP_PT: f64 = 2.0;
+/// LibreOffice's default spacing between the rule and the notes: 0.1 cm.
+pub const NOTE_RULE_GAP_PT: f64 = 72.0 * 0.1 / 2.54;
 
 /// Length of the separator rule, relative to the text width (LibreOffice's
 /// default footnote line).
@@ -548,7 +549,12 @@ pub fn note_paragraph(doc: &Document, i: usize, opts: &LayoutOptions) -> Paragra
             space_after_pt: body.map_or(0.0, |s| s.space_after_pt),
             ..Default::default()
         },
-        runs: vec![Run::plain((i + 1).to_string()), Run { text: format!(" {text}"), style: size }],
+        // A Word note's text carries its own leading space after the
+        // reference mark; one without gets one.
+        runs: vec![
+            Run::plain((i + 1).to_string()),
+            Run { text: if text.starts_with(char::is_whitespace) { text } else { format!(" {text}") }, style: size },
+        ],
     }
 }
 
@@ -799,7 +805,8 @@ pub fn paragraph_request<'a>(p: &'a Paragraph, box_w: f64, opts: &'a LayoutOptio
         runs: &p.runs,
         heading: st.heading,
         code: st.code_block.is_some(),
-        look: paragraph_look(st),
+        // A file's own Title is drawn as its runs say, not ours.
+        look: if st.own_look { Look::Body } else { paragraph_look(st) },
         alignment: st.alignment,
         width_pt: box_w,
         // A list item's first line starts at its text indent; the marker
@@ -1676,7 +1683,20 @@ impl<'o> Flow<'o> {
                         + if ends(piece, lines) { p.style.space_after_pt.max(0.0) } else { 0.0 }
                 })
                 .sum();
-            let mut y = foot + after - total;
+            // As at a bordered paragraph's foot, the last line's
+            // proportional extra hangs below the foot: its natural foot
+            // sits on it (Writer, render-lab letters/footnotes).
+            // A note split at the page's foot hangs the same way.
+            let hang = pieces
+                .last()
+                .zip(notes.last())
+                .filter(|(_, (p, _))| p.style.line_height.is_none())
+                .and_then(|(piece, (p, lines))| {
+                    let lb = lines.get(piece.to.min(lines.len()).checked_sub(1)?)?;
+                    Some((line_height(p, lb.natural_height()) - lb.natural_height()).max(0.0))
+                })
+                .unwrap_or(0.0);
+            let mut y = foot + after + hang - total;
             page.items.push(Item::Rule { x_pt: left, y_pt: y - NOTE_RULE_GAP_PT, width_pt: width * NOTE_RULE_FRACTION });
             for (piece, (p, lines)) in pieces.iter().zip(&notes) {
                 let i = piece.note;

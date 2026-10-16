@@ -972,9 +972,18 @@ pub fn draw_shape(
     (x, y, w, h): (f64, f64, f64, f64),
     scale: f64,
 ) {
-    use decks_core::engine::shape::{is_elliptical, outline, ShapeKind};
+    use decks_core::engine::shape::{is_elliptical, is_line, outline, ShapeKind};
     cr.new_path();
     match kind {
+        // A line (a separator rule, a connector) is its outline alone,
+        // corner to corner; a horizontal one has no height at all.
+        k if is_line(k) => {
+            cr.move_to(x, y);
+            cr.line_to(x + w, y + h);
+            paint_path(cr, style, (x, y, w, h), scale, false, true);
+            cr.new_path();
+            return;
+        }
         ShapeKind::Freeform(paths) => {
             // Its filled paths filled, then its outlined paths outlined: a
             // chart's axis line is outlined and not filled.
@@ -1298,7 +1307,8 @@ pub fn render_slides_pdf(
     // Model units are 1/96in; PDF points are 1/72in.
     const MODEL_W: f64 = 960.0;
     const MODEL_H: f64 = 540.0;
-    for index in 0..slides.len() {
+    // A hidden slide is left out, as Impress and PowerPoint leave it out.
+    for index in decks_core::engine::shown_slides(slides) {
         // A slide of another aspect keeps its own page size; today every
         // slide shares the model's size, but the call is per-page anyway.
         surface.set_size(page_w, page_h).map_err(|e| e.to_string())?;
@@ -1399,7 +1409,7 @@ mod font_tests {
             rotation: 0.0,
             style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
-        let slide = Slide {
+        let slide = Slide { hidden: false,
             title: String::new(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -1474,6 +1484,21 @@ mod font_tests {
         // the PDF (pdftoppm) and looking, not here: Cairo may subset fonts.
     }
 
+    /// A hidden slide gets no page, as Impress prints none for it.
+    #[test]
+    fn the_pdf_export_leaves_out_a_hidden_slide() {
+        let mut hidden = slide(Some(7));
+        hidden.hidden = true;
+        let slides = [slide(Some(7)), hidden, slide(Some(7))];
+        let dir = std::env::temp_dir().join(format!("decks-export-pdf-hidden-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.pdf");
+        render_slides_pdf(&slides, &[master(7, "Sans")], &path).expect("export");
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        let page_objects = text.matches("/Type /Page").count() - text.matches("/Type /Pages").count();
+        assert_eq!(page_objects, 2, "the hidden slide has no page");
+    }
+
     #[test]
     fn exporting_no_slides_is_an_error_not_an_empty_pdf() {
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-empty-{}", std::process::id()));
@@ -1496,7 +1521,7 @@ mod font_tests {
     }
 
     fn slide(master_id: Option<u64>) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: "S".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -1850,5 +1875,44 @@ mod font_tests {
                 .as_deref(),
             Some("Liberation Serif")
         );
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+    use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle, Stroke};
+
+    /// #1397's tile separators are `line` presets: a line from the box's
+    /// top-left corner to its bottom-right, stroked in its outline colour,
+    /// with nothing filled. The shared outline path has no outline for a
+    /// line and fell back to the box, so a line with any height drew as a
+    /// rectangle, filled with a shape's default accent.
+    #[test]
+    fn a_line_is_stroked_corner_to_corner_and_never_filled() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 40).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.paint().unwrap();
+            let style = ShapeStyle {
+                fill: Some(Color(68, 114, 196)),
+                gradient: None,
+                stroke: Some(Stroke { color: Color(255, 255, 255), width: 2.0 }),
+                fill_src: None,
+                stroke_src: None,
+            };
+            draw_shape(&cr, &ShapeKind::Other("line".into()), &style, (10.0, 5.0, 80.0, 30.0), 1.0);
+        }
+        let mut surface = surface;
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = |x: usize, y: usize| {
+            let i = y * stride + x * 4;
+            (data[i + 2], data[i + 1], data[i])
+        };
+        assert_eq!(px(50, 20), (255, 255, 255), "the middle of the diagonal, in white");
+        assert_eq!(px(80, 5), (0, 0, 0), "no box: its top edge is not drawn");
+        assert_eq!(px(70, 30), (0, 0, 0), "nothing filled below the line");
     }
 }

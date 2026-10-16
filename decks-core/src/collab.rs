@@ -296,6 +296,7 @@ impl Replica {
         put(&meta, "master", &json(&s.master_id));
         put(&meta, "tr", &json(&s.transition));
         put(&meta, "layout", &json(&s.layout_id));
+        put(&meta, "hidden", &json(&s.hidden));
         let builds: Vec<StoredBuild> = s
             .builds
             .iter()
@@ -426,6 +427,7 @@ impl Replica {
                 builds: Vec::new(),
                 ids: Default::default(),
                 layout_id: string_at(&meta, "layout").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(None),
+                hidden: string_at(&meta, "hidden").and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(false),
             };
             s.ids.slide = id_for(node);
             let mut id_of_node: HashMap<String, u64> = HashMap::new();

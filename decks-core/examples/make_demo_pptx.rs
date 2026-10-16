@@ -4,7 +4,7 @@
 use decks_core::engine::{write_pptx, Deck, Slide, SlideObject};
 
 fn slide(title: &str, objects: Vec<SlideObject>, notes: &str) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.to_string(),
         background: "#ffffff".into(),
         background_picture: None,

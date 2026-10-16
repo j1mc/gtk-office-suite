@@ -357,7 +357,7 @@ mod tests {
             style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
         let (red, blue) = (Color(220, 0, 0), Color(0, 0, 220));
-        let slide = |objects| Slide {
+        let slide = |objects| Slide { hidden: false,
             title: String::new(),
             background: "#ffffff".into(),
             background_picture: None,

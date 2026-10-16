@@ -1293,7 +1293,9 @@ fn enhanced_geometry(kind: &crate::engine::shape::ShapeKind) -> String {
 const FREEFORM_VIEW: f64 = 21600.0;
 
 /// A slide's drawing-page style properties, or `None` when it needs no
-/// style (absent background, no transition). An explicit white background
+/// style (absent background, no transition, shown). A hidden slide needs
+/// one even with neither, because Impress's "Hide Slide" lives there
+/// (`presentation:visibility`). An explicit white background
 /// keeps its style (DCK-006): it is not the absence of one. A background
 /// picture fills the page with the fill image `styles.xml` declares for it
 /// (`background_fill_images`), stretched. ODF has no counterpart to
@@ -1308,7 +1310,8 @@ fn drawing_page_props(slide: &Slide, si: usize) -> Option<String> {
         String::new()
     };
     let trans = transition_attrs(slide.transition).unwrap_or_default();
-    (!fill.is_empty() || !trans.is_empty()).then(|| format!("{fill}{trans}"))
+    let visibility = if slide.hidden { " presentation:visibility=\"hidden\"" } else { "" };
+    (!fill.is_empty() || !trans.is_empty() || slide.hidden).then(|| format!("{fill}{trans}{visibility}"))
 }
 
 /// The fill image slide `si`'s background picture is declared as.
@@ -1360,6 +1363,26 @@ fn fill_images(
                     if let (Some(name), Some(href)) = (attr(&e, "draw:name"), attr(&e, "xlink:href")) {
                         images.insert(name, href);
                     }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+}
+
+/// The drawing-page styles in a part that hide their slide
+/// (`presentation:visibility="hidden"`, Impress's "Hide Slide").
+fn hidden_pages(xml: &str, hidden: &mut std::collections::HashSet<String>) {
+    let mut reader = Reader::from_str(xml);
+    let mut cur: Option<String> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                "style:style" => cur = attr(&e, "style:name"),
+                "style:drawing-page-properties" if attr(&e, "presentation:visibility").as_deref() == Some("hidden") => {
+                    hidden.extend(cur.clone());
                 }
                 _ => {}
             },
@@ -1691,7 +1714,7 @@ fn parse_pages(
                     page_style = attr(e, "draw:style-name");
                     page_layout = attr(e, "presentation:presentation-page-layout-name");
                     layout_of = attr(e, "decks:layout-of").zip(attr(e, "decks:layout").and_then(|j| j.parse().ok()));
-                    slide = Some(Slide {
+                    slide = Some(Slide { hidden: false,
                         title: attr(e, "draw:name")
                             .or_else(|| attr(e, "style:name").map(|n| decode_style_name(&n)))
                             .unwrap_or_default(),
@@ -2210,8 +2233,12 @@ pub fn read(path: &str) -> Result<Deck, String> {
     let (mut page_image, mut images) = (Default::default(), Default::default());
     fill_images(&content, &mut page_image, &mut images);
     fill_images(&styles, &mut page_image, &mut images);
+    // A slide's page style is an automatic style of `content.xml`.
+    let mut hidden = std::collections::HashSet::new();
+    hidden_pages(&content, &mut hidden);
     for (i, page) in slide_pages.into_iter().enumerate() {
         let mut slide = page.slide;
+        slide.hidden = page.style.as_ref().is_some_and(|n| hidden.contains(n));
         slide.background_picture = page
             .style
             .as_ref()
@@ -2251,7 +2278,7 @@ pub fn read(path: &str) -> Result<Deck, String> {
     }
 
     if deck.slides.is_empty() {
-        deck.slides.push(Slide {
+        deck.slides.push(Slide { hidden: false,
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2300,7 +2327,7 @@ mod tests {
     }
 
     fn text_slide(title: &str, text: &str, notes: &str) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: title.into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2519,7 +2546,7 @@ mod tests {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: "one".into(),
                 background: String::new(),
                 background_picture: None,
@@ -2571,7 +2598,7 @@ mod tests {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: "p".into(),
                 background: String::new(),
                 background_picture: None,
@@ -2767,7 +2794,7 @@ mod tests {
     #[test]
     fn geometry_round_trips() {
         let mut deck = Deck::new();
-        deck.slides = vec![Slide {
+        deck.slides = vec![Slide { hidden: false,
             title: "g".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2805,7 +2832,7 @@ mod tests {
     #[test]
     fn styled_runs_round_trip() {
         let mut deck = Deck::new();
-        deck.slides = vec![Slide {
+        deck.slides = vec![Slide { hidden: false,
             title: "s".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2981,7 +3008,7 @@ mod tests {
     /// One slide holding a single text box at (`at`, `at`).
     fn deck_with_box(text: &str, at: f64) -> Deck {
         Deck {
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,

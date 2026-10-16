@@ -125,7 +125,7 @@ fn opaque_dependency_survives_unrelated_edit() {
     // An unrelated edit: a new slide, touching nothing the parts refer to.
     controller.add_slide(
         1,
-        decks_core::engine::Slide {
+        decks_core::engine::Slide { hidden: false,
             title: "added".into(),
             background: "#ffffff".into(),
             background_picture: None,
