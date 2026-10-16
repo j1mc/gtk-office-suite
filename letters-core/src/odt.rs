@@ -1259,6 +1259,35 @@ fn styles_xml(doc: &Document) -> String {
     } else {
         (String::new(), String::new())
     };
+    // Each line of the document's own header and footer with a look of
+    // its own names a style of its own: its alignment, tab stops and the
+    // look of its text.
+    let line_styles = |prefix: &str, lines: &[crate::model::HfLine], styles: &mut String| -> Vec<String> {
+        if !own_shown {
+            return Vec::new();
+        }
+        lines
+            .iter()
+            .enumerate()
+            .map(|(k, line)| {
+                let name = format!("{prefix}{}", k + 1);
+                let align = match line.alignment {
+                    Alignment::Left => "",
+                    Alignment::Center => " fo:text-align=\"center\"",
+                    Alignment::Right => " fo:text-align=\"end\"",
+                    Alignment::Justify => " fo:text-align=\"justify\"",
+                };
+                let tabs = para_style_children(&ParaStyle { tab_stops_pt: line.tab_stops.clone(), ..Default::default() });
+                styles.push_str(&format!(
+                    "<style:style style:name=\"{name}\" style:family=\"paragraph\"><style:paragraph-properties{align}>{tabs}</style:paragraph-properties><style:text-properties{}/></style:style>",
+                    run_style_props(&line.look)
+                ));
+                format!(" text:style-name=\"{name}\"")
+            })
+            .collect()
+    };
+    let header_lines = line_styles("LettersHeaderLine", &doc.header_lines, &mut para_styles);
+    let footer_lines = line_styles("LettersFooterLine", &doc.footer_lines, &mut para_styles);
     hf.push_str("<office:master-styles>");
     for (k, m) in masters.iter().enumerate() {
         let header = shows(m.header, &doc.header_pictures);
@@ -1273,12 +1302,12 @@ fn styles_xml(doc: &Document) -> String {
         // apart from the first's.
         let suffix = if k == 0 { String::new() } else { format!("{k}_") };
         if header {
-            let (pics, style) = if m.header.1 { (frames(&doc.header_pictures, &format!("hfr{suffix}")), header_style.as_str()) } else { (String::new(), "") };
-            hf.push_str(&format!("<style:header>{}</style:header>", hf_paragraphs(m.header.0.unwrap_or(""), style, &pics)));
+            let (pics, style, lines) = if m.header.1 { (frames(&doc.header_pictures, &format!("hfr{suffix}")), header_style.as_str(), header_lines.as_slice()) } else { (String::new(), "", &[][..]) };
+            hf.push_str(&format!("<style:header>{}</style:header>", hf_paragraphs(m.header.0.unwrap_or(""), style, lines, &pics)));
         }
         if footer {
-            let (pics, style) = if m.footer.1 { (frames(&doc.footer_pictures, &format!("ffr{suffix}")), footer_style.as_str()) } else { (String::new(), "") };
-            hf.push_str(&format!("<style:footer>{}</style:footer>", hf_paragraphs(m.footer.0.unwrap_or(""), style, &pics)));
+            let (pics, style, lines) = if m.footer.1 { (frames(&doc.footer_pictures, &format!("ffr{suffix}")), footer_style.as_str(), footer_lines.as_slice()) } else { (String::new(), "", &[][..]) };
+            hf.push_str(&format!("<style:footer>{}</style:footer>", hf_paragraphs(m.footer.0.unwrap_or(""), style, lines, &pics)));
         }
         hf.push_str("</style:master-page>");
     }
@@ -1427,6 +1456,9 @@ struct AutoStyles {
     para_parent: std::collections::HashMap<String, String>,
     /// Automatic text style → its parent, as for paragraphs.
     text_parent: std::collections::HashMap<String, String>,
+    /// A text style's font declaration (`style:font-name`), which Writer
+    /// names a span's face by: a header's or footer's line takes it.
+    text_font_name: std::collections::HashMap<String, String>,
     /// A paragraph style's own text properties: in styles.xml, how each
     /// `Heading_20_N` looks (#1297).
     para_text: std::collections::HashMap<String, RunStyle>,
@@ -1613,7 +1645,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1780,6 +1812,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 }
                                 out.para_text.insert(name, st);
                             } else {
+                                if let Some(fname) = attr_val(&e, "style:font-name").filter(|_| !st.code) {
+                                    out.text_font_name.insert(name.clone(), fname);
+                                }
                                 out.text.insert(name, st);
                             }
                         }
@@ -1980,11 +2015,45 @@ fn continue_numbering(paragraphs: &mut [Paragraph], top_lists: &[(usize, usize, 
 /// "Standard", else the first one declared.
 /// A header's or footer's text as its paragraphs, one a line, each in
 /// `style`; the pictures' frames sit in the first.
-fn hf_paragraphs(text: &str, style: &str, pics: &str) -> String {
+fn hf_paragraphs(text: &str, style: &str, lines: &[String], pics: &str) -> String {
     text.split('\n')
         .enumerate()
-        .map(|(k, line)| format!("<text:p{style}>{}{}</text:p>", if k == 0 { pics } else { "" }, page_fields(&esc(line))))
+        .map(|(k, line)| {
+            let style = lines.get(k).map_or(style, String::as_str);
+            format!("<text:p{style}>{}{}</text:p>", if k == 0 { pics } else { "" }, page_fields(&odf_spaces(&esc(line))))
+        })
         .collect()
+}
+
+/// Text with its tabs and its runs of spaces as ODF's elements: raw, they
+/// are whitespace a reader collapses to one space.
+fn odf_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut spaces = 0;
+    // A run of spaces is one element: a space left as text beside an
+    // element (a page field) is whitespace a reader drops.
+    let flush = |out: &mut String, n: usize, at_start: bool| match n {
+        0 => {}
+        1 if !at_start => out.push(' '),
+        n => out.push_str(&format!("<text:s text:c=\"{n}\"/>")),
+    };
+    for c in text.chars() {
+        if c == ' ' {
+            spaces += 1;
+            continue;
+        }
+        let at_start = out.is_empty();
+        flush(&mut out, spaces, at_start);
+        spaces = 0;
+        if c == '\t' {
+            out.push_str("<text:tab/>");
+        } else {
+            out.push(c);
+        }
+    }
+    let at_start = out.is_empty();
+    flush(&mut out, spaces, at_start);
+    out
 }
 
 /// Text of a header or footer added to its line; a later cell of a table
@@ -2000,6 +2069,49 @@ fn append_hf(target: &mut Option<String>, txt: &str, gap: bool) {
 /// Whether a header's or footer's text so far holds nothing to show.
 fn blank(text: &Option<String>) -> bool {
     text.as_deref().is_none_or(|t| t.trim().is_empty())
+}
+
+/// The line a header's or footer's paragraph of style `style` starts: its
+/// alignment and tab stops, and the look of its text, through the styles
+/// it is based on (`named`: styles.xml's, its automatic ones among them).
+fn hf_line(style: Option<&str>, named: &AutoStyles) -> crate::model::HfLine {
+    let Some(name) = style else { return Default::default() };
+    let mut line = crate::model::HfLine { look: para_text_style(name, named, named), ..Default::default() };
+    let (mut aligned, mut tabbed) = (false, false);
+    let mut cur = Some(name.to_string());
+    for _ in 0..8 {
+        let Some(n) = cur else { break };
+        if let Some(st) = named.para.get(&n) {
+            if !aligned && st.alignment != Alignment::Left {
+                (line.alignment, aligned) = (st.alignment, true);
+            }
+            if !tabbed && !st.tab_stops_pt.is_empty() {
+                (line.tab_stops, tabbed) = (st.tab_stops_pt.clone(), true);
+            }
+        }
+        cur = named.para_parent.get(&n).cloned();
+    }
+    line
+}
+
+/// Span style `name`'s own look over a header's or footer's line's: its
+/// first text is drawn so.
+fn hf_span_look(look: &mut RunStyle, name: &str, named: &AutoStyles) {
+    if let Some(face) = named.text_font_name.get(name) {
+        look.font_family = Some(face.clone());
+    }
+    let Some(span) = named.text.get(name) else { return };
+    look.bold |= span.bold;
+    look.italic |= span.italic;
+    if span.font_size_hp.is_some() {
+        look.font_size_hp = span.font_size_hp;
+    }
+    if span.color.is_some() {
+        look.color.clone_from(&span.color);
+    }
+    if span.font_family.is_some() {
+        look.font_family.clone_from(&span.font_family);
+    }
 }
 
 /// A paragraph of a header or footer starts a line of its text: of the
@@ -2533,7 +2645,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3465,6 +3577,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         // they sit side by side; a later cell's text follows a space.
         let mut hf_row: Option<bool> = None;
         let mut hf_cell_gap = false;
+        // The spans open in the document's header or footer, and whether
+        // its line being read has taken its first text's look yet.
+        let mut hf_spans: Vec<Option<String>> = Vec::new();
+        let mut hf_styled = false;
         let para_alignment = |name: &str| -> Alignment {
             let mut cur = Some(name.to_string());
             for _ in 0..8 {
@@ -3552,6 +3668,28 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         hf_row = hf_row.map(|_| true);
                         let master = cur_master.as_ref().and_then(|n| master_pages.get_mut(n));
                         start_hf_line(master, &mut doc, in_any_header, in_header, in_footer);
+                        let line = hf_line(attr_val(&e, "text:style-name").as_deref(), &named);
+                        if in_header {
+                            doc.header_lines.push(line);
+                        } else if in_footer {
+                            doc.footer_lines.push(line);
+                        }
+                    }
+                }
+                // Spaces and tabs are elements, not text.
+                Ok(Event::Empty(e)) if (in_any_header || in_any_footer) && !in_field && matches!(e.name().as_ref(), "text:s" | "text:tab") => {
+                    let gap = if e.name().as_ref() == "text:tab" {
+                        "\t".to_string()
+                    } else {
+                        " ".repeat(attr_val(&e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1))
+                    };
+                    if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)) {
+                        let target = if in_any_header { &mut m.header } else { &mut m.footer };
+                        target.get_or_insert_with(String::new).push_str(&gap);
+                    }
+                    if in_header || in_footer {
+                        let target = if in_header { &mut doc.header } else { &mut doc.footer };
+                        target.get_or_insert_with(String::new).push_str(&gap);
                     }
                 }
                 Ok(Event::Empty(e)) if e.name().as_ref() == "style:master-page" => {
@@ -3629,9 +3767,25 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             if new_line {
                                 let master = cur_master.as_ref().and_then(|n| master_pages.get_mut(n));
                                 start_hf_line(master, &mut doc, in_any_header, in_header, in_footer);
+                                hf_styled = false;
+                            }
+                            // A line is its first text's paragraph's: a
+                            // table row's line is the cell's that holds
+                            // its text, not its first, empty cell's.
+                            if new_line || !hf_styled {
+                                let line = hf_line(attr_val(&e, "text:style-name").as_deref(), &named);
+                                let lines = if in_header { Some(&mut doc.header_lines) } else if in_footer { Some(&mut doc.footer_lines) } else { None };
+                                if let Some(lines) = lines {
+                                    if new_line {
+                                        lines.push(line);
+                                    } else if let Some(last) = lines.last_mut() {
+                                        *last = line;
+                                    }
+                                }
                             }
                         }
                     }
+                    "text:span" if (in_header || in_footer) && hf_box_depth == 0 => hf_spans.push(attr_val(&e, "text:style-name")),
                     "table:table-row" if in_any_header || in_any_footer => hf_row = Some(false),
                     "draw:text-box" if in_header || in_footer => hf_box_depth += 1,
                     "svg:title" | "svg:desc" => in_alt = true,
@@ -3640,6 +3794,13 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)) {
                             let target = if in_any_header { &mut m.header } else { &mut m.footer };
                             target.get_or_insert_with(String::new).push_str(placeholder);
+                        }
+                        if (in_header || in_footer) && hf_box_depth == 0 && !hf_styled {
+                            hf_styled = true;
+                            let lines = if in_header { &mut doc.header_lines } else { &mut doc.footer_lines };
+                            if let (Some(line), Some(span)) = (lines.last_mut(), hf_spans.iter().rev().flatten().next()) {
+                                hf_span_look(&mut line.look, span, &named);
+                            }
                         }
                         if in_header || in_footer {
                             let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
@@ -3672,6 +3833,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                     "svg:title" | "svg:desc" => in_alt = false,
                     "text:page-number" | "text:page-count" => in_field = false,
+                    "text:span" if (in_header || in_footer) && hf_box_depth == 0 => {
+                        hf_spans.pop();
+                    }
                     _ => {}
                 },
                 Ok(Event::Text(t)) if in_alt => {
@@ -3692,6 +3856,13 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                         if in_any_footer {
                             append_hf(&mut m.footer, &txt, gap);
+                        }
+                    }
+                    if (in_header || in_footer) && hf_box_depth == 0 && !hf_styled && !txt.trim().is_empty() {
+                        hf_styled = true;
+                        let lines = if in_header { &mut doc.header_lines } else { &mut doc.footer_lines };
+                        if let (Some(line), Some(span)) = (lines.last_mut(), hf_spans.iter().rev().flatten().next()) {
+                            hf_span_look(&mut line.look, span, &named);
                         }
                     }
                     let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
@@ -3954,6 +4125,25 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!((rt.header.as_deref(), rt.header_alignment), (Some("FINANCE BILL"), Alignment::Right));
         assert_eq!((rt.footer.as_deref(), rt.footer_alignment), (Some("Page {page}"), Alignment::Center));
+    }
+
+    /// Each line of a header and footer keeps its alignment, look and tab
+    /// stops through a save and reopen, and its tabs and runs of spaces
+    /// their place (raw, they are whitespace a reader collapses).
+    #[test]
+    fn header_and_footer_lines_round_trip() {
+        use crate::model::HfLine;
+        let mut d = Document::from_plain_text("body");
+        d.header = Some("The Crime Contract 2025\nName of ship:\tID:".into());
+        d.header_lines = vec![
+            HfLine { alignment: Alignment::Center, look: RunStyle { bold: true, font_size_hp: Some(32), font_family: Some("Liberation Sans".into()), ..Default::default() }, ..Default::default() },
+            HfLine { look: RunStyle { font_size_hp: Some(18), color: Some("231f20".into()), ..Default::default() }, tab_stops: vec![TabStop { pos_pt: 523.3, align: TabAlign::Right, leader: TabLeader::None }], ..Default::default() },
+        ];
+        d.footer = Some("{page}/{total}  MSF 2020".into());
+        d.footer_lines = vec![HfLine { alignment: Alignment::Center, look: RunStyle { font_size_hp: Some(18), ..Default::default() }, ..Default::default() }];
+        let rt = round_trip(&d);
+        assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
+        assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
     }
 
     /// A floating picture is a frame anchored to its paragraph, placed by

@@ -193,6 +193,19 @@ fn is_left(a: &Alignment) -> bool {
     *a == Alignment::Left
 }
 
+/// One line (paragraph) of a header's or footer's text: its alignment,
+/// the look of its text (font, size, weight, slant, colour; a line is
+/// drawn in one look), and its tab stops.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HfLine {
+    #[serde(default, skip_serializing_if = "is_left")]
+    pub alignment: Alignment,
+    #[serde(default)]
+    pub look: RunStyle,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tab_stops: Vec<TabStop>,
+}
+
 /// Where the text after a tab stop sits relative to the stop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TabAlign {
@@ -593,6 +606,17 @@ pub struct Document {
     /// How the footer's text is aligned.
     #[serde(default, skip_serializing_if = "is_left")]
     pub footer_alignment: Alignment,
+    /// Each line (paragraph) of the header's text in turn: how it is
+    /// aligned, the look of its text and its tab stops (a contract's 16pt
+    /// title centred, a ship's name with its ID at a right tab). Empty, or
+    /// short of a line: that line as `header_alignment` has it, in the
+    /// body's look.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_lines: Vec<HfLine>,
+    /// Each line of the footer's text in turn (a page number at the right
+    /// over a date at the left).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footer_lines: Vec<HfLine>,
     /// Page size and margins; None = application default (A4).
     pub page: Option<PageGeometry>,
     /// The body font the document's own styles name; runs without a font
@@ -843,6 +867,8 @@ impl Document {
             footer_pictures: Vec::new(),
             header_alignment: Alignment::Left,
             footer_alignment: Alignment::Left,
+            header_lines: Vec::new(),
+            footer_lines: Vec::new(),
             page: None,
             base_font: BaseFont::default(),
             heading_styles: Vec::new(),

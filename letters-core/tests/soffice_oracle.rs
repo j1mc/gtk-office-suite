@@ -2054,6 +2054,72 @@ fn header_and_footer_alignment_survive_writer_both_ways() {
     close(&rt, "odt → Writer → docx");
 }
 
+/// Each line of a header and footer keeps its own alignment, look and
+/// tab stops through Writer both ways: the crime contract's 16pt title
+/// centred over a ship's name with its ID at a right tab, and a footer's
+/// page number at the right over its date at the left.
+#[test]
+fn header_and_footer_lines_survive_writer_both_ways() {
+    use letters_core::{HfLine, RunStyle, TabAlign, TabStop};
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("body text");
+    let sans = |hp: u16| RunStyle { font_family: Some("Liberation Sans".into()), font_size_hp: Some(hp), ..Default::default() };
+    d.header = Some("The Crime Contract 2025\nName of ship:\tID:".into());
+    d.header_lines = vec![
+        HfLine { alignment: Alignment::Center, look: RunStyle { bold: true, ..sans(32) }, ..Default::default() },
+        HfLine { look: sans(18), tab_stops: vec![TabStop { pos_pt: 450.0, align: TabAlign::Right, leader: letters_core::TabLeader::None }], ..Default::default() },
+    ];
+    d.footer = Some("{page}\nOctober 2025".into());
+    d.footer_lines = vec![
+        HfLine { alignment: Alignment::Right, ..Default::default() },
+        HfLine { look: RunStyle { color: Some("1f4e79".into()), ..sans(22) }, ..Default::default() },
+    ];
+    let close = |got: &Document, how: &str| {
+        assert_eq!(got.header.as_deref(), d.header.as_deref(), "{how}: header text");
+        assert_eq!(got.footer.as_deref(), d.footer.as_deref(), "{how}: footer text");
+        for (name, text, want, got) in [("header", &d.header, &d.header_lines, &got.header_lines), ("footer", &d.footer, &d.footer_lines, &got.footer_lines)] {
+            assert_eq!(got.len(), want.len(), "{how}: {name} lines {got:?}");
+            let texts: Vec<&str> = text.as_deref().unwrap_or("").split('\n').collect();
+            for (k, (w, g)) in want.iter().zip(got).enumerate() {
+                assert_eq!(g.alignment, w.alignment, "{how}: {name} line {k} alignment");
+                // What the line sets comes back; Writer spells out its own
+                // defaults (12pt) for what it leaves to the body.
+                assert_eq!(g.look.bold, w.look.bold, "{how}: {name} line {k} weight");
+                if w.look.font_size_hp.is_some() {
+                    assert_eq!(g.look.font_size_hp, w.look.font_size_hp, "{how}: {name} line {k} size");
+                }
+                if w.look.color.is_some() {
+                    assert_eq!(g.look.color, w.look.color, "{how}: {name} line {k} colour");
+                }
+                if w.look.font_family.is_some() {
+                    assert_eq!(g.look.font_family, w.look.font_family, "{how}: {name} line {k} font");
+                }
+                // A line's tab goes to its stop; Writer may add its Header
+                // style's own stops, which a line without a tab has no use
+                // for, and ones past it.
+                if texts[k].contains('\t') {
+                    let stops: Vec<(i64, TabAlign)> = g.tab_stops.iter().map(|t| (t.pos_pt.round() as i64, t.align)).collect();
+                    for t in &w.tab_stops {
+                        assert!(stops.contains(&(t.pos_pt.round() as i64, t.align)), "{how}: {name} line {k} tab stops {stops:?}");
+                    }
+                    let first = g.tab_stops.iter().map(|t| t.pos_pt).fold(f64::MAX, f64::min);
+                    assert!((first - w.tab_stops[0].pos_pt).abs() < 1.0, "{how}: {name} line {k}'s tab reaches its own stop first: {stops:?}");
+                }
+            }
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("lines.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    close(&docx::read(docx_path.to_str().unwrap()).expect("read our docx"), "our docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("lines.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "lines") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// Keep-lines and widow control across the format boundary, both ways:
 /// our docx converted to odt, and our odt converted to docx.
 ///

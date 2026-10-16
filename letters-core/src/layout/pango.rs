@@ -1058,9 +1058,11 @@ impl Typeset {
                     }
                 }
                 // The line's own text from its own left edge (`x_pt`, which
-                // carries the header's alignment), laid out left.
-                Item::Line { source: Source::Header | Source::Footer, text, x_pt, box_width_pt, top_pt, .. } => {
-                    let runs = [crate::model::Run::plain(text.clone())];
+                // carries the header's alignment), laid out left, in its
+                // line's look and with its tab stops.
+                Item::Line { source: Source::Header | Source::Footer, text, x_pt, box_width_pt, top_pt, story_line, .. } => {
+                    let style = story_line.as_ref().map(|l| l.look.clone()).unwrap_or_default();
+                    let runs = [crate::model::Run { text: text.clone(), style }];
                     let req = ShapeRequest {
                         runs: &runs,
                         heading: None,
@@ -1069,7 +1071,7 @@ impl Typeset {
                         alignment: Alignment::Left,
                         width_pt: *box_width_pt,
                         first_line_indent_pt: 0.0,
-                        tab_stops: Vec::new(),
+                        tab_stops: story_line.as_ref().map(|l| l.tab_stops.clone()).unwrap_or_default(),
                         right_tab: false,
                         defaults: &self.opts,
                     };
