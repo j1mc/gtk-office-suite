@@ -2256,3 +2256,39 @@ fn multi_section_geometry_survives_writer_both_ways() {
     let Some(rt) = through_lo_to_docx(&d, "sections") else { return };
     check(&rt, "odt → Writer → docx");
 }
+
+/// A table cell's bare sides and its place in the row through Writer,
+/// both ways: the expression-of-interest form's two-cell header band, and
+/// the vessel declaration's labels set in the middle of their rows.
+#[test]
+fn table_cell_edges_and_valign_survive_writer_both_ways() {
+    use letters_core::{CellEdges, CellVAlign, OpenEdges, VAlign};
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("after the table");
+    let table = d.insert_table_at(0, 2, 2);
+    for p in d.paragraphs.iter_mut().filter(|p| p.style.table_cell.is_some()) {
+        p.runs = vec![Run::plain("cell")];
+    }
+    let edges = vec![
+        CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+        CellEdges { row: 0, col: 1, open: OpenEdges { left: true, ..Default::default() } },
+    ];
+    let valign = vec![CellVAlign { row: 1, col: 0, align: VAlign::Center }, CellVAlign { row: 1, col: 1, align: VAlign::Bottom }];
+    d.table_open_edges.insert(table, edges.clone());
+    d.table_valign.insert(table, valign.clone());
+    let close = |got: &Document, how: &str| {
+        assert_eq!(got.table_open_edges.values().collect::<Vec<_>>(), [&edges], "{how}");
+        assert_eq!(got.table_valign.values().collect::<Vec<_>>(), [&valign], "{how}");
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("cells.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("cells.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+
+    let Some(rt) = through_lo_to_docx(&d, "cells") else { return };
+    close(&rt, "odt → Writer → docx");
+}
