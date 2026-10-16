@@ -2493,8 +2493,13 @@ fn patch_styles_xml(xml: &str, defaults: &str, headings: &str) -> String {
     } else if let Some(at) = xml.find("<w:style ") {
         xml.insert_str(at, defaults);
     }
-    for n in 1..=6 {
-        let id = format!("w:styleId=\"Heading{n}\"");
+    // rdocx's template (0.15 on) defines Word's look for these. Letters
+    // writes its own headings and quote below, and leaves Title and
+    // Subtitle undefined so a Letters Title reopens with Letters' look
+    // rather than as a file's own (`own_look`, #1599).
+    let replaced = (1..=6).map(|n| format!("Heading{n}")).chain(["Title", "Subtitle", "Quote"].map(String::from));
+    for style_id in replaced {
+        let id = format!("w:styleId=\"{style_id}\"");
         while let Some(at) = xml.find(&id) {
             let Some(start) = xml[..at].rfind("<w:style ") else { break };
             let Some(len) = xml[start..].find("</w:style>") else { break };
