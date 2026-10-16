@@ -317,6 +317,34 @@ line. CI uploads it as an artifact and links it from the PR comment
 (`tests/gui/pr_comment.py`). A reviewer can see in ten seconds whether a
 PR made rendering better or worse.
 
+### Pixel scoreboard: fix from the worst
+
+The verdicts above lean on OCR, which misreads small or unhinted text on
+either side (see "Known metric artifacts"). The pixel scoreboard
+(`tools/render-lab/pixel_diff.py`) does not read anything: it compares each
+page with LibreOffice's pixel by pixel and ranks every document, worst
+first.
+
+- **Pixel miss**: ink in one render with no ink within 1 px in the other,
+  over all ink, per page, averaged over the document's pages. A page
+  either side has and the other lacks counts 1.0. 0.000 is LibreOffice's
+  pages to the pixel.
+- **Within lines**: the same with each line band free to slide 40 px, so
+  one early vertical miss does not hide everything after it. A document
+  high on pixel miss but low here is drifting (spacing, line heights,
+  borders); one high on both differs inside its lines (fonts, wrapping,
+  indents, tables).
+- Each page gets `pixel-N.png` beside its captures: red where only
+  LibreOffice has ink, blue where only we do.
+
+Every render run computes it from the captures it already has (`run.sh`
+and the fixture compare step; no extra jobs). On main, `pixel_board.py`
+keeps one pinned `pixel-scoreboard` issue per board (fixtures, and each
+app's real documents) with the full ranking; a pull request's render
+comment and job summary show the same table with each score's change
+against main. The loop: take the top row, open its overlays, find the
+cause, fix it with a reduced fixture and a test, watch it drop.
+
 ## The gate: everything is verified in CI
 
 The render lab is built so that agents (the hive) and humans can drive

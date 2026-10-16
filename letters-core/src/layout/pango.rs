@@ -88,6 +88,17 @@ impl PangoShaper {
         let mut base = pango::FontDescription::new();
         base.set_family(if req.code { "Liberation Mono" } else { &req.defaults.font_family });
         let mut size = req.defaults.font_size_pt;
+        // A blank paragraph is as tall as its own (empty) run's font.
+        if req.runs.iter().all(|r| r.text.is_empty() && !super::is_object(r)) {
+            if let Some(st) = req.runs.first().map(|r| &r.style) {
+                if let Some(hp) = st.font_size_hp {
+                    size = f64::from(hp) / 2.0;
+                }
+                if let Some(f) = &st.font_family {
+                    base.set_family(f);
+                }
+            }
+        }
         // A heading's look: the document's own heading style if it has
         // one (family, size, weight, slant, colour), else bold and scaled.
         let mut heading_color = None;
@@ -1486,6 +1497,22 @@ mod tests {
         let start = t.caret(TextPos { para: 0, offset: 0 }).expect("caret at the start");
         let end = t.caret(TextPos { para: 0, offset: 7 }).expect("caret at the end");
         assert!(end.x_pt > start.x_pt + 10.0, "seven CJK characters take room: {} -> {}", start.x_pt, end.x_pt);
+    }
+
+    /// A blank paragraph is as tall as its own empty run's font (an
+    /// imported 14pt blank line), not the body size.
+    #[test]
+    fn a_blank_paragraph_is_as_tall_as_its_own_font() {
+        let mut d = doc(2, "");
+        d.paragraphs[0].runs = vec![];
+        d.paragraphs[1].runs = vec![Run { text: String::new(), style: crate::model::RunStyle { font_size_hp: Some(56), ..Default::default() } }];
+        let t = Typeset::new(d, LayoutOptions::default());
+        let h: Vec<f64> = t.tree().pages[0]
+            .items
+            .iter()
+            .filter_map(|i| match i { Item::Line { height_pt, .. } => Some(*height_pt), _ => None })
+            .collect();
+        assert!(h[1] > h[0] * 2.0, "a 28pt blank line under a 12pt one: {h:?}");
     }
 
     /// Tab leaders and paragraph boxes draw without panic: leaders

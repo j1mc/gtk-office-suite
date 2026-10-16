@@ -66,7 +66,7 @@ fn local(kind: ShapeKind) -> SlideObject {
 }
 
 fn slide_on(master_id: u64, background: &str, objects: Vec<SlideObject>) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: "S".into(),
         background: background.into(),
         background_picture: None,

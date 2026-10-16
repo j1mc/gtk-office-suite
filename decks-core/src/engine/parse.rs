@@ -24,7 +24,7 @@ use super::model::*;
 use super::notes::{extract_notes_text, parse_run_style};
 use super::placeholders::{inherited_rect, parse_placeholders, PhKey, Placeholder};
 use super::shape::ShapeKind;
-use super::shape_xml::{frame_charts, frame_tables, sp_geometries, sp_styles, theme as read_theme, Theme};
+use super::shape_xml::{cxn_styles, frame_charts, frame_tables, sp_geometries, sp_styles, theme as read_theme, Theme};
 use super::text_xml::{sp_texts, Inherited};
 use crate::layouts::PlaceholderKey;
 
@@ -782,6 +782,10 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
         let sp_paint = sp_styles(&slide_xml, &slide_theme, scale.x);
         let sp_geom = sp_geometries(&slide_xml);
         let mut sp_index = 0usize;
+        // Connectors (p:cxnSp) are counted apart, so the p:sp order the
+        // text and paint passes share stays as it was.
+        let cxn_paint = cxn_styles(&slide_xml, &slide_theme, scale.x);
+        let mut cxn_index = 0usize;
         // Tables live in p:graphicFrame, which the walker used to skip.
         let mut tables = frame_tables(&slide_xml, &slide_theme);
         for t in &mut tables {
@@ -872,7 +876,9 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                                     g.note(e);
                                 }
                             }
-                            "p:sp" => {
+                            // A connector (p:cxnSp) is read as a shape:
+                            // its frame and preset, and no text.
+                            "p:sp" | "p:cxnSp" => {
                                 current_shape = Some(PendingShape {
                                     is_tx_box: false,
                                     has_tx_body: false,
@@ -1157,7 +1163,20 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
                         if name.as_ref() == "a:rPr" {
                             in_rpr = false;
                         }
-                        if name.as_ref() == "p:sp" {
+                        if name.as_ref() == "p:cxnSp" {
+                            // A connector: a line (or bent line) between
+                            // two shapes, which the walker used to skip, so
+                            // a deck's separator rules were not drawn
+                            // (#1397). Its outline is its whole look.
+                            let paint = cxn_paint.get(cxn_index).cloned().unwrap_or_default();
+                            cxn_index += 1;
+                            if let Some(shape) = current_shape.take() {
+                                let (x, y, w, h) = in_groups(&groups, (shape.x.unwrap_or(0.0), shape.y.unwrap_or(0.0), shape.w.unwrap_or(0.0), shape.h.unwrap_or(0.0)));
+                                let (x, y, w, h) = (x * scale.x, y * scale.y, w * scale.x, h * scale.y);
+                                let kind = ShapeKind::from_prst(shape.prst.as_deref().unwrap_or("line"));
+                                objects.push(SlideObject::Shape { kind, x, y, w, h, rotation: shape.rotation.unwrap_or(0.0), style: paint.style });
+                            }
+                        } else if name.as_ref() == "p:sp" {
                             // This shape's fill and outline, resolved by the
                             // shape_xml pass over the same part (Nth p:sp).
                             let paint = sp_paint.get(sp_index).cloned().unwrap_or_default();
@@ -1382,6 +1401,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
             builds: super::timing::read_builds(&slide_xml, |spid| object_ids.iter().position(|id| *id == Some(spid)).and_then(|i| ids.objects.get(i).copied())),
             ids,
             layout_id: None,
+            hidden: slide_is_hidden(&slide_xml),
         });
     }
 
@@ -1552,7 +1572,7 @@ pub fn read_pptx(path: &str) -> Result<Deck, String> {
     }
 
     if slides.is_empty() {
-        slides.push(Slide {
+        slides.push(Slide { hidden: false,
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2092,6 +2112,15 @@ impl GroupFrame {
         let sy = if ch_ext.1 > 0.0 { ext.1 / ch_ext.1 } else { 1.0 };
         (off.0 + (x - ch_off.0) * sx, off.1 + (y - ch_off.1) * sy, w * sx, h * sy)
     }
+}
+
+/// Whether a slide part is hidden: `show="0"` (or `false`) on its `p:sld`,
+/// which PowerPoint writes for "Hide Slide".
+fn slide_is_hidden(slide_xml: &str) -> bool {
+    let Some(at) = slide_xml.find("<p:sld") else { return false };
+    let Some(len) = slide_xml[at..].find('>') else { return false };
+    let tag = &slide_xml[at..at + len];
+    tag.contains(" show=\"0\"") || tag.contains(" show=\"false\"")
 }
 
 /// A rectangle given in the innermost of `groups`, on the slide.

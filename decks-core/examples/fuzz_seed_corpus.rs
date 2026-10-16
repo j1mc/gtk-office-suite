@@ -30,7 +30,7 @@ fn decks() -> Vec<(&'static str, Deck)> {
     // resolution are both exercised.
     let many = Deck {
         slides: (0..4)
-            .map(|index| Slide {
+            .map(|index| Slide { hidden: false,
                 title: format!("Slide {index}"),
                 background: String::new(),
                 background_picture: None,
