@@ -579,6 +579,33 @@ fn a_files_own_title_and_subtitle_styles_are_its_look() {
     assert_eq!(round_trip(&rt).paragraphs[1].runs[0].style.letter_spacing_tw, Some(15));
 }
 
+/// A border edge Word leaves off (`w:val="none"`) but gives a gap pads
+/// the paragraph above and below, as Writer does; the side edges do not
+/// set the text in. The questionnaire's Normal style puts 31pt of such
+/// padding on every paragraph that does not clear it.
+#[test]
+fn an_invisible_border_keeps_its_gap_above_and_below() {
+    let d = Document::from_plain_text("before\n\nafter");
+    let rt = doctor_parts(&d, |parts| {
+        let edges: String = ["top", "left", "bottom", "right"]
+            .iter()
+            .map(|s| format!("<w:{s} w:val=\"none\" w:sz=\"96\" w:space=\"31\" w:color=\"FFFFFF\" w:frame=\"1\"/>"))
+            .collect();
+        let st = parts.get_mut("word/styles.xml").unwrap();
+        let name = "<w:name w:val=\"Normal\"/>";
+        assert!(st.contains(name));
+        *st = st.replacen(name, &format!("{name}<w:pPr><w:pBdr>{edges}</w:pBdr></w:pPr>"), 1);
+    });
+    // The blank line between the two takes the Normal style's edges.
+    let b = &rt.paragraphs[1].style.borders;
+    let top = b.top.as_ref().expect("the top edge's gap is kept");
+    assert_eq!((top.style, top.space_pt), (BorderStyle::None, 31.0));
+    assert_eq!(b.bottom.as_ref().map(|e| e.style), Some(BorderStyle::None));
+    assert!(b.left.is_none() && b.right.is_none(), "{b:?}");
+    // It survives a save.
+    assert_eq!(round_trip(&rt).paragraphs[1].style.borders, *b);
+}
+
 #[test]
 fn header_footer_survive() {
     let mut d = Document::from_plain_text("body text");

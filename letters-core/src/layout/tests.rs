@@ -981,6 +981,51 @@ fn borders_stand_off_the_text_by_their_width_and_gap() {
     assert_eq!((x, w), (text_x - 1.5, t.pages[0].width_pt - t.pages[0].geometry.margin_left_pt - t.pages[0].geometry.margin_right_pt + 3.0));
 }
 
+/// Paragraphs with the same borders are one box: its gaps and its top
+/// and bottom edges at the run's ends only, its sides unbroken across the
+/// space between them (Writer and Word group them so).
+#[test]
+fn paragraphs_with_the_same_borders_are_one_box() {
+    let edge = || Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 1.0, space_pt: 4.0 });
+    let mut d = doc_of(4, "x");
+    for p in &mut d.paragraphs[1..3] {
+        p.style.borders = ParaBorders { top: edge(), bottom: edge(), left: edge(), right: edge() };
+        p.style.space_after_pt = 6.0;
+    }
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    let boxes: Vec<(f64, f64, bool, bool)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::ParaBox { y_pt, height_pt, top_edge, bottom_edge, .. } => Some((*y_pt, *height_pt, *top_edge, *bottom_edge)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boxes.len(), 2);
+    // The first opens the group, the second closes it.
+    assert!(boxes[0].2 && !boxes[0].3 && !boxes[1].2 && boxes[1].3, "{boxes:?}");
+    assert_eq!(tops[1], boxes[0].0 + 5.0, "the top gap above the first only");
+    assert_eq!(tops[2], tops[1] + 15.0 + 6.0, "no gaps between them");
+    assert_eq!(boxes[0].0 + boxes[0].1, boxes[1].0, "the box runs on over the space between");
+    assert_eq!(boxes[1].1, 15.0 + 5.0, "the bottom gap below the last only");
+}
+
+/// An invisible edge keeps its gap: Word's `w:val="none"` with a
+/// `w:space` pads a paragraph above and below in Writer, and draws
+/// nothing (render-lab `real-questionnaire`'s blank line between tables).
+#[test]
+fn an_invisible_edge_keeps_its_gap() {
+    let none = || Some(ParaBorder { style: BorderStyle::None, color: "FFFFFF".into(), width_pt: 12.0, space_pt: 31.0 });
+    let mut d = doc_of(3, "x");
+    d.paragraphs[1].style.borders = ParaBorders { top: none(), bottom: none(), ..Default::default() };
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    // 31pt above and below, none for the width it names.
+    assert_eq!(tops[1] - tops[0], 15.0 + 31.0);
+    assert_eq!(tops[2] - tops[1], 15.0 + 31.0);
+}
+
 /// Give `doc` sections starting at `starts`, on `pages` (LET-005S).
 fn sectioned(doc: &mut Document, starts: &[usize], pages: &[PageGeometry]) {
     let n = doc.paragraphs.len();

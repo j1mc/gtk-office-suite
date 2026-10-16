@@ -152,6 +152,7 @@ fn para_style_props(st: &ParaStyle) -> String {
     }
     let border = |e: &ParaBorder| {
         let style = match e.style {
+            BorderStyle::None => "none",
             BorderStyle::Single => "solid",
             BorderStyle::Dashed => "dashed",
             BorderStyle::Dotted => "dotted",
