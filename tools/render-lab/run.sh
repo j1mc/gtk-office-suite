@@ -31,6 +31,7 @@ if [ -z "${RENDER_LAB:-}" ]; then
         -v "$REPO:/workspace:Z" \
         -v "${HOME}/.cache/render-lab-cargo:/cargo-home:Z" \
         -e CARGO_HOME=/cargo-home -e PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+        -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_PROFILE_TEST_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 \
         -e RENDER_LAB_OUT="/workspace/$(realpath --relative-to="$REPO" "$OUT")" \
         -e RENDER_LAB_SKIP_BUILD="${RENDER_LAB_SKIP_BUILD:-}" \
         -e RENDER_LAB_CORPUS="${RENDER_LAB_CORPUS:-}" \

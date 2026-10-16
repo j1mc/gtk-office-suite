@@ -420,20 +420,14 @@ by hand:
 | `test` | `ci.yml` → `test` | required | Reports on every pull request; a failure blocks the merge. |
 | `smoke` | `gui-tests.yml` → `smoke` | required | Reports on every pull request; a failure blocks the merge. |
 | `Export PDF vs LibreOffice PDF` | `render-parity.yml` → `export-report` | required | Reports on every pull request; a failure blocks the merge. |
-| `Export lab (decks)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
-| `Export lab (letters)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
-| `Export lab (tables)` | `render-parity.yml` → `export-lab` | required | Reports on every pull request; a failure blocks the merge. |
-| `Render lab (decks)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
-| `Render lab (letters)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
-| `Render lab (tables)` | `render-parity.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
+| `Render scope` | `render-parity.yml` → `scope` | required | Reports on every pull request; a failure blocks the merge. |
 | `Tiers A+B vs LibreOffice` | `render-parity.yml` → `report` | required | Reports on every pull request; a failure blocks the merge. |
 | `Real documents (decks)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `Real documents (letters)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `Real documents (tables)` | `render-real.yml` → `lab` | required | Reports on every pull request; a failure blocks the merge. |
 | `RustSec advisory gate` | `ci.yml` → `advisories` | pending | #1549: Fails on main today: Typst's direct serde_yaml pulls in unsafe-libyaml (RUSTSEC-2024-0449). Required now, it would block every merge until SH-007 removes or waives the path; the failure must stay visible, not be suppressed. |
 | `drop` | `drop-bot-review-requests.yml` → `drop` | optional | Bot-authored pull requests only, and only on open/reopen/ready: housekeeping, not a check of the change. |
-| `gate` | `feature-verification.yml` → `gate` | optional | Decides whether a verify-video label asked for a recording; it is orchestration, not a verdict about the change. |
-| `image` | `feature-verification.yml` → `image` | optional | Runs only when the verify-video label asks for a recording. |
+| `image` | `feature-verification.yml` → `image` | optional | Runs only when the verify-video label asks for a recording; skipped, with no runner, otherwise. |
 | `publish` | `feature-verification.yml` → `publish` | optional | Posts the recorded clips; runs only after a recording. |
 | `record` | `feature-verification.yml` → `record` | optional | Needs the label-gated image job; skipped otherwise. Recording never decides a verdict (docs/CI-VIDEO-EVIDENCE.md). |
 | `corpus (decks)` | `file-corpus.yml` → `corpus` | optional | Path-filtered to the corpus and GUI harness; it reports nothing on other pull requests, so requiring it would block them forever. |
@@ -447,13 +441,13 @@ by hand:
 | `coverage` | `nightly.yml` → `coverage` | optional | Skipped on pull requests by design (nightly cost). |
 | `oracle` | `nightly.yml` → `oracle` | optional | Path-filtered to format/model code (runs_on_every_revision: false). release-revision.yml refuses a release whose oracle evidence was recorded at another revision instead. |
 | `Reproducible build (compare)` | `release-gate.yml` → `reproducible-compare` | optional | Path-filtered to release inputs; compares the two reproducible builds. |
-| `Reproducible build (first)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered to release inputs; two full builds per run. |
-| `Reproducible build (second)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered to release inputs; two full builds per run. |
-| `aarch64-tests` | `release-gate.yml` → `aarch64-tests` | optional | Path-filtered to release inputs. |
+| `Reproducible build (first)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered, and only when a release input changed (not a module-ceiling file alone); two full builds per run. Nightly on main. |
+| `Reproducible build (second)` | `release-gate.yml` → `reproducible-build` | optional | Path-filtered, and only when a release input changed (not a module-ceiling file alone); two full builds per run. Nightly on main. |
+| `aarch64-tests` | `release-gate.yml` → `aarch64-tests` | optional | Path-filtered, and only when a release input changed. Nightly on main. |
 | `contract` | `release-gate.yml` → `contract` | optional | Path-filtered to release inputs and the module-ceiling files. Requiring the release contract needs it to report on every pull request first (an unfiltered trigger for this job), which is a cost decision for the administrator. |
 | `offline-flatpak (aarch64, ubuntu-24.04-arm)` | `release-gate.yml` → `offline-flatpak` | optional | Path-filtered to release inputs; offline Flatpak builds on both architectures. |
 | `offline-flatpak (x86_64, ubuntu-24.04)` | `release-gate.yml` → `offline-flatpak` | optional | Path-filtered to release inputs; offline Flatpak builds on both architectures. |
-| `source-archive` | `release-gate.yml` → `source-archive` | optional | Path-filtered to release inputs. |
+| `source-archive` | `release-gate.yml` → `source-archive` | optional | Path-filtered, and only when a release input changed. Nightly on main. |
 | `Flatpak bundle (decks)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Flatpak bundle (letters)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Flatpak bundle (tables)` | `render-parity.yml` → `flatpak` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
@@ -461,6 +455,8 @@ by hand:
 | `Prior-release bundle (letters)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Prior-release bundle (tables)` | `render-parity.yml` → `flatpak-prior` | optional | Runs only on the schedule or a dispatch that asks for the VM tier; skipped on pull requests. |
 | `Tier C (Flatpak in a GNOME VM)` | `render-parity.yml` → `vm` | optional | Tier C needs the bundles above and is continue-on-error; it never runs on an ordinary pull request. |
+| `export-lab (name not derivable)` | `render-parity.yml` → `export-lab` | optional | Started only for the apps a pull request reaches, like `lab`. `export-report` is the required verdict: it runs on every pull request and fails when an export lab in scope did not succeed. |
+| `lab (name not derivable)` | `render-parity.yml` → `lab` | optional | Started only for the apps a pull request reaches (tools/render-lab/real_scope.py), so its check names are not known before the run. `report` is the required verdict: it runs on every pull request and fails when a lab in scope did not succeed. |
 
 <!-- required-checks:end -->
 
@@ -474,15 +470,19 @@ gh api repos/tuna-os/gtk-office-suite/branches/main/protection > protection.json
 python3 conformance/required_checks.py --compare protection.json   # must print MATCHES
 ```
 
-Against the 2026-10-15 API output, `--compare` reports the seventeen proposed
+Against the 2026-10-15 API output, `--compare` reports the twelve proposed
 contexts other than `test` as *proposed but not required*. The three
 `Real documents (<app>)` contexts joined the proposal when `render-real.yml`
 stopped being path-filtered: it now starts on every pull request, and an app
 the change cannot reach (`tools/render-lab/real_scope.py`, derived from the
 Cargo manifests) passes in seconds rather than going unreported. Before that,
 DCK-006 (#1574) changed only `decks-core`, the lab did not run, and a real deck
-went from amber to red on `main`. Decisions left to the administrator, not
-made here:
+went from amber to red on `main`. `render-parity.yml` uses the same scope the
+other way round: its `Render scope` job lists the apps a pull request reaches,
+lab and export-lab jobs start only for those, and the two report jobs —
+which run on every pull request and fail when the scope job or a lab in
+scope did not succeed — are the required verdict instead of six per-app
+lab checks. Decisions left to the administrator, not made here:
 
 - `RustSec advisory gate` is `pending` on #1549 (SH-007): it fails on `main`,
   and requiring it now would block every merge. Its failure stays visible.

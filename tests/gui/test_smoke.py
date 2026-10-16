@@ -3626,8 +3626,9 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
     """The column menu (DESIGN-UI.md, Numbers/Sheets): Alt+Down opens the
     active cell's column menu; Sort Ascending reorders the rows; unticking
     a value in its checklist filters those rows out, and the status bar's
-    quick summary counts only what is shown. Asserted on the grid's cell
-    names, the menu's buttons and the status label, as AT-SPI reports them."""
+    quick summary counts only what is shown. Whatever closes the menu, the
+    keyboard is back on the grid. Asserted on the grid's cell names and
+    focus, the menu's buttons and the status label, as AT-SPI reports them."""
 
     app_name = "tables"
 
@@ -3648,6 +3649,10 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
         found = self.app.findChildren(lambda c: c.roleName == role and c.name == name and c.showing)
         return found[0] if found else None
 
+    def _wait_for_the_grid_to_have_the_keyboard(self, after):
+        self.wait_until(lambda: self.app.child(name="Spreadsheet grid").focused, bool,
+                        description=f"the grid to have the keyboard back after {after}")
+
     def test_sort_and_filter_from_the_column_menu(self):
         from dogtail import rawinput
         import subprocess
@@ -3667,6 +3672,7 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
                 bool,
                 description=f"{name} after sorting",
             )
+        self._wait_for_the_grid_to_have_the_keyboard("Sort Ascending")
 
         # Untick 20: its row (now row 2) is filtered out.
         self._to_grid("A1")
@@ -3688,6 +3694,7 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
             description="20 to be unticked",
         )
         rawinput.keyCombo("Escape")
+        self._wait_for_the_grid_to_have_the_keyboard("Escape closed the menu")
 
         # Select A1:A3; the quick summary skips the hidden row.
         self._to_grid("A1")
@@ -3708,10 +3715,13 @@ class TablesColumnMenuSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.wait_until(lambda: self._button("Clear Filter in This Column"), bool,
                         description="the per-column clear button")
         self._button("Clear Filter in This Column").do_action(0)
-        # Make sure the menu is dismissed before driving the grid again:
-        # Escape closes any lingering popover and otherwise hands focus
-        # back to the grid, where Ctrl+G is heard.
-        rawinput.keyCombo("Escape")
+        # No Escape after it: that key used to go out while the click was
+        # still pending — do_action is GTK's keyboard activation, which
+        # clicks 250 ms later — so the app handled Escape and Ctrl+G first,
+        # and the late click's refresh rewrote the name box under the typing
+        # (TBL-006). The menu closing and handing the grid the keyboard is
+        # the click's own observable.
+        self._wait_for_the_grid_to_have_the_keyboard("Clear Filter in This Column")
         self._to_grid("A1")
         rawinput.keyCombo("<Shift>Down")
         rawinput.keyCombo("<Shift>Down")
@@ -8576,6 +8586,57 @@ class LettersPageSetupSmoke(BaseGUITestCase):
         self.gapplication_action(aid, "undo")
         self.wait_until(self._page, lambda p: p is None, description="Undo took the page back")
         self.assertIsNone(self.process.poll(), "letters crashed in Page Setup")
+
+
+class LettersSectionSetupSmoke(BaseGUITestCase):
+    """Insert Section Break starts a section at the caret; Page Setup there
+    sets that section's page only, and the page view lays each section on
+    its own page; Remove Section Break joins them; Undo takes each step
+    back (LET-005S)."""
+
+    app_name = "letters"
+    AID = "org.tunaos.letters"
+
+    def setUp(self):
+        self._snapshot_path = self.isolate_snapshot(prefix="letters-section-setup-")
+        super().setUp()
+
+    def _snap(self):
+        return self.trigger_snapshot(self.AID)
+
+    def _sections(self):
+        return [(s["range"]["start"], s["range"]["end"], round(s["geometry"]["margin_top_pt"]))
+                for s in self._snap().get("sections", [])]
+
+    def test_page_setup_sets_the_carets_section_and_undo_takes_it_back(self):
+        from dogtail import rawinput
+
+        self.new_letters_document()
+        rawinput.typeText("first")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("second")
+        self.wait_until(lambda: len(self._snap()["paragraphs"]), lambda n: n == 2, description="two paragraphs")
+        self.gapplication_action(self.AID, "insert-section-break")
+        two = self.wait_until(self._sections, lambda s: [(a, b) for a, b, _ in s] == [(0, 2), (2, 3)],
+                              description="a section starting after 'second'")
+        top = two[0][2]
+
+        self.gapplication_action(self.AID, "page-setup")
+        spin = self.wait_for_node(roleName="spin button")
+        spin.queryValue().currentValue = 40.0  # Top margin, millimetres
+        self.wait_for_node(name="Apply", roleName="push button").do_action(0)
+        self.wait_until(self._sections, lambda s: len(s) == 2 and s[0][2] == top and s[1][2] == round(40.0 * 72 / 25.4),
+                        description="Page Setup changed the caret's section only")
+        self.wait_until(lambda: len(self._snap().get("view", {}).get("pages", [])), lambda n: n == 2,
+                        description="each section on its own page")
+
+        self.gapplication_action(self.AID, "undo")
+        self.wait_until(self._sections, lambda s: [m for _, _, m in s] == [top, top], description="Undo took the page back")
+        self.gapplication_action(self.AID, "remove-section-break")
+        self.wait_until(self._sections, lambda s: len(s) == 1, description="the sections joined")
+        self.gapplication_action(self.AID, "undo")
+        self.wait_until(self._sections, lambda s: len(s) == 2, description="Undo put the break back")
+        self.assertIsNone(self.process.poll(), "letters crashed in section setup")
 
 
 class _ButtonsAreNamed:
