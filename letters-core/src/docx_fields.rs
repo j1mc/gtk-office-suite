@@ -61,7 +61,7 @@ fn box_text(xml: &str) -> String {
 /// results dropped. `None` when the part holds no such field (rdocx's own
 /// reading is then used as it is).
 pub fn template(part_xml: &str) -> Option<String> {
-    let (text, found) = walk(part_xml);
+    let (text, found, _) = walk(part_xml);
     found.then_some(text)
 }
 
@@ -72,11 +72,55 @@ pub(crate) fn story_text(part_xml: &str) -> String {
     walk(part_xml).0
 }
 
-/// The walk behind `template` and `story_text`: the part's text, and
-/// whether it held a PAGE or NUMPAGES field.
-fn walk(part_xml: &str) -> (String, bool) {
+/// A header or footer part's text as `story_text` reads it, with each of
+/// its lines' alignment, look and tab stops (`styles_xml` for what their
+/// paragraph styles give them).
+pub(crate) fn story(part_xml: &str, styles_xml: &str) -> (String, Vec<crate::model::HfLine>) {
+    let (text, _, starts) = walk(part_xml);
+    let lines = starts
+        .into_iter()
+        .map(|at| {
+            let mut line = line_of(part_xml, at, styles_xml);
+            // A text box's line sits across the page as the box does.
+            if let Some(a) = box_alignment(part_xml, at) {
+                line.alignment = a;
+            }
+            line
+        })
+        .collect();
+    (text, lines)
+}
+
+/// How the text box whose paragraph starts at `part_xml[at..]` is
+/// aligned across the page or margins (`wp:positionH`'s `wp:align`);
+/// `None` for a paragraph not in a box, or a box placed by offset.
+fn box_alignment(part_xml: &str, at: usize) -> Option<crate::model::Alignment> {
+    use crate::model::Alignment;
+    let before = &part_xml[..at];
+    let anchor = before.match_indices("<wp:anchor").map(|(a, _)| a).filter(|&a| matches!(before.as_bytes().get(a + 10), Some(b' ' | b'>'))).last()?;
+    // In the box only if the anchor is still open here.
+    if before[anchor..].contains("</wp:anchor>") || !before[anchor..].contains("<w:txbxContent>") {
+        return None;
+    }
+    let h = &before[anchor..];
+    let h = &h[h.find("<wp:positionH")?..];
+    let h = &h[..h.find("</wp:positionH>")?];
+    let v = &h[h.find("<wp:align>")? + "<wp:align>".len()..];
+    match &v[..v.find('<')?] {
+        "center" => Some(Alignment::Center),
+        "right" | "outside" => Some(Alignment::Right),
+        "left" | "inside" => Some(Alignment::Left),
+        _ => None,
+    }
+}
+
+/// The walk behind `template`, `story_text` and `story`: the part's text,
+/// whether it held a PAGE or NUMPAGES field, and where in `part_xml` the
+/// paragraph each line of the text is starts.
+fn walk(part_xml: &str) -> (String, bool, Vec<usize>) {
     let mut out = String::new();
     let mut found = false;
+    let mut starts: Vec<usize> = Vec::new();
     let mut paragraphs = 0;
     // Where the current paragraph's text starts in `out`.
     let mut para_start = 0;
@@ -103,6 +147,13 @@ fn walk(part_xml: &str) -> (String, bool) {
                     if !text.is_empty() {
                         out.insert_str(para_start, &format!("{text}\n"));
                         para_start += text.len() + 1;
+                        // Its lines ahead of the paragraph that anchors it.
+                        let own = paragraph_spans(&part_xml[tag_end..inner_end])
+                            .into_iter()
+                            .filter(|r| !box_text(&part_xml[tag_end + r.start..tag_end + r.end]).is_empty())
+                            .map(|r| tag_end + r.start);
+                        let at = starts.len().saturating_sub(1);
+                        starts.splice(at..at, own);
                     }
                 }
                 i = (inner_end + close.len()).min(part_xml.len());
@@ -114,6 +165,7 @@ fn walk(part_xml: &str) -> (String, bool) {
                 }
                 paragraphs += 1;
                 para_start = out.len();
+                starts.push(at);
             }
             "w:fldSimple" => {
                 let instr = attr(part_xml, at, "w:instr").unwrap_or_default();
@@ -161,12 +213,13 @@ fn walk(part_xml: &str) -> (String, bool) {
                 i = close;
                 continue;
             }
-            "w:tab" => out.push('\t'),
+            // A run's tab; a tab stop's definition has a position.
+            "w:tab" if attr(part_xml, at, "w:pos").is_none() => out.push('\t'),
             _ => {}
         }
         i = tag_end;
     }
-    (out, found)
+    (out, found, starts)
 }
 
 /// Turn "{page}" and "{total}" in a written header or footer part's text
@@ -277,15 +330,7 @@ pub fn alignment(part_xml: &str, styles_xml: &str) -> crate::model::Alignment {
         _ => None,
     };
     // The text boxes and fallbacks out, as `template` leaves them out.
-    let mut xml = String::with_capacity(part_xml.len());
-    let mut rest = part_xml;
-    while let Some(at) = ["<w:txbxContent>", "<mc:Fallback>"].iter().filter_map(|t| rest.find(t).map(|a| (a, *t))).min() {
-        let (at, open) = at;
-        xml.push_str(&rest[..at]);
-        let close = format!("</{}", &open[1..]);
-        rest = rest[at..].find(&close).map_or("", |c| &rest[at + c..]);
-    }
-    xml.push_str(rest);
+    let xml = without_boxes(part_xml);
     let mut from = 0;
     while let Some(off) = xml[from..].find("<w:p") {
         let at = from + off;
@@ -306,20 +351,181 @@ pub fn alignment(part_xml: &str, styles_xml: &str) -> crate::model::Alignment {
         if let Some(a) = ppr.find("<w:jc ").and_then(|j| attr(ppr, j, "w:val")).and_then(|v| jc(&v)) {
             return a;
         }
-        let mut style = ppr.find("<w:pStyle ").and_then(|p| attr(ppr, p, "w:val"));
-        for _ in 0..8 {
-            let Some(id) = style.take() else { break };
-            let Some(s_at) = styles_xml.find(&format!("w:styleId=\"{id}\"")) else { break };
-            let s_end = styles_xml[s_at..].find("</w:style>").map_or(styles_xml.len(), |e| s_at + e);
-            let def = &styles_xml[s_at..s_end];
-            if let Some(a) = def.find("<w:jc ").and_then(|j| attr(def, j, "w:val")).and_then(|v| jc(&v)) {
-                return a;
-            }
-            style = def.find("<w:basedOn ").and_then(|b| attr(def, b, "w:val"));
-        }
-        return Alignment::Left;
+        let style = ppr.find("<w:pStyle ").and_then(|p| attr(ppr, p, "w:val"));
+        return style_chain(styles_xml, style).iter().find_map(|def| def.find("<w:jc ").and_then(|j| attr(def, j, "w:val")).and_then(|v| jc(&v))).unwrap_or(Alignment::Left);
     }
     Alignment::Left
+}
+
+/// A part with its text boxes' contents and its fallbacks (a second copy
+/// of a text box) taken out.
+fn without_boxes(part_xml: &str) -> String {
+    let mut xml = String::with_capacity(part_xml.len());
+    let mut rest = part_xml;
+    while let Some((at, open)) = ["<w:txbxContent>", "<mc:Fallback>"].iter().filter_map(|t| rest.find(t).map(|a| (a, *t))).min() {
+        xml.push_str(&rest[..at]);
+        let close = format!("</{}", &open[1..]);
+        rest = rest[at..].find(&close).map_or("", |c| &rest[at + c..]);
+    }
+    xml.push_str(rest);
+    xml
+}
+
+/// The definitions of paragraph style `id` and the styles it is based on,
+/// its own first.
+fn style_chain(styles_xml: &str, id: Option<String>) -> Vec<&str> {
+    let mut chain = Vec::new();
+    let mut style = id;
+    // A loop of styles based on each other ends.
+    for _ in 0..8 {
+        let Some(id) = style.take() else { break };
+        let Some(s_at) = styles_xml.find(&format!("w:styleId=\"{id}\"")) else { break };
+        let s_end = styles_xml[s_at..].find("</w:style>").map_or(styles_xml.len(), |e| s_at + e);
+        let def = &styles_xml[s_at..s_end];
+        chain.push(def);
+        style = def.find("<w:basedOn ").and_then(|b| attr(def, b, "w:val"));
+    }
+    chain
+}
+
+/// Where each paragraph of `xml` is, its own and not those of a text box
+/// inside it, in order.
+fn paragraph_spans(xml: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(off) = xml[from..].find("<w:p") {
+        let at = from + off;
+        if !matches!(xml.as_bytes().get(at + 4), Some(b' ' | b'>' | b'/')) {
+            from = at + 4;
+            continue;
+        }
+        let end = paragraph_end(xml, at);
+        spans.push(at..end);
+        from = end;
+    }
+    spans
+}
+
+/// Where the paragraph starting at `xml[at..]` ends, past the paragraphs
+/// of any text box in it.
+fn paragraph_end(xml: &str, at: usize) -> usize {
+    let open_end = xml[at..].find('>').map_or(xml.len(), |e| at + e + 1);
+    if xml[..open_end].ends_with("/>") {
+        return open_end;
+    }
+    let mut depth = 1;
+    let mut i = open_end;
+    while let Some(off) = xml[i..].find("<w:p") .into_iter().chain(xml[i..].find("</w:p>")).min() {
+        let t = i + off;
+        if xml[t..].starts_with("</w:p>") {
+            depth -= 1;
+            i = t + 6;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            let tag_end = xml[t..].find('>').map_or(xml.len(), |e| t + e + 1);
+            if matches!(xml.as_bytes().get(t + 4), Some(b' ' | b'>')) && !xml[..tag_end].ends_with("/>") {
+                depth += 1;
+            }
+            i = tag_end;
+        }
+    }
+    xml.len()
+}
+
+/// The line the paragraph starting at `part_xml[at..]` makes: its
+/// alignment and tab stops, by its own properties or its style's, and the
+/// look of its first text, by the run's own properties over its style's.
+fn line_of(part_xml: &str, at: usize, styles_xml: &str) -> crate::model::HfLine {
+    use crate::model::{Alignment, HfLine, RunStyle, TabAlign, TabLeader, TabStop};
+    let para = without_boxes(&part_xml[at..paragraph_end(part_xml, at)]);
+    let ppr = para.find("<w:pPr>").map_or("", |p| &para[p..p + para[p..].find("</w:pPr>").unwrap_or(0)]);
+    // The paragraph mark's own run properties are not its text's.
+    let ppr_own = ppr.find("<w:rPr>").map_or(ppr, |r| &ppr[..r]);
+    let chain = style_chain(styles_xml, ppr.find("<w:pStyle ").and_then(|p| attr(ppr, p, "w:val")));
+    let alignment = std::iter::once(ppr_own)
+        .chain(chain.iter().copied())
+        .find_map(|x| {
+            x.find("<w:jc ").and_then(|j| attr(x, j, "w:val")).and_then(|v| match v.as_str() {
+                "center" => Some(Alignment::Center),
+                "right" | "end" => Some(Alignment::Right),
+                "both" | "distribute" => Some(Alignment::Justify),
+                "left" | "start" => Some(Alignment::Left),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+    // A paragraph's stops are its style's, the most basic first, with
+    // its own added and those it clears taken away, as Word sets them.
+    let mut tab_stops: Vec<TabStop> = Vec::new();
+    for x in chain.iter().rev().copied().chain(std::iter::once(ppr_own)) {
+        let Some(open) = x.find("<w:tabs>") else { continue };
+        let tabs = &x[open..open + x[open..].find("</w:tabs>").unwrap_or(0)];
+        for (t, _) in tabs.match_indices("<w:tab ") {
+            let Some(pos_pt) = attr(tabs, t, "w:pos").and_then(|p| p.parse::<f64>().ok()).map(|p| p / 20.0) else { continue };
+            tab_stops.retain(|s| (s.pos_pt - pos_pt).abs() > 0.5);
+            let align = match attr(tabs, t, "w:val").as_deref() {
+                Some("right" | "end") => TabAlign::Right,
+                Some("center") => TabAlign::Center,
+                Some("decimal") => TabAlign::Decimal,
+                Some("left" | "start") => TabAlign::Left,
+                _ => continue,
+            };
+            let leader = match attr(tabs, t, "w:leader").as_deref() {
+                Some("dot") => TabLeader::Dot,
+                Some("hyphen") => TabLeader::Hyphen,
+                Some("underscore") => TabLeader::Underscore,
+                _ => TabLeader::None,
+            };
+            tab_stops.push(TabStop { pos_pt, align, leader });
+        }
+    }
+    tab_stops.sort_by(|a, b| a.pos_pt.total_cmp(&b.pos_pt));
+    let mut look = RunStyle::default();
+    // The style's run properties, the most basic first.
+    for def in chain.iter().rev() {
+        if let Some(r) = def.find("<w:rPr>") {
+            apply_run_properties(&mut look, &def[r..r + def[r..].find("</w:rPr>").unwrap_or(0)]);
+        }
+    }
+    let first_text = para.match_indices("<w:r>").chain(para.match_indices("<w:r ")).map(|(r, _)| r).filter(|&r| {
+        let run = &para[r..r + para[r..].find("</w:r>").unwrap_or(0)];
+        run.find("<w:t").is_some_and(|t| matches!(run.as_bytes().get(t + 4), Some(b' ' | b'>')))
+    });
+    if let Some(r) = first_text.min() {
+        let run = &para[r..r + para[r..].find("</w:r>").unwrap_or(0)];
+        if let Some(p) = run.find("<w:rPr>") {
+            apply_run_properties(&mut look, &run[p..p + run[p..].find("</w:rPr>").unwrap_or(0)]);
+        }
+    }
+    HfLine { alignment, look, tab_stops }
+}
+
+/// Run properties (`w:rPr`'s contents) over `look`: weight, slant, size,
+/// colour and font.
+fn apply_run_properties(look: &mut crate::model::RunStyle, rpr: &str) {
+    let on = |tag: &str| {
+        let open = format!("<{tag}");
+        rpr.match_indices(&open).find(|(t, _)| matches!(rpr.as_bytes().get(t + open.len()), Some(b' ' | b'/' | b'>'))).map(|(t, _)| {
+            !matches!(attr(rpr, t, "w:val").as_deref(), Some("0" | "false" | "off" | "none"))
+        })
+    };
+    if let Some(b) = on("w:b") {
+        look.bold = b;
+    }
+    if let Some(i) = on("w:i") {
+        look.italic = i;
+    }
+    if let Some(sz) = rpr.find("<w:sz ").and_then(|t| attr(rpr, t, "w:val")).and_then(|v| v.parse().ok()) {
+        look.font_size_hp = Some(sz);
+    }
+    if let Some(c) = rpr.find("<w:color ").and_then(|t| attr(rpr, t, "w:val")).filter(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_hexdigit())) {
+        look.color = Some(c.to_lowercase());
+    }
+    if let Some(f) = rpr.find("<w:rFonts ").and_then(|t| attr(rpr, t, "w:ascii")) {
+        look.font_family = Some(f);
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +548,37 @@ mod tests {
         let other = "<w:hdr><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>DATE</w:instrText></w:r>\
                      <w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>today</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:hdr>";
         assert_eq!(template(other), None);
+    }
+
+    /// Each line of a part has its own alignment, look and tab stops: a
+    /// text box's line sits across the page as its box does, a line's look
+    /// is its run's over its style's, and its stops its style's with its
+    /// own added and cleared; a tab stop's definition is not a tab.
+    #[test]
+    fn a_parts_lines_each_have_their_own_alignment_look_and_stops() {
+        use crate::model::{Alignment, TabAlign};
+        let styles = r#"<w:styles><w:style w:type="paragraph" w:styleId="Footer"><w:basedOn w:val="Base"/>
+            <w:pPr><w:tabs><w:tab w:val="center" w:pos="4513"/><w:tab w:val="right" w:pos="9026"/></w:tabs></w:pPr></w:style>
+            <w:style w:type="paragraph" w:styleId="Base"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="18"/></w:rPr></w:style></w:styles>"#;
+        let part = r#"<w:ftr><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><mc:AlternateContent><mc:Choice><w:drawing><wp:anchor><wp:positionH relativeFrom="page"><wp:align>center</wp:align></wp:positionH>
+            <wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>OFFICIAL</w:t></w:r></w:p></w:txbxContent></wps:txbx></wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>
+            <w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Footer"/><w:tabs><w:tab w:val="clear" w:pos="4513"/><w:tab w:val="right" w:pos="9638"/></w:tabs><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr>
+            <w:r><w:rPr><w:b/><w:color w:val="1F4E79"/></w:rPr><w:t>Ship</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>ID</w:t></w:r></w:p></w:ftr>"#;
+        let (text, lines) = story(part, styles);
+        assert_eq!(text, "OFFICIAL\n{page}\nShip\tID");
+        assert_eq!(lines.len(), 3);
+        assert_eq!((lines[0].alignment, lines[0].look.font_size_hp), (Alignment::Center, Some(24)), "the box's line, centred as its box");
+        assert_eq!(lines[1].alignment, Alignment::Right);
+        let ship = &lines[2];
+        assert_eq!(ship.alignment, Alignment::Left);
+        assert_eq!(
+            (ship.look.font_family.as_deref(), ship.look.font_size_hp, ship.look.bold, ship.look.color.as_deref()),
+            (Some("Arial"), Some(18), true, Some("1f4e79")),
+            "its run over its style, not its paragraph mark"
+        );
+        let stops: Vec<(f64, TabAlign)> = ship.tab_stops.iter().map(|t| (t.pos_pt, t.align)).collect();
+        assert_eq!(stops, [(451.3, TabAlign::Right), (481.9, TabAlign::Right)]);
     }
 
     /// A header's alignment is its first text paragraph's, by its own

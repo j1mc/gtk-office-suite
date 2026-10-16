@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::lists;
-use crate::model::{Document, ListKind, PageGeometry, Paragraph, Run};
+use crate::model::{Document, HfLine, ListKind, PageGeometry, Paragraph, Run};
 
 #[cfg(feature = "render")]
 pub mod pango;
@@ -249,6 +249,11 @@ pub enum Item {
         top_pt: f64,
         baseline_pt: f64,
         height_pt: f64,
+        /// A header's or footer's line: the look, alignment and tab stops
+        /// of the line of its text it is on (`Document::header_lines`),
+        /// which a renderer draws it with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        story_line: Option<crate::model::HfLine>,
     },
     /// A list item's marker ("•", "3."), in the item's first-line font.
     Marker { para: usize, text: String, x_pt: f64, baseline_pt: f64 },
@@ -640,8 +645,10 @@ fn section_geometry(doc: &Document, k: usize, page: PageGeometry, opts: &LayoutO
     let (footer, footer_own) = crate::sections::footer(doc, k);
     let header_pictures: &[Run] = if header_own { &doc.header_pictures } else { &[] };
     let footer_pictures: &[Run] = if footer_own { &doc.footer_pictures } else { &[] };
-    let header_h = header_footer_height(header_pictures, header, doc.header_alignment, width, opts, shaper);
-    let footer_h = header_footer_height(footer_pictures, footer, doc.footer_alignment, width, opts, shaper);
+    let header_lines: &[HfLine] = if header_own { &doc.header_lines } else { &[] };
+    let footer_lines: &[HfLine] = if footer_own { &doc.footer_lines } else { &[] };
+    let header_h = header_footer_height(header_pictures, header, doc.header_alignment, header_lines, width, opts, shaper);
+    let footer_h = header_footer_height(footer_pictures, footer, doc.footer_alignment, footer_lines, width, opts, shaper);
     if header_h > 0.0 {
         geometry.margin_top_pt = geometry.margin_top_pt.max(opts.header_distance_pt + header_h);
     }
@@ -1047,6 +1054,7 @@ fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: us
         top_pt: top,
         baseline_pt: baseline,
         height_pt: height,
+        story_line: None,
     });
     for &(ch, x) in &lb.objects {
         let Some(run) = run_at(&para.runs, ch) else { continue };
@@ -1792,6 +1800,7 @@ impl<'o> Flow<'o> {
                         top_pt: y,
                         baseline_pt: y + line_ascent(p, lb, h),
                         height_pt: h,
+                        story_line: None,
                     });
                     y += h;
                 }
@@ -1807,13 +1816,15 @@ impl<'o> Flow<'o> {
             let section = page_sections.get(page.index).copied().unwrap_or(0);
             let (header, header_own) = crate::sections::header(doc, section);
             let (footer, footer_own) = crate::sections::footer(doc, section);
-            for (source, template, pictures, alignment) in [
-                (Source::Header, header, if header_own { doc.header_pictures.as_slice() } else { &[] }, doc.header_alignment),
-                (Source::Footer, footer, if footer_own { doc.footer_pictures.as_slice() } else { &[] }, doc.footer_alignment),
+            // A section's own header or footer has its text alone: the
+            // document's lines and pictures go with the document's.
+            for (source, template, pictures, alignment, story) in [
+                (Source::Header, header, if header_own { doc.header_pictures.as_slice() } else { &[] }, doc.header_alignment, if header_own { doc.header_lines.as_slice() } else { &[] }),
+                (Source::Footer, footer, if footer_own { doc.footer_pictures.as_slice() } else { &[] }, doc.footer_alignment, if footer_own { doc.footer_lines.as_slice() } else { &[] }),
             ] {
                 let row_h = picture_row_height(pictures, width);
                 let text_h = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
-                    header_footer_lines(&page_field_text(t, page.index + 1, total), alignment, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
+                    header_footer_lines(&page_field_text(t, page.index + 1, total), alignment, story, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
                 });
                 let top = match source {
                     Source::Header => opts.header_distance_pt,
@@ -1822,11 +1833,17 @@ impl<'o> Flow<'o> {
                 place_header_footer_pictures(page, pictures, left, width, top, height);
                 let Some(template) = template.filter(|t| !t.is_empty()) else { continue };
                 let text = page_field_text(template, page.index + 1, total);
-                let lines = header_footer_lines(&text, alignment, pictures, width, opts, shaper);
+                let lines = header_footer_lines(&text, alignment, story, pictures, width, opts, shaper);
                 // Under the pictures' row.
                 let mut y = top + row_h;
                 let chars: Vec<char> = text.chars().collect();
                 for (k, lb) in lines.iter().enumerate() {
+                    // The line of the text this one is on: as many breaks
+                    // before it.
+                    let story_line = (!story.is_empty()).then(|| {
+                        let n = chars[..lb.start.min(chars.len())].iter().filter(|&&c| c == '\n').count();
+                        story.get(n).cloned().unwrap_or(HfLine { alignment, ..Default::default() })
+                    });
                     page.items.push(Item::Line {
                         source: source.clone(),
                         line: k,
@@ -1839,6 +1856,7 @@ impl<'o> Flow<'o> {
                         top_pt: y,
                         baseline_pt: y + lb.ascent_pt,
                         height_pt: lb.natural_height(),
+                        story_line,
                     });
                     y += lb.natural_height();
                 }
@@ -1849,20 +1867,42 @@ impl<'o> Flow<'o> {
 }
 
 /// A header's or footer's text broken into lines across `width`, aligned
-/// as the document has it.
-fn shape_header_footer(text: &str, alignment: crate::model::Alignment, width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Vec<LineBox> {
-    shaper.shape(&ShapeRequest {
-        runs: &[Run::plain(text)],
-        heading: None,
-        code: false,
-        look: Look::Body,
-        alignment,
-        width_pt: width,
-        first_line_indent_pt: 0.0,
-        tab_stops: Vec::new(),
-        right_tab: false,
-        defaults: opts,
-    })
+/// as the document has it. With lines of its own (`story`), each line of
+/// the text is shaped alone in its look, alignment and tab stops, its
+/// char ranges counted in the whole text; a line past their end is
+/// `alignment`'s, in the body's look.
+fn shape_header_footer(text: &str, alignment: crate::model::Alignment, story: &[HfLine], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Vec<LineBox> {
+    let mut request = |runs: &[Run], alignment, tab_stops| {
+        shaper.shape(&ShapeRequest {
+            runs,
+            heading: None,
+            code: false,
+            look: Look::Body,
+            alignment,
+            width_pt: width,
+            first_line_indent_pt: 0.0,
+            tab_stops,
+            right_tab: false,
+            defaults: opts,
+        })
+    };
+    if story.is_empty() {
+        return request(&[Run::plain(text)], alignment, Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for (k, piece) in text.split('\n').enumerate() {
+        let line = story.get(k);
+        let run = Run { text: piece.to_string(), style: line.map(|l| l.look.clone()).unwrap_or_default() };
+        let shaped = request(&[run], line.map_or(alignment, |l| l.alignment), line.map(|l| l.tab_stops.clone()).unwrap_or_default());
+        out.extend(shaped.into_iter().map(|mut lb| {
+            lb.start += offset;
+            lb.end += offset;
+            lb
+        }));
+        offset += piece.chars().count() + 1;
+    }
+    out
 }
 
 /// The height of the row a header's or footer's pictures in line make:
@@ -1873,9 +1913,9 @@ fn picture_row_height(pictures: &[Run], width: f64) -> f64 {
 
 /// How tall a header or footer is: its pictures' row and its text, laid
 /// out for page 1.
-fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: crate::model::Alignment, width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> f64 {
+fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: crate::model::Alignment, story: &[HfLine], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> f64 {
     let text = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
-        header_footer_lines(&page_field_text(t, 1, 1), alignment, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
+        header_footer_lines(&page_field_text(t, 1, 1), alignment, story, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
     });
     picture_row_height(pictures, width) + text
 }
@@ -1883,8 +1923,8 @@ fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: cra
 /// The lines of a header's or footer's text under its pictures. The
 /// paragraph a letterhead's logo sits in reads as an empty first line;
 /// the pictures' row is that line.
-fn header_footer_lines(text: &str, alignment: crate::model::Alignment, pictures: &[Run], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Vec<LineBox> {
-    let mut lines = shape_header_footer(text, alignment, width, opts, shaper);
+fn header_footer_lines(text: &str, alignment: crate::model::Alignment, story: &[HfLine], pictures: &[Run], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Vec<LineBox> {
+    let mut lines = shape_header_footer(text, alignment, story, width, opts, shaper);
     if picture_row_height(pictures, width) > 0.0 && lines.len() > 1 && lines[0].start == lines[0].end {
         lines.remove(0);
     }

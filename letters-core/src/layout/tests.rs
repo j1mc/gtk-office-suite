@@ -461,6 +461,32 @@ fn a_header_picture_is_drawn_and_pushes_the_body_down() {
     assert_eq!(body_top, opts.header_distance_pt + 72.0 + LINE, "the body starts under the header, not at the 72pt margin");
 }
 
+/// Each line of a footer as its own: a page number at the right over a
+/// date at the left in a smaller face, each line as tall as its text, and
+/// drawn in its line's look.
+#[test]
+fn a_footers_lines_each_keep_their_own_alignment_and_look() {
+    use crate::model::{HfLine, RunStyle};
+    let mut d = doc_of(1, "x");
+    d.footer = Some("{page}\nOctober 2025".into());
+    let small = RunStyle { font_size_hp: Some(16), ..Default::default() };
+    d.footer_lines = vec![HfLine { alignment: Alignment::Right, ..Default::default() }, HfLine { look: small.clone(), ..Default::default() }];
+    let t = lay(&d);
+    let page = &t.pages[0];
+    let lines: Vec<(f64, f64, String, Option<HfLine>)> = page
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Line { source: Source::Footer, x_pt, height_pt, text, story_line, .. } => Some((*x_pt, *height_pt, text.clone(), story_line.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.iter().map(|l| l.2.as_str()).collect::<Vec<_>>(), ["1", "October 2025"]);
+    assert!((lines[0].0 + 6.0 - (page.width_pt - 72.0)).abs() < 1e-6, "the number ends at the right margin: {}", lines[0].0);
+    assert_eq!((lines[0].1, lines[1].0, lines[1].1), (LINE, 72.0, 10.0), "the date at the left margin, as tall as its 8pt");
+    assert_eq!(lines[1].3.as_ref().map(|l| &l.look), Some(&small), "drawn in its line's look");
+}
+
 /// A header at the right ends at the right margin, a footer centred sits
 /// mid-page.
 #[test]

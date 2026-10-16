@@ -191,7 +191,7 @@ pub fn float(document_xml: &str, floating: &[(String, String, ImageAnchor)], fir
 /// paragraph, where the reader finds them. Returns the part and its images
 /// as (relationship id, bytes, file name); a picture whose file cannot be
 /// read is left out.
-pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model::Run], alignment: crate::model::Alignment) -> (String, Vec<(String, Vec<u8>, String)>) {
+pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model::Run], alignment: crate::model::Alignment, lines: &[crate::model::HfLine]) -> (String, Vec<(String, Vec<u8>, String)>) {
     let mut images = Vec::new();
     let mut floating = Vec::new();
     let mut drawings = String::new();
@@ -218,21 +218,14 @@ pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model:
         images.push((rel, bytes, name));
     }
     let mut body = String::new();
-    let jc = match alignment {
-        crate::model::Alignment::Left => String::new(),
-        crate::model::Alignment::Center => "<w:pPr><w:jc w:val=\"center\"/></w:pPr>".to_string(),
-        crate::model::Alignment::Right => "<w:pPr><w:jc w:val=\"right\"/></w:pPr>".to_string(),
-        crate::model::Alignment::Justify => "<w:pPr><w:jc w:val=\"both\"/></w:pPr>".to_string(),
-    };
-    for (k, line) in text.split('\n').enumerate() {
+    for (k, text) in text.split('\n').enumerate() {
+        let own = lines.get(k);
         body.push_str("<w:p>");
-        body.push_str(&jc);
+        body.push_str(&line_properties(own.map_or(alignment, |l| l.alignment), own.map_or(&[], |l| l.tab_stops.as_slice())));
         if k == 0 {
             body.push_str(&drawings);
         }
-        if !line.is_empty() {
-            body.push_str(&format!("<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>", xml_attr(line)));
-        }
+        body.push_str(&line_runs(text, own.map(|l| &l.look)));
         body.push_str("</w:p>");
     }
     let tag = if is_header { "w:hdr" } else { "w:ftr" };
@@ -246,6 +239,89 @@ pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model:
     );
     let xml = if floating.is_empty() { xml } else { float(&xml, &floating, if is_header { 9700 } else { 9750 }) };
     (xml, images)
+}
+
+/// A header's or footer's paragraph properties: its alignment and tab
+/// stops (empty when it has neither).
+fn line_properties(alignment: crate::model::Alignment, tab_stops: &[crate::model::TabStop]) -> String {
+    use crate::model::{Alignment, TabAlign, TabLeader};
+    let jc = match alignment {
+        Alignment::Left => "",
+        Alignment::Center => "<w:jc w:val=\"center\"/>",
+        Alignment::Right => "<w:jc w:val=\"right\"/>",
+        Alignment::Justify => "<w:jc w:val=\"both\"/>",
+    };
+    let tabs: String = tab_stops
+        .iter()
+        .map(|t| {
+            let val = match t.align {
+                TabAlign::Left => "left",
+                TabAlign::Center => "center",
+                TabAlign::Right => "right",
+                TabAlign::Decimal => "decimal",
+            };
+            let leader = match t.leader {
+                TabLeader::None => "",
+                TabLeader::Dot | TabLeader::MiddleDot => " w:leader=\"dot\"",
+                TabLeader::Hyphen => " w:leader=\"hyphen\"",
+                TabLeader::Underscore => " w:leader=\"underscore\"",
+            };
+            format!("<w:tab w:val=\"{val}\" w:pos=\"{}\"{leader}/>", (t.pos_pt * 20.0).round() as i64)
+        })
+        .collect();
+    let tabs = if tabs.is_empty() { tabs } else { format!("<w:tabs>{tabs}</w:tabs>") };
+    if jc.is_empty() && tabs.is_empty() {
+        return String::new();
+    }
+    // `w:tabs` comes before `w:jc` in a paragraph's properties.
+    format!("<w:pPr>{tabs}{jc}</w:pPr>")
+}
+
+/// A header's or footer's line of text as runs in its look: its tabs as
+/// Word's tab elements, and "{page}" and "{total}" as PAGE and NUMPAGES
+/// fields whose result is in the look too.
+fn line_runs(text: &str, look: Option<&crate::model::RunStyle>) -> String {
+    let rpr = look.map(run_properties).unwrap_or_default();
+    let run = |t: &str| {
+        let t = xml_attr(t).replace('\t', "</w:t><w:tab/><w:t xml:space=\"preserve\">");
+        format!("<w:r>{rpr}<w:t xml:space=\"preserve\">{t}</w:t></w:r>")
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some((at, field, instr)) = [("{page}", "PAGE"), ("{total}", "NUMPAGES")].iter().filter_map(|(f, i)| rest.find(f).map(|a| (a, *f, *i))).min() {
+        if at > 0 {
+            out.push_str(&run(&rest[..at]));
+        }
+        out.push_str(&format!("<w:fldSimple w:instr=\" {instr} \"><w:r>{rpr}<w:t>1</w:t></w:r></w:fldSimple>"));
+        rest = &rest[at + field.len()..];
+    }
+    if !rest.is_empty() {
+        out.push_str(&run(rest));
+    }
+    out
+}
+
+/// The run properties a header's or footer's line is drawn with: font,
+/// weight, slant, colour and size, in `w:rPr`'s order.
+fn run_properties(look: &crate::model::RunStyle) -> String {
+    let mut p = String::new();
+    if let Some(f) = &look.font_family {
+        let f = xml_attr(f);
+        p.push_str(&format!("<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\" w:cs=\"{f}\"/>"));
+    }
+    if look.bold {
+        p.push_str("<w:b/>");
+    }
+    if look.italic {
+        p.push_str("<w:i/>");
+    }
+    if let Some(c) = &look.color {
+        p.push_str(&format!("<w:color w:val=\"{}\"/>", xml_attr(c)));
+    }
+    if let Some(sz) = look.font_size_hp {
+        p.push_str(&format!("<w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/>"));
+    }
+    if p.is_empty() { p } else { format!("<w:rPr>{p}</w:rPr>") }
 }
 
 /// A frame's `relativeFrom`, `text` naming the anchoring paragraph's.
