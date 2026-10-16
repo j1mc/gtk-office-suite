@@ -579,6 +579,30 @@ fn a_files_own_title_and_subtitle_styles_are_its_look() {
     assert_eq!(round_trip(&rt).paragraphs[1].runs[0].style.letter_spacing_tw, Some(15));
 }
 
+/// A page break in a table cell breaks nothing, as in Writer: the WGA
+/// form's logo cell opens with two, and its logo sits at the cell's top.
+/// They read as two blank lines and a page break before the table.
+#[test]
+fn a_page_break_in_a_table_cell_is_dropped() {
+    use letters_core::model::TableCell;
+    let mut d = Document::from_plain_text("");
+    d.paragraphs = vec![
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 0 }), ..Default::default() }, runs: vec![Run::plain("logo")] },
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 1 }), ..Default::default() }, runs: vec![Run::plain("Form CG02")] },
+        Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] },
+    ];
+    let rt = doctor_parts(&d, |parts| {
+        let doc = parts.get_mut("word/document.xml").unwrap();
+        let at = doc.find(">logo<").expect("the cell's text");
+        let run = doc[..at].rfind("<w:r>").or_else(|| doc[..at].rfind("<w:r ")).expect("its run");
+        doc.insert_str(run, "<w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"page\"/></w:r>");
+    });
+    let cell = &rt.paragraphs[0];
+    assert!(cell.style.table_cell.is_some());
+    assert_eq!(cell.text(), "logo");
+    assert!(!cell.style.page_break_before);
+}
+
 /// A border edge Word leaves off (`w:val="none"`) but gives a gap pads
 /// the paragraph above and below, as Writer does; the side edges do not
 /// set the text in. The questionnaire's Normal style puts 31pt of such
@@ -1881,6 +1905,23 @@ fn table_cell_fills_survive() {
     let mut d = Document::from_plain_text("after");
     d.insert_table_at(0, 1, 1);
     assert!(round_trip(&d).table_fills.is_empty());
+}
+
+/// A cell's bare sides survive a save and reopen (`w:tcBorders` with
+/// `w:val="none"` over the table's grid).
+#[test]
+fn a_cells_bare_sides_survive() {
+    use letters_core::{CellEdges, OpenEdges};
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 2, 2);
+    let want = vec![
+        CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+        CellEdges { row: 0, col: 1, open: OpenEdges { left: true, top: true, ..Default::default() } },
+    ];
+    d.table_open_edges.insert(table, want.clone());
+    let rt = round_trip(&d);
+    assert_eq!(rt.table_open_edges.values().cloned().collect::<Vec<_>>(), [want]);
+    assert!(rt.table_unruled.is_empty(), "the rest of the grid stays ruled");
 }
 
 /// A table's cell padding survives a save and reopen (`w:tblCellMar`); a

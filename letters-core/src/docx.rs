@@ -1208,7 +1208,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                             cell_index += 1;
                             // An empty paragraph is a line of the cell:
                             // a form's answer box is a cell of them.
-                            let para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
+                            let mut para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
+                            drop_cell_page_breaks(&mut para, &cp);
                             keep(para);
                         }
                         // A table nested in a cell belongs to its outer
@@ -1277,7 +1278,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_rows = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, row_heights(t)?))).collect();
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
-    let table_unruled = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
+    let table_unruled: std::collections::BTreeSet<u32> = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
+    let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
 
     let mut read = Document {
         paragraphs,
@@ -1298,6 +1300,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_fills,
         table_padding,
         table_unruled,
+        table_open_edges,
         sections: Vec::new(),
         next_section_id: 0,
     };
@@ -1442,6 +1445,28 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
     (!fills.is_empty()).then_some(fills)
 }
 
+/// The cells whose own borders (`w:tcBorders`) leave a side without a
+/// rule (`w:val="nil"` or `"none"`), at their grid columns.
+fn cell_open_edges(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellEdges>> {
+    use rdocx::CellBorderEdge as C;
+    let mut edges = Vec::new();
+    for ri in 0..table.row_count() {
+        let Some(row) = table.row(ri) else { continue };
+        let mut col = 0u32;
+        for ci in 0..row.cell_count() {
+            let Some(cell) = row.cell(ci) else { continue };
+            let at = col;
+            col += cell.grid_span().unwrap_or(1).max(1);
+            let open = |e: C| cell.border(e).is_some_and(|b| matches!(b.style(), "none" | "nil"));
+            let open = crate::model::OpenEdges { top: open(C::Top), bottom: open(C::Bottom), left: open(C::Left), right: open(C::Right) };
+            if open.any() {
+                edges.push(crate::model::CellEdges { row: ri as u32, col: at, open });
+            }
+        }
+    }
+    (!edges.is_empty()).then_some(edges)
+}
+
 /// Whether a table draws any rule: a visible edge of its own borders
 /// (`w:tblBorders`), its table style's (up the `w:basedOn` chain, as
 /// "Table Grid" gives one), or any of its cells' (`w:tcBorders`). Word's
@@ -1489,9 +1514,20 @@ fn row_heights(table: &rdocx::TableRef<'_>) -> Option<Vec<Option<crate::model::R
     heights.iter().any(Option::is_some).then_some(heights)
 }
 
-/// A table's column widths in points: its first row's cell widths, when
-/// every cell gives one in absolute units.
+/// A table's column widths in points: its grid's, else its first row's
+/// cell widths, when every cell gives one in absolute units.
 fn column_widths(table: &rdocx::TableRef<'_>) -> Option<Vec<f64>> {
+    // The table's grid (`w:tblGrid`), as Writer lays it out: the first
+    // row may be one cell across every column.
+    let grid: Vec<f64> = table.grid_widths().iter().map(|w| w.to_pt()).collect();
+    let spanned = (0..table.row_count())
+        .filter_map(|r| table.row(r))
+        .map(|row| (0..row.cell_count()).filter_map(|c| row.cell(c)).map(|c| c.grid_span().unwrap_or(1).max(1) as usize).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    if grid.len() == spanned && grid.iter().all(|x| *x > 0.0) {
+        return Some(grid);
+    }
     let row = table.row(0)?;
     let widths: Option<Vec<f64>> = (0..row.cell_count()).map(|c| row.cell(c)?.width().map(|w| w.to_pt())).collect();
     widths.filter(|w| !w.is_empty() && w.iter().all(|x| *x > 0.0))
@@ -1842,6 +1878,17 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             for fill in doc.table_fills.get(&tc0.table).into_iter().flatten() {
                 if let Some(mut cell) = tbl.cell(fill.row as usize, fill.col as usize) {
                     cell.set_shading(&fill.color);
+                }
+            }
+            // A cell's open sides, over the table's grid.
+            for e in doc.table_open_edges.get(&tc0.table).into_iter().flatten().filter(|_| !doc.table_unruled.contains(&tc0.table)) {
+                use rdocx::CellBorderEdge as C;
+                if let Some(mut cell) = tbl.cell(e.row as usize, e.col as usize) {
+                    for (open, side) in [(e.open.top, C::Top), (e.open.bottom, C::Bottom), (e.open.left, C::Left), (e.open.right, C::Right)] {
+                        if open {
+                            let _ = cell.set_border_checked(side, rdocx::BorderStyle::None, 0, "auto");
+                        }
+                    }
                 }
             }
             if let Some(heights) = doc.table_rows.get(&tc0.table) {
@@ -2528,6 +2575,48 @@ struct RunPageBreak {
     /// After all of this paragraph's text, so the break belongs to the
     /// next paragraph.
     trailing: bool,
+}
+
+/// A page break in a table cell breaks nothing: Writer lays the cell out
+/// as if it were not there (the WGA form's logo cell opens with two, and
+/// its logo sits at the top of the cell). Drop the flag and the newlines
+/// the breaks before and after the cell's text left in it.
+fn drop_cell_page_breaks(para: &mut Paragraph, p: &rdocx::ParagraphRef<'_>) {
+    let (mut before, mut after, mut seen_text) = (0usize, 0usize, false);
+    for r in p.runs() {
+        for item in r.items() {
+            match item {
+                rdocx::RunItemRef::Break(rdocx::BreakKind::Page) if seen_text => after += 1,
+                rdocx::RunItemRef::Break(rdocx::BreakKind::Page) => before += 1,
+                rdocx::RunItemRef::Text(t) if !t.is_empty() => {
+                    seen_text = true;
+                    after = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+    if before + after == 0 {
+        return;
+    }
+    para.style.page_break_before = false;
+    let strip = |runs: &mut dyn Iterator<Item = &mut Run>, mut n: usize, front: bool| {
+        for r in runs {
+            if n == 0 || r.style.image.is_some() || r.style.footnote.is_some() {
+                break;
+            }
+            while n > 0 && (if front { r.text.starts_with('\n') } else { r.text.ends_with('\n') }) {
+                if front { r.text.remove(0); } else { r.text.pop(); }
+                n -= 1;
+            }
+            if !r.text.is_empty() {
+                break;
+            }
+        }
+    };
+    strip(&mut para.runs.iter_mut(), before, true);
+    strip(&mut para.runs.iter_mut().rev(), after, false);
+    para.runs.retain(|r| !r.text.is_empty() || r.style.image.is_some() || r.style.footnote.is_some());
 }
 
 fn run_page_break(p: &rdocx::ParagraphRef<'_>) -> RunPageBreak {
@@ -3449,6 +3538,34 @@ mod tests {
         let saved = dir.path().join("saved.docx");
         super::write(&doc, &saved).unwrap();
         assert_eq!(breaks(&super::read(saved.to_str().unwrap()).unwrap()), want);
+    }
+
+    /// A table's columns are its grid's (`w:tblGrid`), as Writer lays them
+    /// out: the crime supervisor form's table opens with a title row of
+    /// one cell across all five columns. Read from that row, the table had
+    /// one width for five columns and was drawn with equal columns, its
+    /// 1cm number column as wide as the rest. A grid that does not match
+    /// the cells falls back to the first row's widths.
+    #[test]
+    fn a_tables_columns_are_its_grids() {
+        let dir = tempfile::tempdir().unwrap();
+        let cell = |w: u32, span: u32, text: &str| {
+            let span = if span > 1 { format!("<w:gridSpan w:val=\"{span}\"/>") } else { String::new() };
+            format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr>{}</w:tc>", para(text))
+        };
+        let table = |grid: &[u32]| {
+            let grid: String = grid.iter().map(|w| format!("<w:gridCol w:w=\"{w}\"/>")).collect();
+            format!(
+                "<w:tbl><w:tblGrid>{grid}</w:tblGrid><w:tr>{}</w:tr><w:tr>{}{}{}</w:tr></w:tbl>{}",
+                cell(6000, 3, "title"), cell(500, 1, "a"), cell(3000, 1, "b"), cell(2500, 1, "c"), para("after")
+            )
+        };
+        let widths = |grid: &[u32], name| {
+            let doc = super::read(docx_with_body(dir.path(), &table(grid), name).to_str().unwrap()).unwrap();
+            doc.table_columns.get(&0).cloned()
+        };
+        assert_eq!(widths(&[567, 3000, 2500], "grid.docx"), Some(vec![28.35, 150.0, 125.0]));
+        assert_eq!(widths(&[6000], "short.docx"), Some(vec![300.0]), "a grid of the wrong count gives way to the first row");
     }
 
     /// A table nested in a cell keeps its text, in its outer cell, in

@@ -164,6 +164,24 @@ fn indents_and_alignment_position_lines() {
     assert!((line1_x + width - (595.3 - 72.0)).abs() < 1e-6, "right-aligned lines end at the right margin");
 }
 
+/// Two paragraphs of one cell stand the larger of the space between them
+/// apart, as in the body (Writer: 4.5pt after and 4.5pt before is 4.5pt
+/// in a cell too); the cell's first and last keep theirs.
+#[test]
+fn a_cells_paragraphs_collapse_the_space_between_them() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let para = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, space_before_pt: 4.5, space_after_pt: 4.5, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [para("one"), para("two")]);
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops[1] - tops[0], LINE + 4.5, "{tops:?}");
+    let height = t.pages[0].items.iter().find_map(|i| match i { Item::Cell { height_pt, .. } => Some(*height_pt), _ => None }).unwrap();
+    assert_eq!(height, 4.5 + LINE + 4.5 + LINE + 4.5 + CELL_RULE_PT);
+}
+
 /// An unruled table's cells draw no rule, and its rows hold no rule's
 /// height: a one-line row is its line.
 #[test]
@@ -191,6 +209,23 @@ fn a_table_after_a_page_break_starts_a_page() {
     assert_eq!(t.pages.len(), 2);
     assert!(!t.pages[0].items.iter().any(|i| matches!(i, Item::Cell { .. })));
     assert!(t.pages[1].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+}
+
+/// A cell's bare sides reach the painter with it; its neighbours keep
+/// their own.
+#[test]
+fn a_cells_bare_sides_are_laid_with_it() {
+    use crate::model::{CellEdges, OpenEdges};
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 2);
+    let bare = OpenEdges { right: true, ..Default::default() };
+    d.table_open_edges.insert(table, vec![CellEdges { row: 0, col: 0, open: bare }]);
+    let open: Vec<(u32, OpenEdges)> = lay(&d).pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Cell { col, open, .. } => Some((*col, *open)), _ => None })
+        .collect();
+    assert_eq!(open, [(0, bare), (1, OpenEdges::default())]);
 }
 
 #[test]
