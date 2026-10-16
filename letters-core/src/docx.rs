@@ -1195,7 +1195,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
                             cell_index += 1;
                             // An empty paragraph is a line of the cell:
                             // a form's answer box is a cell of them.
-                            let para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
+                            let mut para = map_paragraph(&doc, &cp, table.style_id(), raw_cell);
+                            drop_cell_page_breaks(&mut para, &cp);
                             keep(para);
                         }
                         // A table nested in a cell belongs to its outer
@@ -2503,6 +2504,48 @@ struct RunPageBreak {
     /// After all of this paragraph's text, so the break belongs to the
     /// next paragraph.
     trailing: bool,
+}
+
+/// A page break in a table cell breaks nothing: Writer lays the cell out
+/// as if it were not there (the WGA form's logo cell opens with two, and
+/// its logo sits at the top of the cell). Drop the flag and the newlines
+/// the breaks before and after the cell's text left in it.
+fn drop_cell_page_breaks(para: &mut Paragraph, p: &rdocx::ParagraphRef<'_>) {
+    let (mut before, mut after, mut seen_text) = (0usize, 0usize, false);
+    for r in p.runs() {
+        for item in r.items() {
+            match item {
+                rdocx::RunItemRef::Break(rdocx::BreakKind::Page) if seen_text => after += 1,
+                rdocx::RunItemRef::Break(rdocx::BreakKind::Page) => before += 1,
+                rdocx::RunItemRef::Text(t) if !t.is_empty() => {
+                    seen_text = true;
+                    after = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+    if before + after == 0 {
+        return;
+    }
+    para.style.page_break_before = false;
+    let strip = |runs: &mut dyn Iterator<Item = &mut Run>, mut n: usize, front: bool| {
+        for r in runs {
+            if n == 0 || r.style.image.is_some() || r.style.footnote.is_some() {
+                break;
+            }
+            while n > 0 && (if front { r.text.starts_with('\n') } else { r.text.ends_with('\n') }) {
+                if front { r.text.remove(0); } else { r.text.pop(); }
+                n -= 1;
+            }
+            if !r.text.is_empty() {
+                break;
+            }
+        }
+    };
+    strip(&mut para.runs.iter_mut(), before, true);
+    strip(&mut para.runs.iter_mut().rev(), after, false);
+    para.runs.retain(|r| !r.text.is_empty() || r.style.image.is_some() || r.style.footnote.is_some());
 }
 
 fn run_page_break(p: &rdocx::ParagraphRef<'_>) -> RunPageBreak {
