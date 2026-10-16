@@ -164,6 +164,24 @@ fn indents_and_alignment_position_lines() {
     assert!((line1_x + width - (595.3 - 72.0)).abs() < 1e-6, "right-aligned lines end at the right margin");
 }
 
+/// Two paragraphs of one cell stand the larger of the space between them
+/// apart, as in the body (Writer: 4.5pt after and 4.5pt before is 4.5pt
+/// in a cell too); the cell's first and last keep theirs.
+#[test]
+fn a_cells_paragraphs_collapse_the_space_between_them() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let para = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, space_before_pt: 4.5, space_after_pt: 4.5, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [para("one"), para("two")]);
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops[1] - tops[0], LINE + 4.5, "{tops:?}");
+    let height = t.pages[0].items.iter().find_map(|i| match i { Item::Cell { height_pt, .. } => Some(*height_pt), _ => None }).unwrap();
+    assert_eq!(height, 4.5 + LINE + 4.5 + LINE + 4.5 + CELL_RULE_PT);
+}
+
 #[test]
 fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
     let mut d = doc_of(1, "after");
