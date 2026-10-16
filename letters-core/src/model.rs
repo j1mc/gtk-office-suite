@@ -639,6 +639,11 @@ pub struct Document {
     /// A cell not listed is ruled all round.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_open_edges: std::collections::BTreeMap<u32, Vec<CellEdges>>,
+    /// Each table's cells set lower than the top, by table id: a form's
+    /// label centred against a tall answer cell (`w:vAlign`,
+    /// `style:vertical-align`). A cell not listed sits at the top.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_valign: std::collections::BTreeMap<u32, Vec<CellVAlign>>,
     /// The document's sections when its parts have different pages,
     /// headers or footers (`crate::sections`, LET-005S); empty for a
     /// document of one section, whose page is `page`.
@@ -726,6 +731,31 @@ pub struct CellEdges {
     pub row: u32,
     pub col: u32,
     pub open: OpenEdges,
+}
+
+/// Where a table cell's content sits in a row taller than it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VAlign {
+    Center,
+    Bottom,
+}
+
+impl VAlign {
+    /// The share of the cell's spare height above its content.
+    pub fn share(self) -> f64 {
+        match self {
+            VAlign::Center => 0.5,
+            VAlign::Bottom => 1.0,
+        }
+    }
+}
+
+/// A table cell set lower than the top (`VAlign`), at its grid position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellVAlign {
+    pub row: u32,
+    pub col: u32,
+    pub align: VAlign,
 }
 
 /// A table row's height from the file: at least `pt` (Word's `atLeast`,
@@ -824,6 +854,7 @@ impl Document {
             table_padding: Default::default(),
             table_unruled: Default::default(),
             table_open_edges: Default::default(),
+            table_valign: Default::default(),
             sections: Vec::new(),
             next_section_id: 0,
         }
@@ -1099,6 +1130,7 @@ impl Document {
         self.table_padding.remove(&table);
         self.table_unruled.remove(&table);
         self.table_open_edges.remove(&table);
+        self.table_valign.remove(&table);
         if rows == 0 || cols == 0 {
             return table;
         }
@@ -1281,6 +1313,16 @@ impl Document {
             fills.retain_mut(|f| match to(f.row, f.col) {
                 Some((row, col)) => {
                     (f.row, f.col) = (row, col);
+                    true
+                }
+                None => false,
+            });
+        }
+        // So does where its content sits.
+        if let Some(cells) = self.table_valign.get_mut(&table) {
+            cells.retain_mut(|c| match to(c.row, c.col) {
+                Some((row, col)) => {
+                    (c.row, c.col) = (row, col);
                     true
                 }
                 None => false,

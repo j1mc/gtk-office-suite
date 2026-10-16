@@ -30,7 +30,7 @@ pub mod toc;
 pub mod track;
 pub mod word_count;
 
-pub use model::{Alignment, BorderStyle, CellEdges, CellFill, CellSpan, DocSection, Document, LineHeight, ListKind, ListLabel, NumberFormat, OpenEdges, PageGeometry, Paragraph, ParagraphLayout, ParagraphRange, ParaBorder, ParaBorders, ParaStyle, Comment, Revision, RevisionKind, RowHeight, Run, RunStyle, StylePatch, TabAlign, TabLeader, TabStop, TableCell, style_readout, CellPadding};
+pub use model::{Alignment, BorderStyle, CellEdges, CellFill, CellSpan, CellVAlign, VAlign, DocSection, Document, LineHeight, ListKind, ListLabel, NumberFormat, OpenEdges, PageGeometry, Paragraph, ParagraphLayout, ParagraphRange, ParaBorder, ParaBorders, ParaStyle, Comment, Revision, RevisionKind, RowHeight, Run, RunStyle, StylePatch, TabAlign, TabLeader, TabStop, TableCell, style_readout, CellPadding};
 pub use review::{base_direction, table_of_contents, BidiDirection, TocEntry};
 pub use session::DocumentSession;
 pub use structured::StructuredEditor;
