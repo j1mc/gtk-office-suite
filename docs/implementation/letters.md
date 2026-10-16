@@ -355,6 +355,8 @@ SH-005).
 
 **Acceptance:** two-section Writer files (portrait-to-landscape, 1-to-2 columns, changed margins/headers) survive both formats both ways with correct pagination; single-section corpus byte-stable; SH-003 recovery carries the vector.
 
+**Status (PR #1580):** landed. `letters-core/src/sections.rs` holds the model (`Document.sections`, `DocSection`, `ParagraphRange`, `Op::SetSections`; edits follow sections and undo restores them verbatim); layout lays each section on its own pages; Page Setup edits the caret's section, Insert/Remove Section Break are `app.insert-section-break`/`app.remove-section-break`; DOCX writes and reads a `w:sectPr` per section, ODT a master page per section (Writer's `text:section` columns map to the section). Verified by name: `multi_section_geometry_survives_writer_both_ways` (nightly oracle), `section_delete_restores_ranges_and_ids`, `table_never_splits_across_section_break`, `recovery_snapshot_carries_the_section_vector`, `a_copy_carries_its_section_breaks_into_a_paste`, `LettersSectionSetupSmoke`, render fixture `letters/mixed-sections` A/B green. Unmodelled: continuous/odd/even breaks (next-page), unequal columns, page-number restarts — each a loss finding (`section-kinds`, `section-unequal-columns`, `page-number-restart`); first/left page headers and per-section header pictures remain document-level.
+
 ---
 
 ## LET-006 — Bidi paragraph direction (currently unavailable)

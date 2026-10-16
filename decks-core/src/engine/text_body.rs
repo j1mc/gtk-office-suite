@@ -11,7 +11,7 @@
 //! All lengths are model units: the 960-wide slide, 96 per inch, so one
 //! point is 4/3 of a unit.
 
-use letters_core::model::Run;
+use letters_core::model::{Run, RunStyle};
 
 /// Horizontal alignment of a paragraph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -387,6 +387,27 @@ pub fn paragraphs(runs: &[Run]) -> Vec<Vec<Run>> {
     out
 }
 
+/// Each paragraph's opening run style: the run its first character — or,
+/// for a blank paragraph, its break — was written in. `paragraphs` keeps
+/// no run for a blank paragraph, so this is what sizes its line: the empty
+/// 14pt paragraphs leading a figure tile are 14pt lines, not lines in the
+/// deck's default size (#1397).
+pub fn paragraph_lead_styles(runs: &[Run]) -> Vec<Option<RunStyle>> {
+    let mut out: Vec<Option<RunStyle>> = vec![None];
+    for run in runs {
+        let mut pieces = run.text.split('\n').peekable();
+        while pieces.next().is_some() {
+            if let Some(last @ None) = out.last_mut() {
+                *last = Some(run.style.clone());
+            }
+            if pieces.peek().is_some() {
+                out.push(None);
+            }
+        }
+    }
+    out
+}
+
 /// The marker drawn before each paragraph, if any: the bullet character,
 /// or the automatic number counted within a run of numbered paragraphs at
 /// the same level. An empty paragraph shows no marker (and a numbered one
@@ -476,7 +497,6 @@ fn roman(mut n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use letters_core::model::RunStyle;
 
     fn run(t: &str, bold: bool) -> Run {
         Run { text: t.into(), style: RunStyle { bold, ..Default::default() } }
@@ -490,6 +510,19 @@ mod tests {
         assert_eq!(texts, ["One two", "Three", "", "Five"]);
         // The styles stay with their pieces.
         assert!(paras[0][1].style.bold && paras[1][0].style.bold && !paras[0][0].style.bold);
+    }
+
+    #[test]
+    fn a_blank_paragraph_leads_with_the_run_its_break_is_in() {
+        let mut big = run("\n\n6,046", true);
+        big.style.font_size_hp = Some(28);
+        let runs = vec![run("Tile", false), run("\n", false), big];
+        let lead = paragraph_lead_styles(&runs);
+        assert_eq!(lead.len(), paragraphs(&runs).len());
+        assert!(!lead[0].as_ref().unwrap().bold, "Tile");
+        assert!(!lead[1].as_ref().unwrap().bold, "the first blank one opens in the plain run's break");
+        assert_eq!(lead[2].as_ref().unwrap().font_size_hp, Some(28), "the second in the figure's run");
+        assert_eq!(lead[3].as_ref().unwrap().font_size_hp, Some(28));
     }
 
     #[test]

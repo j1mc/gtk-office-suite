@@ -155,11 +155,16 @@ fn typeset_with_starts(container: &PageContainer, buf: &gtk::TextBuffer) -> (let
 }
 
 /// Put the selection on `widget`'s clipboard as the suite fragment, with
-/// HTML and plain text beside it. False with nothing selected.
+/// HTML and plain text beside it, and the section breaks inside it for
+/// Letters (`sections::CLIPBOARD_MIME`). False with nothing selected.
 pub(crate) fn copy_selection(widget: &gtk::Widget, buf: &gtk::TextBuffer) -> bool {
     let Some((start, end)) = buf.selection_bounds() else { return false };
-    let frag = crate::bridge::selection_fragment(buf, start.offset() as usize, end.offset() as usize);
-    let provider = suite_common::clipboard::provider(letters_core::fragment::MIME, &frag.to_json(), &frag.to_html(), &frag.to_plain());
+    let (start, end) = (start.offset() as usize, end.offset() as usize);
+    let frag = crate::bridge::selection_fragment(buf, start, end);
+    let breaks = crate::bridge::selection_section_breaks(buf, start, end);
+    let breaks_json = (!breaks.is_empty()).then(|| serde_json::to_string(&breaks).ok()).flatten();
+    let extra: Vec<(&str, &str)> = breaks_json.iter().map(|json| (letters_core::sections::CLIPBOARD_MIME, json.as_str())).collect();
+    let provider = suite_common::clipboard::provider_with(letters_core::fragment::MIME, &frag.to_json(), &frag.to_html(), &frag.to_plain(), &extra);
     let _ = widget.clipboard().set_content(Some(&provider));
     true
 }
@@ -196,16 +201,29 @@ pub(crate) fn connect_suite_clipboard(widget: &gtk::Widget, buf: &gtk::TextBuffe
                 let clipboard = ed.clipboard();
                 if suite_common::clipboard::offers(&clipboard, letters_core::fragment::MIME) {
                     let buf = buf.clone();
+                    // The page a document with no page of its own lays
+                    // out on: a pasted section break's first section's.
+                    let default_page = ed
+                        .ancestor(PageContainer::static_type())
+                        .and_then(|w| w.downcast::<PageContainer>().ok())
+                        .map_or_else(Default::default, |pc| layout_options(&pc).page);
+                    let with_breaks = suite_common::clipboard::offers(&clipboard, letters_core::sections::CLIPBOARD_MIME);
+                    let clip = clipboard.clone();
                     suite_common::clipboard::read_string(
                         &clipboard,
                         letters_core::fragment::MIME,
                         move |json| {
-                            if let Some(frag) = json
-                                .as_deref()
-                                .and_then(letters_core::fragment::Fragment::from_json)
-                            {
+                            let Some(frag) = json.as_deref().and_then(letters_core::fragment::Fragment::from_json) else { return };
+                            if !with_breaks {
                                 insert_fragment(&buf, &frag);
+                                return;
                             }
+                            let buf = buf.clone();
+                            suite_common::clipboard::read_string(&clip, letters_core::sections::CLIPBOARD_MIME, move |breaks| {
+                                let breaks: Vec<letters_core::sections::CarriedBreak> =
+                                    breaks.as_deref().and_then(|b| serde_json::from_str(b).ok()).unwrap_or_default();
+                                crate::insert::insert_fragment_with_breaks(&buf, &frag, &breaks, default_page);
+                            });
                         },
                     );
                     return gtk4::glib::Propagation::Stop;

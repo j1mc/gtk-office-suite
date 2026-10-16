@@ -40,18 +40,58 @@ permissions:
   contents: read
 
 jobs:
-  # One job per app, in parallel: each builds only its own app, renders its
-  # fixtures, and gates on its own verdicts (the ratchet in run.sh). The
-  # combine job below turns their outputs into one report, PR comment,
-  # proposed baseline and issue sync.
+  # Which apps a pull request can change the rendering of: each app's crate
+  # and every workspace crate it links (derived from the Cargo manifests),
+  # the lockfile, the workspace manifest, the lab and this workflow
+  # (tools/render-lab/real_scope.py, the scope render-real.yml uses). Only
+  # those apps get lab jobs; a docs-only change starts none, and a
+  # Decks-only change does not render Letters and Tables, which would render
+  # as on main. Push to main, the schedule and a dispatch render every app.
+  scope:
+    name: Render scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      apps: ${{ steps.scope.outputs.apps }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # On a pull request this is its merge commit; the scope diffs it
+          # against its first parent, the base branch it merges into.
+          fetch-depth: 2
+
+      - name: Which apps does the change reach?
+        id: scope
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            source=(--all)
+          else
+            git rev-parse --verify -q HEAD^2 >/dev/null || {
+              echo "::error::expected the pull request's merge commit at HEAD; cannot tell what it changes"
+              exit 1
+            }
+            git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+            source=(--changed "$RUNNER_TEMP/changed.txt")
+          fi
+          apps=$(python3 tools/render-lab/real_scope.py --workflow .github/workflows/render-parity.yml "${source[@]}")
+          echo "apps=$apps" | tee -a "$GITHUB_OUTPUT"
+          echo "Apps rendered in this run: \`$apps\` (tools/render-lab/real_scope.py)." >> "$GITHUB_STEP_SUMMARY"
+
+  # One job per app in scope, in parallel: each builds only its own app,
+  # renders its fixtures, and gates on its own verdicts (the ratchet in
+  # run.sh). The combine job below turns their outputs into one report, PR
+  # comment, proposed baseline and issue sync, and is the verdict: it runs
+  # on every pull request and fails when a lab in scope did not succeed.
   lab:
     name: Render lab (${{ matrix.app }})
+    needs: scope
+    if: needs.scope.outputs.apps != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        app: [letters, tables, decks]
+        app: ${{ fromJSON(needs.scope.outputs.apps) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -100,11 +140,13 @@ jobs:
 
   report:
     name: Tiers A+B vs LibreOffice
-    needs: lab
+    needs: [scope, lab]
     # Not on a cancelled run: a newer push cancels the labs part-way, and
     # comparing what they had captured by then reported every fixture they
     # never reached as a regression to "missing" (PR #1222, 19 Letters
-    # fixtures). A lab that *failed* is still compared and reported.
+    # fixtures). A lab that *failed* is still compared and reported, and
+    # then fails this job too; so does a scope job that failed. A lab that
+    # was skipped because no app is in scope is not a failure.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -113,11 +155,41 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      # Which apps this run rendered. None: a pull request that reaches no
+      # app's rendering passes here in seconds, with nothing compared.
+      - name: Apps in scope
+        id: inscope
+        env:
+          SCOPE: ${{ needs.scope.result }}
+          APPS: ${{ needs.scope.outputs.apps }}
+        run: |
+          if [ "$SCOPE" != success ]; then
+            echo "::error::the scope job ended '$SCOPE', so no app's rendering was judged"
+            exit 1
+          fi
+          {
+            for app in letters tables decks; do
+              echo "$app=$(jq -c --arg app "$app" 'index($app) != null' <<<"$APPS")"
+            done
+            echo "any=$(jq -c 'length > 0' <<<"$APPS")"
+            echo "args=$(jq -r 'map("--app " + .) | join(" ")' <<<"$APPS")"
+            echo "skipped=$(jq -r '["letters", "tables", "decks"] - . | join(", ")' <<<"$APPS")"
+          } | tee -a "$GITHUB_OUTPUT"
+          if [ "$(jq length <<<"$APPS")" -eq 0 ]; then
+            mkdir -p render-lab-out
+            { echo "## Render parity vs LibreOffice"; echo
+              echo "Nothing this pull request changes reaches an app's rendering (tools/render-lab/real_scope.py), so no fixture was rendered: every app would render as on main."
+            } > render-lab-out/summary.md
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.inscope.outputs.any == 'true'
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        if: steps.inscope.outputs.any == 'true'
 
       - name: Build render-lab image
+        if: steps.inscope.outputs.any == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tools/render-lab
@@ -140,6 +212,7 @@ jobs:
       # out of the report. A lab that uploaded nothing leaves its download
       # failed (continue-on-error) and is named by the check below.
       - name: Download captures (letters)
+        if: steps.inscope.outputs.letters == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -147,6 +220,7 @@ jobs:
           path: render-lab-out/letters
 
       - name: Download captures (tables)
+        if: steps.inscope.outputs.tables == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -154,6 +228,7 @@ jobs:
           path: render-lab-out/tables
 
       - name: Download captures (decks)
+        if: steps.inscope.outputs.decks == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -161,36 +236,53 @@ jobs:
           path: render-lab-out/decks
 
       - name: Check every app's captures arrived
+        if: steps.inscope.outputs.any == 'true'
+        env:
+          APPS: ${{ needs.scope.outputs.apps }}
         run: |
           mkdir -p render-lab-out
           ls render-lab-out
-          for app in letters tables decks; do
+          for app in $(jq -r '.[]' <<<"$APPS"); do
             n=$(find "render-lab-out/$app" -name '*.png' 2>/dev/null | wc -l)
             echo "$app: $n captures"
             [ "$n" -gt 0 ] || echo "::warning::no render-lab captures for $app; its lab job did not upload, so it is missing from this report"
           done
 
-      # The whole-suite report, and the baseline this run would lock in: an
+      # The report over the apps in scope, and the baseline this run would
+      # lock in (merged, so the other apps' verdicts stay as committed): an
       # agent or reviewer can take `baseline.proposed.json` from the
       # artifact instead of re-running the lab locally.
-      - name: Compare all apps
+      - name: Compare the apps in scope
+        if: steps.inscope.outputs.any == 'true'
         id: compare
+        env:
+          APP_ARGS: ${{ steps.inscope.outputs.args }}
         run: |
-          docker run --rm -v "$PWD:/workspace" -w /workspace render-lab bash -c '
+          docker run --rm -e APP_ARGS -v "$PWD:/workspace" -w /workspace render-lab bash -c '
             python3 tools/render-lab/fixtures.py render-lab-out/fixtures >/dev/null &&
             python3 tools/render-lab/edit_journeys.py render-lab-out/fixtures --manifest-only &&
             cp tools/render-lab/baseline.json render-lab-out/baseline.proposed.json &&
-            python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out \
+            python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
               --baseline render-lab-out/baseline.proposed.json --update-baseline >/dev/null &&
-            python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out \
+            python3 tools/render-lab/compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
               --baseline tools/render-lab/baseline.json'
 
       - name: Job summary
         if: always()
-        run: cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        env:
+          ANY: ${{ steps.inscope.outputs.any }}
+          SKIPPED: ${{ steps.inscope.outputs.skipped }}
+        run: |
+          # The compare step's container wrote render-lab-out as root; the
+          # runner's user cannot append to it until it owns it.
+          sudo chown -R "$(id -u):$(id -g)" render-lab-out 2>/dev/null || true
+          if [ "$ANY" = true ] && [ -n "$SKIPPED" ] && [ -f render-lab-out/summary.md ]; then
+            { echo; echo "Not rendered: $SKIPPED. Nothing this pull request changes reaches them (tools/render-lab/real_scope.py)."; } >> render-lab-out/summary.md
+          fi
+          cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Upload report
-        if: always()
+        if: always() && steps.inscope.outputs.any == 'true'
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -211,17 +303,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPORT: ${{ steps.upload.outputs.artifact-url }}
+          ANY: ${{ steps.inscope.outputs.any }}
         run: |
           [ -f render-lab-out/summary.md ] || exit 0
           { echo '<!-- render-parity-comment -->'; cat render-lab-out/summary.md
-            echo; echo "Side-by-side report (LibreOffice | ours | diff), with \`baseline.proposed.json\`: ${REPORT}"; } > comment.md
+            if [ "$ANY" = true ]; then
+              echo; echo "Side-by-side report (LibreOffice | ours | diff), with \`baseline.proposed.json\`: ${REPORT}"
+            fi; } > comment.md
           id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
                --jq '.[] | select(.body | startswith("<!-- render-parity-comment -->")) | .id' | head -1)
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -F body=@comment.md >/dev/null
-          else
+          elif [ "$ANY" = true ]; then
             gh pr comment "$PR" --body-file comment.md
           fi
+          # Rendered nothing and never commented: nothing to say.
 
       - name: Sync render-parity issues
         if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.lab.result == 'success' && hashFiles('render-lab-out/summary.json') != ''
@@ -232,25 +328,41 @@ jobs:
           --repo "${GITHUB_REPOSITORY}"
           --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
+      # The verdict for the labs as well as the comparison: the lab jobs are
+      # only started for the apps in scope, so this check, which reports on
+      # every pull request, is the one that fails when one of them did.
+      - name: Every lab in scope succeeded
+        if: always() && steps.inscope.outputs.any == 'true'
+        env:
+          LAB: ${{ needs.lab.result }}
+        run: |
+          if [ "$LAB" != success ]; then
+            echo "::error::a Render lab job in scope ended '$LAB'; see its log"
+            exit 1
+          fi
+
   # Export parity (docs/EXPORT-PARITY-SPEC.md): each app's own PDF export of
   # the opted-in fixtures (`export: true` in the manifest, docx/pptx only)
   # rasterized like the LibreOffice reference and scored with the same
-  # metrics. Same shape as the screenshot jobs above: one lab job per app,
-  # then a combine job with the proposed baseline, a sticky PR comment and
-  # issue sync on main. The verdicts ratchet against the SEPARATE
+  # metrics. Same shape as the screenshot jobs above: one lab job per app in
+  # scope, then a combine job with the proposed baseline, a sticky PR comment
+  # and issue sync on main. The verdicts ratchet against the SEPARATE
   # tools/render-lab/baseline-export.json, never baseline.json.
   export-lab:
     name: Export lab (${{ matrix.app }})
+    needs: scope
+    if: needs.scope.outputs.apps != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
+        # Every app the scope reaches, and all three outside a pull request.
         # Tables has had an --export-pdf hook since 17eac2b and its fixtures
-        # are opted in, but it was never added here: its baseline verdicts
+        # are opted in, but it was once missing here: its baseline verdicts
         # came from local runs and nothing in CI exported a Tables PDF, so
         # the issue sync filed every one of them as "missing" (#1194).
-        app: [letters, decks, tables]
+        app: ${{ fromJSON(needs.scope.outputs.apps) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -298,11 +410,12 @@ jobs:
 
   export-report:
     name: Export PDF vs LibreOffice PDF
-    needs: export-lab
+    needs: [scope, export-lab]
     # Not on a cancelled run: a newer push cancels the labs part-way, and
     # comparing what they had captured by then reported every fixture they
     # never reached as a regression to "missing" (PR #1222, 19 Letters
-    # fixtures). A lab that *failed* is still compared and reported.
+    # fixtures). A lab that *failed* is still compared and reported, and
+    # then fails this job too, as in `report` above.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -311,11 +424,39 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Apps in scope
+        id: inscope
+        env:
+          SCOPE: ${{ needs.scope.result }}
+          APPS: ${{ needs.scope.outputs.apps }}
+        run: |
+          if [ "$SCOPE" != success ]; then
+            echo "::error::the scope job ended '$SCOPE', so no app's export was judged"
+            exit 1
+          fi
+          {
+            for app in letters tables decks; do
+              echo "$app=$(jq -c --arg app "$app" 'index($app) != null' <<<"$APPS")"
+            done
+            echo "any=$(jq -c 'length > 0' <<<"$APPS")"
+            echo "args=$(jq -r 'map("--app " + .) | join(" ")' <<<"$APPS")"
+            echo "skipped=$(jq -r '["letters", "tables", "decks"] - . | join(", ")' <<<"$APPS")"
+          } | tee -a "$GITHUB_OUTPUT"
+          if [ "$(jq length <<<"$APPS")" -eq 0 ]; then
+            mkdir -p render-lab-out
+            { echo "## Export parity: our PDF vs LibreOffice PDF"; echo
+              echo "Nothing this pull request changes reaches an app's rendering (tools/render-lab/real_scope.py), so no fixture was exported: every app would export as on main."
+            } > render-lab-out/summary-export.md
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.inscope.outputs.any == 'true'
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        if: steps.inscope.outputs.any == 'true'
 
       - name: Build render-lab image
+        if: steps.inscope.outputs.any == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: tools/render-lab
@@ -326,6 +467,7 @@ jobs:
           cache-from: type=gha,scope=render-lab
 
       - name: Download export captures (letters)
+        if: steps.inscope.outputs.letters == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -333,6 +475,7 @@ jobs:
           path: render-lab-out/letters
 
       - name: Download export captures (decks)
+        if: steps.inscope.outputs.decks == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -340,6 +483,7 @@ jobs:
           path: render-lab-out/decks
 
       - name: Download export captures (tables)
+        if: steps.inscope.outputs.tables == 'true'
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -347,35 +491,52 @@ jobs:
           path: render-lab-out/tables
 
       - name: Check every app's export captures arrived
+        if: steps.inscope.outputs.any == 'true'
+        env:
+          APPS: ${{ needs.scope.outputs.apps }}
         run: |
           mkdir -p render-lab-out
           ls render-lab-out
-          for app in letters decks tables; do
+          for app in $(jq -r '.[]' <<<"$APPS"); do
             n=$(find "render-lab-out/$app" -name 'ours-*.png' 2>/dev/null | wc -l)
             echo "$app: $n export captures"
             [ "$n" -gt 0 ] || echo "::warning::no export captures for $app; its export-lab job did not upload, so it is missing from this report"
           done
 
-      # The export verdicts this run would lock in: an agent or reviewer
-      # takes `baseline-export.proposed.json` from the artifact instead of
+      # The export verdicts this run would lock in (merged, so the apps out
+      # of scope keep their committed verdicts): an agent or reviewer takes
+      # `baseline-export.proposed.json` from the artifact instead of
       # re-running the lab locally — after looking at the images.
       - name: Compare exports
+        if: steps.inscope.outputs.any == 'true'
         id: compare
+        env:
+          APP_ARGS: ${{ steps.inscope.outputs.args }}
         run: |
-          docker run --rm -v "$PWD:/workspace" -w /workspace render-lab bash -c '
+          docker run --rm -e APP_ARGS -v "$PWD:/workspace" -w /workspace render-lab bash -c '
             python3 tools/render-lab/fixtures.py render-lab-out/fixtures >/dev/null &&
             cp tools/render-lab/baseline-export.json render-lab-out/baseline-export.proposed.json &&
-            python3 tools/render-lab/export_compare.py render-lab-out/fixtures render-lab-out \
+            python3 tools/render-lab/export_compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
               --baseline render-lab-out/baseline-export.proposed.json --update-baseline >/dev/null &&
-            python3 tools/render-lab/export_compare.py render-lab-out/fixtures render-lab-out \
+            python3 tools/render-lab/export_compare.py render-lab-out/fixtures render-lab-out $APP_ARGS \
               --baseline tools/render-lab/baseline-export.json'
 
       - name: Job summary
         if: always()
-        run: cat render-lab-out/summary-export.md >> "$GITHUB_STEP_SUMMARY" || true
+        env:
+          ANY: ${{ steps.inscope.outputs.any }}
+          SKIPPED: ${{ steps.inscope.outputs.skipped }}
+        run: |
+          # The compare step's container wrote render-lab-out as root; the
+          # runner's user cannot append to it until it owns it.
+          sudo chown -R "$(id -u):$(id -g)" render-lab-out 2>/dev/null || true
+          if [ "$ANY" = true ] && [ -n "$SKIPPED" ] && [ -f render-lab-out/summary-export.md ]; then
+            { echo; echo "Not exported: $SKIPPED. Nothing this pull request changes reaches them (tools/render-lab/real_scope.py)."; } >> render-lab-out/summary-export.md
+          fi
+          cat render-lab-out/summary-export.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Upload export report
-        if: always()
+        if: always() && steps.inscope.outputs.any == 'true'
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -399,17 +560,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           REPORT: ${{ steps.upload.outputs.artifact-url }}
+          ANY: ${{ steps.inscope.outputs.any }}
         run: |
           [ -f render-lab-out/summary-export.md ] || exit 0
           { echo '<!-- export-parity-comment -->'; cat render-lab-out/summary-export.md
-            echo; echo "Side-by-side export report (LibreOffice PDF | our PDF | diff), with \`baseline-export.proposed.json\`: ${REPORT}"; } > export-comment.md
+            if [ "$ANY" = true ]; then
+              echo; echo "Side-by-side export report (LibreOffice PDF | our PDF | diff), with \`baseline-export.proposed.json\`: ${REPORT}"
+            fi; } > export-comment.md
           id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
                --jq '.[] | select(.body | startswith("<!-- export-parity-comment -->")) | .id' | head -1)
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -F body=@export-comment.md >/dev/null
-          else
+          elif [ "$ANY" = true ]; then
             gh pr comment "$PR" --body-file export-comment.md
           fi
+          # Exported nothing and never commented: nothing to say.
 
       - name: Sync export-parity issues
         if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.export-lab.result == 'success' && hashFiles('render-lab-out/summary-export.json') != ''
@@ -419,6 +584,16 @@ jobs:
           python3 tools/render-lab/sync_issues.py render-lab-out/summary-export.json --mode export
           --repo "${GITHUB_REPOSITORY}"
           --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Every export lab in scope succeeded
+        if: always() && steps.inscope.outputs.any == 'true'
+        env:
+          LAB: ${{ needs.export-lab.result }}
+        run: |
+          if [ "$LAB" != success ]; then
+            echo "::error::an Export lab job in scope ended '$LAB'; see its log"
+            exit 1
+          fi
 
   flatpak:
     name: Flatpak bundle (${{ matrix.app }})

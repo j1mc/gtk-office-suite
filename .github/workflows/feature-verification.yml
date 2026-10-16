@@ -35,37 +35,16 @@ permissions:
   contents: read
 
 jobs:
-  # Fork pull requests have a read-only token: they cannot pull a private
-  # package, publish media, or comment. Skipping with a reason is honest;
-  # a half-run that silently posts nothing is not.
-  gate:
-    runs-on: ubuntu-24.04
-    outputs:
-      run: ${{ steps.decide.outputs.run }}
-    steps:
-      - id: decide
-        env:
-          EVENT: ${{ github.event_name }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        run: |
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if [ "$SAME_REPO" != "true" ]; then
-            echo "Fork pull request: skipping (no token to publish evidence)."
-            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if echo "$LABELS" | grep -q '"verify-video"'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Label 'verify-video' not present: skipping."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
+  # Decided by the job's `if:`, not by a gate job: a push to a pull request
+  # without the `verify-video` label starts no runner at all here. Fork pull
+  # requests have a read-only token: they cannot pull a private package,
+  # publish media, or comment, so they are skipped too; a half-run that
+  # silently posts nothing is not honest.
   image:
-    needs: gate
-    if: needs.gate.outputs.run == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'verify-video'))
     runs-on: ubuntu-24.04
     # Read only. This job used to build the image from the pull request's
     # own Containerfile and push it to the shared `:main` tag when that tag
