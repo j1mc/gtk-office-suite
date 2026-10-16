@@ -195,6 +195,8 @@ pub fn build(
     page.add(&text);
     page.add(&cell);
     page.add(&borders);
+    let (protection, sync_protection) = crate::protection_ui::inspector_group(ctl, grid, &syncing);
+    page.add(&protection);
 
     let split = adw::OverlaySplitView::builder()
         .sidebar_position(gtk::PackType::End)
@@ -257,6 +259,7 @@ pub fn build(
             wrap.set_active(s.wrap);
             syncing.set(false);
             sync_number();
+            sync_protection();
         })
     };
 

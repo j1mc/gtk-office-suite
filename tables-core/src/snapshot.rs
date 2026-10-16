@@ -44,6 +44,11 @@ pub struct SheetSnapshot {
     pub sorted_col: Option<(usize, bool)>,
     /// Whether the sheet is protected (#1277).
     pub protected: bool,
+    /// What the sheet's protection allows, by OOXML permission name
+    /// (TBL-005). Never a credential.
+    pub permissions: Vec<(&'static str, bool)>,
+    /// The active cell's `(locked, hidden_formula)` flags.
+    pub active_cell_protection: (bool, bool),
 }
 
 pub struct WorkbookSnapshot {
@@ -123,6 +128,15 @@ pub fn snapshot(
         .sorted_col
         .map(|(c, dir)| (c, dir == crate::sheet::SortDirection::Ascending));
     let protected = state.sheet().protection.protected;
+    let permissions = crate::io::sheet_protection::PERMISSIONS
+        .iter()
+        .map(|p| (p.attribute, (p.allowed)(&state.sheet().protection)))
+        .collect();
+    let active_cell_protection = {
+        let sheet = state.sheet();
+        let cell = sheet.cell_protections.get(sheet.selected_row).and_then(|r| r.get(sheet.selected_col)).cloned().unwrap_or_default();
+        (cell.locked, cell.hidden_formula)
+    };
     drop(state);
 
     let sheet = SheetSnapshot {
@@ -133,6 +147,8 @@ pub fn snapshot(
         selection,
         sorted_col,
         protected,
+        permissions,
+        active_cell_protection,
     };
 
     WorkbookSnapshot { active_sheet_index, sheet_names, sheet, grid_origin: None, cell_rects: Vec::new() }
@@ -211,8 +227,16 @@ impl WorkbookSnapshot {
             Some((x, y)) => format!("{{\"x\":{x},\"y\":{y}}}"),
             None => "null".to_string(),
         };
+        let permissions = self
+            .sheet
+            .permissions
+            .iter()
+            .map(|(name, allowed)| format!("\"{name}\":{allowed}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (locked, formula_hidden) = self.sheet.active_cell_protection;
         format!(
-            "{{\"active_sheet_index\":{},\"sheet_names\":[{}],\"grid_origin\":{},\"sheet\":{{\"name\":{},\"cells\":[{}],\"hidden_rows\":[{}],\"hidden_cols\":[{}],\"selection\":[{},{},{},{}],\"sorted_col\":{},\"protected\":{}}},\"cell_rects\":[{}]}}",
+            "{{\"active_sheet_index\":{},\"sheet_names\":[{}],\"grid_origin\":{},\"sheet\":{{\"name\":{},\"cells\":[{}],\"hidden_rows\":[{}],\"hidden_cols\":[{}],\"selection\":[{},{},{},{}],\"sorted_col\":{},\"protected\":{},\"permissions\":{{{}}},\"active_cell\":{{\"locked\":{},\"formula_hidden\":{}}}}},\"cell_rects\":[{}]}}",
             self.active_sheet_index,
             sheet_names,
             grid_origin,
@@ -223,6 +247,9 @@ impl WorkbookSnapshot {
             sr0, sc0, sr1, sc1,
             sorted_col,
             self.sheet.protected,
+            permissions,
+            locked,
+            formula_hidden,
             self.cell_rects
                 .iter()
                 .map(|(r, c, x, y, w, h)| format!("[{r},{c},{x},{y},{w},{h}]"))

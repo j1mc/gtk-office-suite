@@ -461,16 +461,10 @@ pub fn save_sheets_to_xlsx_bytes(
                 .map_err(|e| format!("Chart error: {}", e))?;
         }
 
-        if sh.protection.protected {
-            let protection = &sh.protection;
-            sheet.protect_with_options(&rust_xlsxwriter::ProtectionOptions {
-                select_locked_cells: protection.allow_select_locked,
-                select_unlocked_cells: protection.allow_select_unlocked,
-                format_cells: protection.allow_format_cells,
-                insert_rows: protection.allow_insert_rows,
-                delete_rows: protection.allow_delete_rows,
-                ..Default::default()
-            });
+        // The writer places the element; a sheet it cannot describe (an
+        // unprotected sheet still holding permissions) is patched below.
+        if super::sheet_protection::needs_element(&sh.protection) {
+            sheet.protect_with_options(&super::sheet_protection::writer_options(&sh.protection));
         }
     }
     // Named ranges (#113): all workbook-scoped in this app today (no
@@ -485,9 +479,10 @@ pub fn save_sheets_to_xlsx_bytes(
                 .map_err(|e| format!("Defined name error: {}", e))?;
         }
     }
-    workbook
+    let bytes = workbook
         .save_to_buffer()
-        .map_err(|e| format!("Save error: {}", e))
+        .map_err(|e| format!("Save error: {}", e))?;
+    super::sheet_protection::patch_package(bytes, sheets)
 }
 
 /// Whether `color` is a plain six-digit hex fill the chart writer can
