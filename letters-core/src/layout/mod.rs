@@ -266,7 +266,7 @@ pub enum Item {
     /// A table cell's border box.
     /// A table cell's box and its background colour (six hex digits), if
     /// the file shades it.
-    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String> },
+    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, ruled: bool },
     /// A paragraph's shading and borders: the text box of one run of its
     /// lines on this page (`x_pt`, `y_pt`, `width_pt`, `height_pt`), drawn
     /// under the text. A paragraph split across pages gets one box per
@@ -1113,6 +1113,9 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     // The room inside each cell around its text. The table sits out to
     // the left by its left padding, so cell text lines up with the margin.
     let pad = doc.table_padding.get(&first.table).copied().unwrap_or_default();
+    // A table without rules has no rule in its rows' height either.
+    let ruled = !doc.table_unruled.contains(&first.table);
+    let rule_pt = if ruled { CELL_RULE_PT } else { 0.0 };
     let opts = flow.opts.clone();
     flow.y += std::mem::take(&mut flow.pending_after);
 
@@ -1148,7 +1151,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 let cx = flow.column_x() - pad.left_pt + col_x[col as usize];
                 let slices = cell_slices(doc, &paras, &pad);
                 place_slices(flow, doc, &paras, &slices, cx + pad.left_pt, top);
-                let bottom = top + slices.iter().map(Slice::height).sum::<f64>() + CELL_RULE_PT;
+                let bottom = top + slices.iter().map(Slice::height).sum::<f64>() + rule_pt;
                 tall.push(Tall { row, col, width, last_row, top, page: flow.pages.len(), column: flow.column, bottom, fill: fill(col) });
             }
         };
@@ -1164,12 +1167,12 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             start_tall(flow, &mut tall, top);
             for (col, width, paras) in &row_cells {
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col) });
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col), ruled });
                 let slices = cell_slices(doc, paras, &pad);
                 place_slices(flow, doc, paras, &slices, cx + pad.left_pt, top);
             }
             flow.y = top + h.pt;
-            close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt);
+            close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt, ruled);
             continue;
         }
         // Otherwise the row splits across pages, as Word and LibreOffice
@@ -1190,7 +1193,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         let mut min_left = file_h.map_or(0.0, |h| h.pt).max(tall_need);
         let mut first_piece = true;
         loop {
-            let room = flow.bottom() - flow.y - CELL_RULE_PT;
+            let room = flow.bottom() - flow.y - rule_pt;
             // How many of each cell's remaining slices fit in `room`.
             let fit = |cell: &[Slice], from: usize| -> (usize, f64) {
                 let mut h = 0.0;
@@ -1215,7 +1218,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 takes
             };
             let done = takes.iter().zip(&slices).all(|((n, _), c)| *n == c.len());
-            let content = takes.iter().map(|(_, h)| *h).fold(0.0, f64::max) + CELL_RULE_PT;
+            let content = takes.iter().map(|(_, h)| *h).fold(0.0, f64::max) + rule_pt;
             let height = if done {
                 content.max(min_left.min((flow.bottom() - flow.y).max(content)))
             } else {
@@ -1228,7 +1231,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
             for (((col, width, paras), cell), (&from, &(to, _))) in row_cells.iter().zip(&slices).zip(next.iter().zip(&takes)) {
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col) });
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col), ruled });
                 place_slices(flow, doc, paras, &cell[from..to], cx + pad.left_pt, top);
             }
             for (n, (to, _)) in next.iter_mut().zip(&takes) {
@@ -1241,7 +1244,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
             flow.next_column();
         }
-        close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt);
+        close_tall(flow, &mut tall, first.table, row, &col_x, pad.left_pt, ruled);
     }
 }
 
@@ -1264,13 +1267,13 @@ struct Tall {
 /// Draw the box of each merged cell whose last row is `row`, now placed:
 /// from its first row's top to here, when both are in this column of this
 /// page. One that crossed a page keeps its content and loses its box.
-fn close_tall(flow: &mut Flow, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64], left_pad: f64) {
+fn close_tall(flow: &mut Flow, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64], left_pad: f64, ruled: bool) {
     let (page, column, y, x0) = (flow.pages.len(), flow.column, flow.y, flow.column_x());
     let (ending, rest): (Vec<Tall>, Vec<Tall>) = std::mem::take(tall).into_iter().partition(|t| t.last_row == row);
     *tall = rest;
     for t in ending.into_iter().filter(|t| (t.page, t.column) == (page, column)) {
         let cx = x0 - left_pad + col_x[t.col as usize];
-        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone() });
+        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone(), ruled });
     }
 }
 

@@ -1746,6 +1746,44 @@ fn table_column_widths_survive() {
 /// A cell's empty paragraphs are lines of the cell: a form's answer box
 /// is a cell holding a label and a run of empty lines, and drawing only
 /// the label shrank every box to one line (the questionnaire, #1211).
+/// A table that declares no visible border, itself, through its style or
+/// on a cell, is Word's "Normal Table": drawn with no rules (a form's grey
+/// answer box in render-lab `real-questionnaire-2`). One with a style
+/// that rules it ("Table Grid") is ruled. Each keeps its look on a save.
+#[test]
+fn a_table_without_borders_is_drawn_without_rules() {
+    let mut d = Document::from_plain_text("after");
+    d.insert_table_at(0, 1, 1);
+    assert!(round_trip(&d).table_unruled.is_empty(), "a table made here is ruled");
+    let strip = |parts: &mut std::collections::BTreeMap<String, String>, style: Option<&str>| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        while let Some(a) = body.find("<w:tblBorders>") {
+            let b = body[a..].find("</w:tblBorders>").unwrap() + a + "</w:tblBorders>".len();
+            body.replace_range(a..b, "");
+        }
+        while let Some(a) = body.find("<w:tblStyle ") {
+            let b = body[a..].find("/>").unwrap() + a + 2;
+            body.replace_range(a..b, "");
+        }
+        if let Some(id) = style {
+            *body = body.replacen("<w:tblPr>", &format!("<w:tblPr><w:tblStyle w:val=\"{id}\"/>"), 1);
+            let st = parts.get_mut("word/styles.xml").unwrap();
+            *st = st.replace(
+                "</w:styles>",
+                &format!(
+                    "<w:style w:type=\"table\" w:styleId=\"Base{id}\"><w:tblPr><w:tblBorders><w:insideH w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPr></w:style>\
+                     <w:style w:type=\"table\" w:styleId=\"{id}\"><w:basedOn w:val=\"Base{id}\"/></w:style></w:styles>"
+                ),
+            );
+        }
+    };
+    let plain = doctor_parts(&d, |parts| strip(parts, None));
+    assert_eq!(plain.table_unruled.len(), 1, "no border anywhere: unruled");
+    assert_eq!(round_trip(&plain).table_unruled.len(), 1, "and written without rules");
+    let styled = doctor_parts(&d, |parts| strip(parts, Some("MyGrid")));
+    assert!(styled.table_unruled.is_empty(), "ruled through its style's base");
+}
+
 #[test]
 fn a_cells_empty_lines_survive() {
     let mut d = Document::from_plain_text("after");

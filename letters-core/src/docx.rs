@@ -1234,6 +1234,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_rows = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, row_heights(t)?))).collect();
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
+    let table_unruled = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
 
     let mut read = Document {
         paragraphs,
@@ -1253,6 +1254,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_spans,
         table_fills,
         table_padding,
+        table_unruled,
         sections: Vec::new(),
         next_section_id: 0,
     };
@@ -1395,6 +1397,26 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
         }
     }
     (!fills.is_empty()).then_some(fills)
+}
+
+/// Whether a table draws any rule: a visible edge of its own borders
+/// (`w:tblBorders`), its table style's (up the `w:basedOn` chain, as
+/// "Table Grid" gives one), or any of its cells' (`w:tcBorders`). Word's
+/// "Normal Table" declares none, and Word and Writer draw such a table
+/// with no rules at all.
+fn table_ruled(table: &rdocx::TableRef<'_>) -> bool {
+    use rdocx::TableBorderEdge as E;
+    let visible = |b: Option<rdocx::TableBorderRef<'_>>| b.is_some_and(|b| !matches!(b.style(), "none" | "nil"));
+    if [E::Top, E::Bottom, E::Left, E::Right, E::InsideHorizontal, E::InsideVertical].into_iter().any(|e| visible(table.border(e))) {
+        return true;
+    }
+    if table.style_id().is_some_and(table_style_ruled) {
+        return true;
+    }
+    use rdocx::CellBorderEdge as C;
+    (0..table.row_count()).filter_map(|r| table.row(r)).any(|row| {
+        (0..row.cell_count()).filter_map(|c| row.cell(c)).any(|cell| [C::Top, C::Bottom, C::Left, C::Right].into_iter().any(|e| visible(cell.border(e))))
+    })
 }
 
 /// A table's cell padding, when it is not Word's default: its cell margins
@@ -1759,6 +1781,14 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             }
             if let Some(pad) = doc.table_padding.get(&tc0.table) {
                 tbl.set_cell_margins(rdocx::Length::pt(pad.top_pt), rdocx::Length::pt(pad.right_pt), rdocx::Length::pt(pad.bottom_pt), rdocx::Length::pt(pad.left_pt));
+            }
+            // A table is written with the rules it is drawn with: a 0.5pt
+            // grid (rdocx writes none, and Word and Writer drew a Letters
+            // table bare), or none for one the file drew without.
+            if doc.table_unruled.contains(&tc0.table) {
+                tbl.set_borders(rdocx::BorderStyle::None, 0, "auto");
+            } else {
+                tbl.set_borders(rdocx::BorderStyle::Single, 4, "000000");
             }
             for fill in doc.table_fills.get(&tc0.table).into_iter().flatten() {
                 if let Some(mut cell) = tbl.cell(fill.row as usize, fill.col as usize) {
@@ -3107,6 +3137,8 @@ enum FontRef {
 struct StyleFonts {
     /// style id -> (basedOn, its own run font)
     styles: std::collections::HashMap<String, (Option<String>, Option<FontRef>)>,
+    /// Table styles whose own `w:tblBorders` has a visible edge.
+    ruled_table_styles: std::collections::HashSet<String>,
     default_para: Option<String>,
     doc_default: Option<FontRef>,
 }
@@ -3125,6 +3157,7 @@ fn style_fonts(path: &str) -> StyleFonts {
         // Where we are: inside a style (its id), inside docDefaults'
         // rPrDefault, and inside a pPr (whose rPr is the paragraph mark's).
         let (mut style, mut in_defaults, mut in_ppr) = (None::<String>, false, false);
+        let mut in_tbl_borders = false;
         loop {
             let ev = reader.read_event()?;
             let (e, empty) = match &ev {
@@ -3136,6 +3169,7 @@ fn style_fonts(path: &str) -> StyleFonts {
                         "w:style" => style = None,
                         "w:rPrDefault" => in_defaults = false,
                         "w:pPr" => in_ppr = false,
+                        "w:tblBorders" => in_tbl_borders = false,
                         _ => {}
                     }
                     continue;
@@ -3154,6 +3188,14 @@ fn style_fonts(path: &str) -> StyleFonts {
                 }
                 "w:rPrDefault" if !empty => in_defaults = true,
                 "w:pPr" if !empty => in_ppr = true,
+                "w:tblBorders" if !empty => in_tbl_borders = true,
+                "w:top" | "w:left" | "w:bottom" | "w:right" | "w:start" | "w:end" | "w:insideH" | "w:insideV" if in_tbl_borders => {
+                    if let (Some(id), Some(val)) = (&style, attr(&e, "w:val")) {
+                        if !matches!(val.as_str(), "none" | "nil") {
+                            out.ruled_table_styles.insert(id.clone());
+                        }
+                    }
+                }
                 "w:basedOn" => {
                     if let Some(id) = &style {
                         out.styles.entry(id.clone()).or_default().0 = attr(&e, "w:val");
@@ -3206,13 +3248,29 @@ thread_local! {
     static STYLE_FONTS: std::cell::RefCell<StyleFonts> = std::cell::RefCell::new(StyleFonts::default());
 }
 
-/// The font family paragraph style `id` (or the default paragraph style)
-/// gives its text, resolved through `w:basedOn` and docDefaults.
+/// Whether table style `id`, or one it is based on, has a visible rule.
+fn table_style_ruled(id: &str) -> bool {
+    STYLE_FONTS.with(|sf| {
+        let sf = sf.borrow();
+        let mut cur = Some(id.to_string());
+        for _ in 0..32 {
+            let Some(c) = cur else { return false };
+            if sf.ruled_table_styles.contains(&c) {
+                return true;
+            }
+            cur = sf.styles.get(&c).and_then(|(based_on, _)| based_on.clone());
+        }
+        false
+    })
+}
+
 /// Whether the file's styles part defines style `id`.
 fn style_defined(id: &str) -> bool {
     STYLE_FONTS.with(|sf| sf.borrow().styles.contains_key(id))
 }
 
+/// The font family paragraph style `id` (or the default paragraph style)
+/// gives its text, resolved through `w:basedOn` and docDefaults.
 fn style_family(id: Option<&str>) -> Option<String> {
     STYLE_FONTS.with(|sf| {
         let sf = sf.borrow();

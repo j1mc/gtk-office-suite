@@ -1137,7 +1137,7 @@ impl Typeset {
                     let _ = cr.stroke();
                     let _ = cr.restore();
                 }
-                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, .. } => {
+                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, ruled, .. } => {
                     // The cell's shading first, under its rule and text.
                     if let Some((r, g, b)) = fill.as_deref().and_then(parse_hex) {
                         let _ = cr.save();
@@ -1159,6 +1159,9 @@ impl Typeset {
                         let half = (dw.round().max(1.0) % 2.0) / 2.0;
                         cr.device_to_user(dx.round() + half, dy.round() + half).unwrap_or((x, y))
                     };
+                    if !*ruled {
+                        continue;
+                    }
                     let (x0, y0) = snap(*x_pt, *y_pt);
                     let (x1, y1) = snap(*x_pt + *width_pt, *y_pt + *height_pt);
                     let _ = cr.save();

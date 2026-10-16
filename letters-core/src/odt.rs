@@ -737,6 +737,9 @@ fn content_xml(doc: &Document) -> String {
                             p.top_pt, p.bottom_pt, p.left_pt, p.right_pt
                         )
                     });
+                    // A ruled table (any made here) rules every cell, as
+                    // Writer draws a cell only with a border of its own.
+                    let padding = if doc.table_unruled.contains(&c.table) { padding } else { format!("{padding} fo:border=\"0.5pt solid #000000\"") };
                     let mut fill_styles: std::collections::HashMap<String, String> = Default::default();
                     let mut cell_styles: std::collections::HashMap<(u32, u32), String> = doc.table_fills.get(&c.table).into_iter().flatten().map(|f| {
                         let n = fill_styles.len();
@@ -1404,6 +1407,8 @@ struct AutoStyles {
     row: std::collections::HashMap<String, crate::model::RowHeight>,
     /// A table-cell style's background colour, six hex digits.
     cell_fill: std::collections::HashMap<String, String>,
+    /// Table-cell styles with a visible border on any side.
+    cell_ruled: std::collections::HashSet<String>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
     /// A table-cell style's padding, when it gives one.
@@ -1573,7 +1578,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1618,6 +1623,13 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                         if let (Some(name), true) = (cur_name.clone(), sides.iter().any(Option::is_some)) {
                             let [top_pt, bottom_pt, left_pt, right_pt] = sides.map(|v| v.unwrap_or(0.0));
                             out.cell_padding.insert(name, crate::model::CellPadding { top_pt, bottom_pt, left_pt, right_pt });
+                        }
+                        let ruled = ["fo:border", "fo:border-top", "fo:border-bottom", "fo:border-left", "fo:border-right"]
+                            .iter()
+                            .filter_map(|a| attr_val(&e, a))
+                            .any(|v| !v.trim().eq_ignore_ascii_case("none") && parse_length_pt(v.split_whitespace().next().unwrap_or("")).is_none_or(|w| w > 0.0));
+                        if let (Some(name), true) = (cur_name.clone(), ruled) {
+                            out.cell_ruled.insert(name);
                         }
                         let fill = attr_val(&e, "fo:background-color").map(|c| c.trim_start_matches('#').to_uppercase());
                         if let (Some(name), Some(color)) = (cur_name.clone(), fill.filter(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_hexdigit()))) {
@@ -2439,7 +2451,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -2542,6 +2554,13 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     // A shaded cell's fill, at the cell just counted.
     // Each table's cell padding: its first cell's.
     let mut cell_padding: std::collections::BTreeMap<u32, crate::model::CellPadding> = Default::default();
+    // The tables with a ruled cell: Writer rules a cell only by its style.
+    let mut ruled_tables: std::collections::HashSet<u32> = Default::default();
+    let note_rule = |ruled: &mut std::collections::HashSet<u32>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
+        if attr_val(e, "table:style-name").is_some_and(|n| auto.cell_ruled.contains(&n) || named.cell_ruled.contains(&n)) {
+            ruled.insert(t.0);
+        }
+    };
     let note_fill = |fills: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellFill>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
         if let Some(color) = attr_val(e, "table:style-name").and_then(|n| auto.cell_fill.get(&n).cloned()) {
             fills.entry(t.0).or_default().push(crate::model::CellFill { row: t.1.max(0) as u32, col: t.2.max(0) as u32, color });
@@ -2775,6 +2794,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         t.4 = false;
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
+                        note_rule(&mut ruled_tables, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3075,6 +3095,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         t.2 += 1;
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
+                        note_rule(&mut ruled_tables, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3649,6 +3670,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_spans = cell_spans;
     doc.table_fills = cell_fills;
     doc.table_padding = cell_padding;
+    doc.table_unruled = doc.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| c.table)).filter(|t| !ruled_tables.contains(t)).collect();
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
     // an explicit page-wide count still wins; a document of several
@@ -4087,6 +4109,18 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!(crate::comments::threads(&rt), crate::comments::threads(&d));
         assert_eq!(rt.paragraphs, d.paragraphs);
+    }
+
+    /// A table Letters made is written with ruled cells, as Writer draws
+    /// a cell's rule only from its style, and reads back ruled; one read
+    /// as unruled is written and read back without rules.
+    #[test]
+    fn table_rules_survive_both_ways() {
+        let mut d = Document::from_plain_text("after");
+        let table = d.insert_table_at(0, 1, 2);
+        assert!(round_trip(&d).table_unruled.is_empty());
+        d.table_unruled.insert(table);
+        assert_eq!(round_trip(&d).table_unruled.len(), 1);
     }
 
     /// An .odt made of these `content.xml` and `styles.xml`, read.
