@@ -1683,6 +1683,13 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             }
                             if let Some(c) = attr_val(&e, "fo:color") {
                                 st.color = Some(c.trim_start_matches('#').to_lowercase());
+                            } else if attr_val(&e, "style:use-window-font-color").as_deref() == Some("true") {
+                                // The automatic (window) colour undoes a
+                                // parent's: the W1 notes' headings are
+                                // black over Heading 1's blue, as
+                                // LibreOffice draws them. Black, as the
+                                // DOCX reader takes "auto" in a heading.
+                                st.color = Some("000000".into());
                             }
                             if let Some(fam) = attr_val(&e, "fo:font-family") {
                                 let f = fam.to_lowercase();
@@ -4623,6 +4630,23 @@ mod tests {
             assert_eq!(d.footer.as_deref(), Some("OFFICIAL"));
             assert!((d.page.unwrap().margin_left_pt - left).abs() < 1e-6, "{first:?}: {:?}", d.page);
         }
+    }
+
+    /// The automatic font colour undoes a parent style's: a heading whose
+    /// style says `use-window-font-color` over a blue Heading 1 is black.
+    #[test]
+    fn the_window_font_colour_undoes_a_parents() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Heading1\" style:family=\"paragraph\"><style:text-properties fo:color=\"#0F4761\"/></style:style>\
+             </office:styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P1\" style:family=\"paragraph\" style:parent-style-name=\"Heading1\"><style:text-properties style:use-window-font-color=\"true\"/></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:h text:style-name=\"P1\" text:outline-level=\"1\">Notes</text:h><text:h text:style-name=\"Heading1\" text:outline-level=\"1\">Blue</text:h>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert_eq!(d.paragraphs[0].runs[0].style.color.as_deref(), Some("000000"));
+        assert_ne!(d.paragraphs[1].runs[0].style.color.as_deref(), Some("000000"), "Heading 1 itself is not undone");
     }
 
     /// A header's paragraphs are its lines, the blank ones too, and a
