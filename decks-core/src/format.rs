@@ -7,10 +7,16 @@
 // applies it to the whole selection as one undo step. An edit that changes
 // nothing records nothing. The inspector reads what to show from
 // `ObjectFormat::of`.
+//
+// The same edits act on a text range (DCK-007, `rich_text.rs`): each says
+// what it reaches (`FormatEdit::scope`) — characters, paragraphs or the
+// whole box — and `edit_style`/`edit_para` are the one definition of what
+// it does to a run or a paragraph, whether the inspector formats a whole
+// box or the text editor a selection.
 
 use crate::engine::shape::{Color, ShapeKind, ShapeStyle, Stroke};
 use crate::engine::theme::{ColorRef, FillSrc, StrokeSrc};
-use crate::engine::{Anchor, Bullet, ParaAlign, ParaStyle, Run, RunStyle, SlideObject};
+use crate::engine::{Anchor, Bullet, Insets, ParaAlign, ParaStyle, Run, RunStyle, SlideObject, Spacing};
 use crate::undo::{obj_bounds, obj_rotation, set_obj_bounds, set_obj_rotation};
 
 /// A paragraph list type, as the inspector offers it.
@@ -30,21 +36,81 @@ pub enum FormatEdit {
     OutlineWidth(f64),
     NoOutline,
     Kind(ShapeKind),
-    // Text
+    // Text: characters
     FontFamily(Option<String>),
     FontSize(f64),
     Bold(bool),
     Italic(bool),
+    Underline(bool),
+    Strikethrough(bool),
     TextColor(Option<String>),
+    // Text: paragraphs
     Align(ParaAlign),
     List(ListKind),
+    /// One list level (or, outside a list, one indent step) in (`true`)
+    /// or out.
+    Indent(bool),
+    /// Space above the paragraph, in points.
+    SpaceBefore(f64),
+    /// Space below the paragraph, in points.
+    SpaceAfter(f64),
+    // Text: the box
     Anchor(Anchor),
+    /// The same inner margin on every side, in points.
+    Insets(f64),
     // Arrange
     X(f64),
     Y(f64),
     Width(f64),
     Height(f64),
     Rotation(f64),
+}
+
+/// What a [`FormatEdit`] reaches inside a text box (DCK-007). A range
+/// edit changes exactly this much: characters of the selection, the
+/// paragraphs it touches, or the box. It never silently widens to the
+/// whole box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditScope {
+    /// The runs of the selected characters.
+    Characters,
+    /// Every paragraph the selection touches (the caret's own when
+    /// collapsed).
+    Paragraphs,
+    /// The text box as a whole: anchor and insets.
+    TextBox,
+    /// Not a text edit: geometry or shape paint.
+    Object,
+}
+
+impl FormatEdit {
+    pub fn scope(&self) -> EditScope {
+        match self {
+            FormatEdit::FontFamily(_)
+            | FormatEdit::FontSize(_)
+            | FormatEdit::Bold(_)
+            | FormatEdit::Italic(_)
+            | FormatEdit::Underline(_)
+            | FormatEdit::Strikethrough(_)
+            | FormatEdit::TextColor(_) => EditScope::Characters,
+            FormatEdit::Align(_)
+            | FormatEdit::List(_)
+            | FormatEdit::Indent(_)
+            | FormatEdit::SpaceBefore(_)
+            | FormatEdit::SpaceAfter(_) => EditScope::Paragraphs,
+            FormatEdit::Anchor(_) | FormatEdit::Insets(_) => EditScope::TextBox,
+            FormatEdit::Fill(_)
+            | FormatEdit::OutlineColor(_)
+            | FormatEdit::OutlineWidth(_)
+            | FormatEdit::NoOutline
+            | FormatEdit::Kind(_)
+            | FormatEdit::X(_)
+            | FormatEdit::Y(_)
+            | FormatEdit::Width(_)
+            | FormatEdit::Height(_)
+            | FormatEdit::Rotation(_) => EditScope::Object,
+        }
+    }
 }
 
 /// What the inspector shows for an object.
@@ -62,10 +128,18 @@ pub struct ObjectFormat {
     pub font_size: Option<f64>,
     pub bold: bool,
     pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
     pub text_color: Option<String>,
     pub align: ParaAlign,
     pub list: ListKind,
+    /// The first paragraph's space above and below, in points, when it
+    /// states them as lengths (`None`: a fraction of the line height).
+    pub space_before: Option<f64>,
+    pub space_after: Option<f64>,
     pub anchor: Anchor,
+    /// The box's left inner margin in points, `None` for the default.
+    pub inset: Option<f64>,
     pub bounds: (f64, f64, f64, f64),
     pub rotation: f64,
     /// A chart's data, for the Chart tab.
@@ -82,7 +156,10 @@ pub const DEFAULT_FONT_PT: f64 = 18.0;
 const PLAIN_RECT: Color = Color(0x4D, 0x80, 0xE6);
 const PLAIN_CIRCLE: Color = Color(0xE6, 0x4D, 0x33);
 
-fn list_of(bullet: &Bullet) -> ListKind {
+/// The model's points-to-units factor: 96 units an inch, 72 points.
+const UNITS_PER_PT: f64 = 4.0 / 3.0;
+
+pub(crate) fn list_of(bullet: &Bullet) -> ListKind {
     match bullet {
         Bullet::None => ListKind::None,
         Bullet::Char(_) => ListKind::Bullet,
@@ -104,10 +181,15 @@ impl ObjectFormat {
             font_size: None,
             bold: false,
             italic: false,
+            underline: false,
+            strikethrough: false,
             text_color: None,
             align: ParaAlign::Left,
             list: ListKind::None,
+            space_before: None,
+            space_after: None,
             anchor: Anchor::Top,
+            inset: None,
             bounds: obj_bounds(obj),
             rotation: obj_rotation(obj),
             chart: match obj {
@@ -122,6 +204,8 @@ impl ObjectFormat {
                 f.font_size = r.style.font_size_hp.map(|hp| hp as f64 / 2.0);
                 f.bold = r.style.bold;
                 f.italic = r.style.italic;
+                f.underline = r.style.underline;
+                f.strikethrough = r.style.strikethrough;
                 f.text_color = r.style.color.clone();
             }
         };
@@ -148,7 +232,14 @@ impl ObjectFormat {
                 let p = body.para(0);
                 f.align = p.align;
                 f.list = list_of(&p.bullet);
+                let pt = |s: Spacing| match s {
+                    Spacing::Units(u) => Some(u / UNITS_PER_PT),
+                    Spacing::Lines(_) => None,
+                };
+                f.space_before = pt(p.space_before);
+                f.space_after = pt(p.space_after);
                 f.anchor = body.anchor;
+                f.inset = body.insets.map(|i| i.left / UNITS_PER_PT);
             }
             SlideObject::Table { table, .. } => {
                 f.has_text = true;
@@ -189,34 +280,86 @@ fn promote(obj: &mut SlideObject) {
     *obj = promoted;
 }
 
-/// Every run of a box, the text made into one run when it has none, so
-/// a style can be set on it.
-fn runs_mut<'a>(text: &str, runs: &'a mut Vec<Run>) -> &'a mut Vec<Run> {
-    if runs.is_empty() && !text.is_empty() {
-        runs.push(Run { text: text.to_string(), style: RunStyle::default() });
+/// Apply a character edit to one run's style. Returns whether it changed;
+/// any other edit changes nothing here.
+pub fn edit_style(s: &mut RunStyle, edit: &FormatEdit) -> bool {
+    let before = s.clone();
+    match edit {
+        FormatEdit::FontFamily(f) => s.font_family = f.clone(),
+        FormatEdit::FontSize(pt) => s.font_size_hp = Some((pt * 2.0).round().clamp(1.0, u16::MAX as f64) as u16),
+        FormatEdit::Bold(b) => s.bold = *b,
+        FormatEdit::Italic(i) => s.italic = *i,
+        FormatEdit::Underline(u) => s.underline = *u,
+        FormatEdit::Strikethrough(x) => s.strikethrough = *x,
+        FormatEdit::TextColor(c) => s.color = c.clone(),
+        _ => {}
     }
-    runs
+    *s != before
 }
 
-fn edit_runs(runs: &mut [Run], edit: &FormatEdit) {
-    for r in runs {
-        let s = &mut r.style;
-        match edit {
-            FormatEdit::FontFamily(f) => s.font_family = f.clone(),
-            FormatEdit::FontSize(pt) => s.font_size_hp = Some((pt * 2.0).round().clamp(1.0, u16::MAX as f64) as u16),
-            FormatEdit::Bold(b) => s.bold = *b,
-            FormatEdit::Italic(i) => s.italic = *i,
-            FormatEdit::TextColor(c) => s.color = c.clone(),
-            _ => {}
+/// One list level (0.375in, as PowerPoint's body style has it).
+const LEVEL_STEP: f64 = 36.0;
+
+/// Apply a paragraph edit to one paragraph's style; any other edit
+/// changes nothing here.
+pub fn edit_para(p: &mut ParaStyle, edit: &FormatEdit) {
+    match edit {
+        FormatEdit::Align(a) => p.align = *a,
+        FormatEdit::List(kind) => {
+            let was_list = p.bullet != Bullet::None;
+            p.bullet = match kind {
+                ListKind::None => Bullet::None,
+                ListKind::Bullet => Bullet::Char("•".into()),
+                ListKind::Number => Bullet::AutoNum { scheme: "arabicPeriod".into(), start: 1 },
+            };
+            // A hanging indent for the marker, one level step a level;
+            // taken away again when the list is.
+            if *kind == ListKind::None {
+                if was_list {
+                    p.margin_left = 0.0;
+                    p.indent = 0.0;
+                }
+            } else if !was_list || p.indent >= 0.0 {
+                p.margin_left = LEVEL_STEP * (p.level as f64 + 1.0);
+                p.indent = -LEVEL_STEP;
+            }
         }
+        // A list paragraph moves a list level (the level both formats
+        // write: pptx `lvl`, odp list nesting) with its hanging indent;
+        // plain text moves one indent step, never left of the box.
+        FormatEdit::Indent(more) => {
+            if p.bullet != Bullet::None {
+                let level = if *more { (p.level + 1).min(8) } else { p.level.saturating_sub(1) };
+                p.level = level;
+                p.margin_left = LEVEL_STEP * (level as f64 + 1.0);
+                if p.indent >= 0.0 {
+                    p.indent = -LEVEL_STEP;
+                }
+            } else if *more {
+                p.margin_left += LEVEL_STEP;
+            } else {
+                p.margin_left = (p.margin_left - LEVEL_STEP).max(0.0);
+            }
+        }
+        FormatEdit::SpaceBefore(pt) => p.space_before = Spacing::Units(pt.max(0.0) * UNITS_PER_PT),
+        FormatEdit::SpaceAfter(pt) => p.space_after = Spacing::Units(pt.max(0.0) * UNITS_PER_PT),
+        _ => {}
     }
 }
 
-/// Every paragraph's style of a box `text`, one per line, for editing.
-fn paras_mut(text: &str, body: &mut crate::engine::TextBody) {
-    let n = text.split('\n').count();
-    let full: Vec<ParaStyle> = (0..n).map(|i| body.para(i)).collect();
-    body.paras = full;
+/// Apply a box edit (anchor, insets) to a text body. Returns whether it
+/// changed.
+pub fn edit_body(body: &mut crate::engine::TextBody, edit: &FormatEdit) -> bool {
+    let (anchor, insets) = (body.anchor, body.insets);
+    match edit {
+        FormatEdit::Anchor(a) => body.anchor = *a,
+        FormatEdit::Insets(pt) => {
+            let u = pt.max(0.0) * UNITS_PER_PT;
+            body.insets = Some(Insets { left: u, top: u, right: u, bottom: u });
+        }
+        _ => {}
+    }
+    body.anchor != anchor || body.insets != insets
 }
 
 /// Apply `edit` to `obj`. Edits that don't apply to it (a fill on a text
@@ -279,61 +422,52 @@ pub fn apply_edit(obj: &mut SlideObject, edit: &FormatEdit) {
         | FormatEdit::FontSize(_)
         | FormatEdit::Bold(_)
         | FormatEdit::Italic(_)
+        | FormatEdit::Underline(_)
+        | FormatEdit::Strikethrough(_)
         | FormatEdit::TextColor(_) => match obj {
             SlideObject::TextBox { text, runs, .. } => {
                 // A box without runs is plain text: give it a run only if
-                // the edit makes that run look different.
+                // the edit makes that run look different. An empty box
+                // keeps the format as its typing style: one empty run.
                 if runs.is_empty() {
-                    let mut probe = [Run { text: String::new(), style: RunStyle::default() }];
-                    edit_runs(&mut probe, edit);
-                    if probe[0].style == RunStyle::default() {
+                    let mut probe = RunStyle::default();
+                    if !edit_style(&mut probe, edit) {
                         return;
                     }
+                    runs.push(Run { text: text.clone(), style: RunStyle::default() });
                 }
-                edit_runs(runs_mut(text, runs), edit)
+                for r in runs.iter_mut() {
+                    edit_style(&mut r.style, edit);
+                }
             }
             SlideObject::Table { table, .. } => {
                 for cell in table.rows.iter_mut().flatten() {
-                    edit_runs(&mut cell.runs, edit);
+                    for r in &mut cell.runs {
+                        edit_style(&mut r.style, edit);
+                    }
                 }
             }
             _ => {}
         },
-        FormatEdit::Align(_) | FormatEdit::List(_) | FormatEdit::Anchor(_) => {
+        FormatEdit::Align(_)
+        | FormatEdit::List(_)
+        | FormatEdit::Indent(_)
+        | FormatEdit::SpaceBefore(_)
+        | FormatEdit::SpaceAfter(_) => {
             let SlideObject::TextBox { text, body, .. } = obj else { return };
-            match edit {
-                FormatEdit::Anchor(a) => body.anchor = *a,
-                FormatEdit::Align(a) => {
-                    paras_mut(text, body);
-                    for p in &mut body.paras {
-                        p.align = *a;
-                    }
-                }
-                FormatEdit::List(kind) => {
-                    paras_mut(text, body);
-                    for p in &mut body.paras {
-                        let was_list = p.bullet != Bullet::None;
-                        p.bullet = match kind {
-                            ListKind::None => Bullet::None,
-                            ListKind::Bullet => Bullet::Char("•".into()),
-                            ListKind::Number => Bullet::AutoNum { scheme: "arabicPeriod".into(), start: 1 },
-                        };
-                        // A hanging indent for the marker, 0.375in a level
-                        // as PowerPoint's body style has it; taken away
-                        // again when the list is.
-                        let step = 36.0;
-                        if *kind == ListKind::None {
-                            if was_list {
-                                p.margin_left = 0.0;
-                                p.indent = 0.0;
-                            }
-                        } else if !was_list || p.indent >= 0.0 {
-                            p.margin_left = step * (p.level as f64 + 1.0);
-                            p.indent = -step;
-                        }
-                    }
-                }
-                _ => {}
+            let n = text.split('\n').count();
+            let before: Vec<ParaStyle> = (0..n).map(|i| body.para(i)).collect();
+            let mut paras = before.clone();
+            for p in &mut paras {
+                edit_para(p, edit);
+            }
+            if paras != before {
+                body.paras = paras;
+            }
+        }
+        FormatEdit::Anchor(_) | FormatEdit::Insets(_) => {
+            if let SlideObject::TextBox { body, .. } = obj {
+                edit_body(body, edit);
             }
         }
     }
@@ -435,4 +569,45 @@ mod tests {
         assert!(obj_bounds(&t).3 > 0.0, "never collapses");
     }
 
+
+    #[test]
+    fn indent_spacing_insets_and_scope_reach_what_they_name() {
+        let mut o = text_box("a\nb");
+        apply_edit(&mut o, &FormatEdit::List(ListKind::Bullet));
+        apply_edit(&mut o, &FormatEdit::Indent(true));
+        let SlideObject::TextBox { body, .. } = &o else { panic!() };
+        assert!(body.paras.iter().all(|p| p.level == 1 && p.margin_left == 72.0 && p.indent < 0.0), "{body:?}");
+        apply_edit(&mut o, &FormatEdit::Indent(false));
+        apply_edit(&mut o, &FormatEdit::Indent(false));
+        let SlideObject::TextBox { body, .. } = &o else { panic!() };
+        assert!(body.paras.iter().all(|p| p.level == 0 && p.margin_left == 36.0), "never below level 0");
+        // Outside a list an indent step moves the text, never left of the box.
+        let mut plain = ParaStyle::default();
+        edit_para(&mut plain, &FormatEdit::Indent(true));
+        assert_eq!((plain.level, plain.margin_left), (0, 36.0));
+        edit_para(&mut plain, &FormatEdit::Indent(false));
+        edit_para(&mut plain, &FormatEdit::Indent(false));
+        assert_eq!(plain.margin_left, 0.0);
+        apply_edit(&mut o, &FormatEdit::SpaceBefore(12.0));
+        apply_edit(&mut o, &FormatEdit::Insets(9.0));
+        let f = ObjectFormat::of(&o);
+        assert!((f.space_before.unwrap() - 12.0).abs() < 1e-9 && (f.inset.unwrap() - 9.0).abs() < 1e-9, "{f:?}");
+        assert_eq!(FormatEdit::Underline(true).scope(), EditScope::Characters);
+        assert_eq!(FormatEdit::Indent(true).scope(), EditScope::Paragraphs);
+        assert_eq!(FormatEdit::Insets(1.0).scope(), EditScope::TextBox);
+        assert_eq!(FormatEdit::X(1.0).scope(), EditScope::Object);
+    }
+
+    #[test]
+    fn a_whole_box_format_on_an_empty_box_is_its_typing_style() {
+        let mut o = text_box("");
+        apply_edit(&mut o, &FormatEdit::Strikethrough(false));
+        let SlideObject::TextBox { runs, .. } = &o else { panic!() };
+        assert!(runs.is_empty(), "no visible change, no run");
+        apply_edit(&mut o, &FormatEdit::Underline(true));
+        let SlideObject::TextBox { runs, .. } = &o else { panic!() };
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].text.is_empty() && runs[0].style.underline);
+        assert!(ObjectFormat::of(&o).underline);
+    }
 }

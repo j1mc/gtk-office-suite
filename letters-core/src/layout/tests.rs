@@ -228,6 +228,29 @@ fn a_cells_bare_sides_are_laid_with_it() {
     assert_eq!(open, [(0, bare), (1, OpenEdges::default())]);
 }
 
+/// A cell set in the middle (or at the bottom) of a row taller than it
+/// puts its line there; a top cell's line stays at the top.
+#[test]
+fn a_cells_content_sits_where_the_cell_says() {
+    use crate::model::{CellVAlign, VAlign};
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 3);
+    d.table_rows.insert(table, vec![Some(RowHeight { pt: 100.0, exact: false })]);
+    d.table_valign.insert(table, vec![CellVAlign { row: 0, col: 1, align: VAlign::Center }, CellVAlign { row: 0, col: 2, align: VAlign::Bottom }]);
+    let at = |d: &Document, c: u32| d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: c })).unwrap();
+    for c in 0..3 {
+        let i = at(&d, c);
+        d.paragraphs[i].runs = vec![Run::plain("x")];
+    }
+    let t = lay(&d);
+    let y = |c: u32| {
+        let i = at(&d, c);
+        t.pages[0].items.iter().find_map(|it| match it { Item::Line { source: Source::Paragraph(q), top_pt, .. } if *q == i => Some(*top_pt), _ => None }).unwrap()
+    };
+    let (top, mid, bottom) = (y(0), y(1), y(2));
+    assert!(mid > top + 30.0 && bottom > mid + 30.0, "{top} {mid} {bottom}");
+}
+
 /// A list item's marker hangs as far before its text as the file says,
 /// else `HANGING_PT`; the text stays where it was.
 #[test]

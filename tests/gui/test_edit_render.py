@@ -11,6 +11,7 @@ saved file is compared against our app opening it, like any fixture.
 
 `EDIT_RENDER_OUT` names the directory the saved files go to (the render
 lab's fixtures directory); without it they go to a per-test temp dir.
+`DecksRichTextEditRenderJourney` saves `decks/rich-text-edited` (DCK-007).
 """
 
 import os
@@ -25,10 +26,10 @@ from test_smoke import TablesCellEntryMixin, DecksCanvasGeometry
 PARAGRAPH = "Edited in the app, saved, and reopened."
 
 
-def out_path(test, app, ext):
+def out_path(test, app, ext, feature="edited-journey"):
     root = os.environ.get("EDIT_RENDER_OUT") or test.temp_dir(prefix=f"edit-render-{app}-")
     os.makedirs(os.path.join(root, app), exist_ok=True)
-    path = os.path.join(root, app, f"edited-journey.{ext}")
+    path = os.path.join(root, app, f"{feature}.{ext}")
     if os.path.exists(path):
         os.remove(path)
     return path
@@ -243,3 +244,88 @@ class DecksEditRenderJourney(DecksCanvasGeometry, BaseGUITestCase):
                  if o["kind"] == "TextBox"]
         self.assertIn("Edited slide title", texts)
         self.assertIsNone(self.process.poll(), "decks crashed in the edit-render journey")
+
+
+class DecksRichTextEditRenderJourney(DecksCanvasGeometry, BaseGUITestCase):
+    """DCK-007: type a box's text in place, select one word by keys and make
+    only it bold, underlined and red, add a centred italic paragraph,
+    commit, save as PPTX and reopen. The render lab compares the saved file
+    as `decks/rich-text-edited`."""
+
+    app_name = "decks"
+    AID = "org.tunaos.decks"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="decks-rich-text-render-")
+        self.isolate_autosave_state()
+        super().setUp()
+
+    def _session(self):
+        return self.trigger_snapshot(self.AID).get("text_session")
+
+    def _box(self):
+        return [o for o in self.trigger_snapshot(self.AID)["slides"][0]["objects"] if o["kind"] == "TextBox"][-1]
+
+    def _control(self, name, role):
+        return self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == name and n.roleName == role and n.showing,
+                                       retry=False, requireResult=False),
+            bool, description=f"the {name} control")
+
+    def test_range_formatting_saves_and_reopens(self):
+        from dogtail import rawinput
+
+        def styled(runs, key):
+            return "".join(r["text"] for r in runs if r["style"].get(key))
+
+        subprocess.run(["gapplication", "action", self.AID, "new-document"])
+        self.wait_until(lambda: self.trigger_snapshot(self.AID)["slides"], bool, description="a new deck")
+        self.gapplication_action(self.AID, "add-text-box")
+        obj = self.wait_until(self._box, bool, description="the text box")
+        x, y = self._slide_to_window()(obj["x"] + obj["w"] / 2, obj["y"] + obj["h"] / 2)
+        rawinput.doubleClick(int(x), int(y))
+        self.wait_until(self._session, bool, description="the text session")
+        rawinput.keyCombo("<Control>a")
+        rawinput.typeText("Alpha Beta Gamma")
+        self.wait_until(self._session, lambda s: s and s["text"] == "Alpha Beta Gamma", description="the typed text")
+        rawinput.keyCombo("Home")
+        for _ in range(6):
+            rawinput.keyCombo("Right")
+        for _ in range(4):
+            rawinput.keyCombo("<Shift>Right")
+        self.wait_until(self._session, lambda s: (s["start"], s["end"]) == (6, 10), description="Beta selected by keys")
+        rawinput.keyCombo("<Control>b")
+        rawinput.keyCombo("<Control>u")
+        self.wait_until(self._session, lambda s: (styled(s["runs"], "bold"), styled(s["runs"], "underline")) == ("Beta", "Beta"),
+                        description="only Beta bold and underlined")
+        self._control("Text Colour of Selection", "push button").do_action(0)
+        self._control("Red", "push button").do_action(0)
+        self.wait_until(self._session, lambda s: "".join(r["text"] for r in s["runs"] if r["style"].get("color") == "c00000") == "Beta",
+                        description="only Beta red")
+        rawinput.keyCombo("End")
+        rawinput.keyCombo("Return")
+        rawinput.keyCombo("<Control>i")
+        rawinput.typeText("Second")
+        self.wait_until(self._session, lambda s: s["text"] == "Alpha Beta Gamma\nSecond" and styled(s["runs"], "italic") == "Second",
+                        description="an italic second paragraph")
+        self._control("Centre Paragraph", "toggle button").do_action(0)
+        self.wait_until(self._session, lambda s: len(s["paras"]) == 2 and s["paras"][1]["align"] == "Center" and s["paras"][0]["align"] == "Left",
+                        description="only the second paragraph centred")
+        rawinput.keyCombo("<Control>Return")
+        box = self.wait_until(self._box, lambda b: b["text"] == "Alpha Beta Gamma\nSecond", description="the committed text")
+        self.assertEqual(styled(box["runs"], "bold"), "Beta")
+
+        path = out_path(self, "decks", "pptx", "rich-text-edited")
+        parts = save_as(self, self.AID, path)
+        slide = parts["ppt/slides/slide1.xml"]
+        self.assertRegex(slide, re.compile(r'<a:rPr[^>]* b="1"[^>]* u="sng"[^>]*>.*?C00000.*?<a:t>Beta</a:t>', re.S),
+                         "Beta was not saved bold, underlined and red")
+        self.assertRegex(slide, re.compile(r'<a:pPr[^>]*algn="ctr"', re.S), "the centred paragraph was not saved")
+
+        self.relaunch_app(launch_args=[path])
+        box = self.wait_until(self._box, lambda b: b["text"] == "Alpha Beta Gamma\nSecond", interval=0.3,
+                              description="the reopened box")
+        self.assertEqual(styled(box["runs"], "bold"), "Beta")
+        self.assertEqual(styled(box["runs"], "underline"), "Beta")
+        self.assertEqual(styled(box["runs"], "italic").strip("\n"), "Second")
+        self.assertIsNone(self.process.poll(), "decks crashed in the rich text edit-render journey")

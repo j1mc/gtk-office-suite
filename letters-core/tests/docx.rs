@@ -1924,6 +1924,17 @@ fn a_cells_bare_sides_survive() {
     assert!(rt.table_unruled.is_empty(), "the rest of the grid stays ruled");
 }
 
+/// A cell set lower than the top survives a save and reopen (`w:vAlign`).
+#[test]
+fn a_cells_vertical_alignment_survives() {
+    use letters_core::{CellVAlign, VAlign};
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 1, 2);
+    let want = vec![CellVAlign { row: 0, col: 0, align: VAlign::Center }, CellVAlign { row: 0, col: 1, align: VAlign::Bottom }];
+    d.table_valign.insert(table, want.clone());
+    assert_eq!(round_trip(&d).table_valign.values().cloned().collect::<Vec<_>>(), [want]);
+}
+
 /// A table's cell padding survives a save and reopen (`w:tblCellMar`); a
 /// table with Word's default has none of its own.
 #[test]

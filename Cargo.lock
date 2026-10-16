@@ -950,6 +950,7 @@ dependencies = [
  "serde_json",
  "suite-common-core",
  "tempfile",
+ "unicode-segmentation",
  "zip 9.0.4",
 ]
 
