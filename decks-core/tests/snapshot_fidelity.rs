@@ -1935,6 +1935,7 @@ fn recovery_rich_state_round_trip() {
                     band_row: false,
                     accent: None,
                     cell_margins: None,
+                    style_id: None,
                 },
             },
         ],
