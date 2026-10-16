@@ -1174,6 +1174,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
         }
         let open = |col: u32| open_edges(doc, first.table, row, col);
+        let valign = |col: u32| doc.table_valign.get(&first.table).and_then(|v| v.iter().find(|v| (v.row, v.col) == (row, col))).map(|v| v.align);
         let fill = |col: u32| doc.table_fills.get(&first.table).and_then(|f| f.iter().find(|f| f.row == row && f.col == col)).map(|f| f.color.clone());
         // Lay the merged cells that start in this row down from its top.
         let mut start_tall = |flow: &mut Flow, tall: &mut Vec<Tall>, top: f64| {
@@ -1199,7 +1200,9 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
                 flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col), ruled, open: open(*col) });
                 let slices = cell_slices(doc, paras, &pad);
-                place_slices(flow, doc, paras, &slices, cx + pad.left_pt, top);
+                let content: f64 = slices.iter().map(Slice::height).sum();
+                let drop = valign(*col).map_or(0.0, |v| (h.pt - rule_pt - content).max(0.0) * v.share());
+                place_slices(flow, doc, paras, &slices, cx + pad.left_pt, top + drop);
             }
             flow.y = top + h.pt;
             close_tall(flow, doc, &mut tall, first.table, row, &col_x, pad.left_pt);
@@ -1256,13 +1259,17 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             };
             let top = flow.y;
             let x0 = flow.column_x();
-            if std::mem::take(&mut first_piece) {
+            let whole = std::mem::take(&mut first_piece);
+            if whole {
                 start_tall(flow, &mut tall, top);
             }
-            for (((col, width, paras), cell), (&from, &(to, _))) in row_cells.iter().zip(&slices).zip(next.iter().zip(&takes)) {
+            for (((col, width, paras), cell), (&from, &(to, used))) in row_cells.iter().zip(&slices).zip(next.iter().zip(&takes)) {
                 let cx = x0 - pad.left_pt + col_x[*col as usize];
                 flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col), ruled, open: open(*col) });
-                place_slices(flow, doc, paras, &cell[from..to], cx + pad.left_pt, top);
+                // A row placed in one piece sets each cell's content where
+                // the cell says; a row split across pages fills from the top.
+                let drop = valign(*col).filter(|_| whole && done).map_or(0.0, |v| (height - rule_pt - used).max(0.0) * v.share());
+                place_slices(flow, doc, paras, &cell[from..to], cx + pad.left_pt, top + drop);
             }
             for (n, (to, _)) in next.iter_mut().zip(&takes) {
                 *n = *to;
