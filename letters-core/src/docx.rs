@@ -48,6 +48,7 @@ struct RawBorder {
     style: BorderStyle,
     color: String,
     width_pt: f64,
+    space_pt: f64,
 }
 
 /// Per body paragraph: strict-spelled indents and tab-stop positions.
@@ -400,10 +401,13 @@ fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
     let mut val = None;
     let mut sz = None;
     let mut color = None;
+    let mut space = None;
     for a in e.attributes().with_checks(false).flatten() {
         match a.key.as_ref() {
             "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
             "w:sz" => sz = a.value.trim().parse::<f64>().ok(),
+            // Points (not eighths), 0..=31.
+            "w:space" => space = a.value.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
             "w:color" => color = Some(a.value.trim().to_ascii_uppercase()),
             _ => {}
         }
@@ -423,7 +427,7 @@ fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
         Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_string(),
         _ => "000000".to_string(),
     };
-    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0 })
+    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0, space_pt: space.unwrap_or(0.0).clamp(0.0, 31.0) })
 }
 
 /// Lay the scanned properties over what rdocx read. Transitional wins
@@ -458,7 +462,7 @@ fn para_borders(raw: Option<&RawPara>, styled: &rdocx_oxml::properties::CT_PPr) 
     let Some(raw) = raw else { return base };
     let [top, left, bottom, right] = &raw.borders;
     let pick = |direct: &Option<Option<RawBorder>>, fallback: Option<ParaBorder>| {
-        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt })).unwrap_or(fallback)
+        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt, space_pt: b.space_pt })).unwrap_or(fallback)
     };
     ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) }
 }
@@ -493,7 +497,12 @@ fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBord
         Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_uppercase(),
         _ => "000000".to_string(),
     };
-    Some(ParaBorder { style, color, width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0) })
+    Some(ParaBorder {
+        style,
+        color,
+        width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0),
+        space_pt: e.space.map_or(0.0, |s| f64::from(s.min(31))),
+    })
 }
 
 /// A paragraph's fixed or minimum line height: the direct `w:spacing`
@@ -897,7 +906,7 @@ fn find_ppr(xml: &str) -> Option<usize> {
 }
 
 /// A paragraph's per-side borders as a `w:pBdr` element. Widths are
-/// eighths of a point; the content gap is a point, as Word writes it.
+/// eighths of a point, the content gap whole points.
 fn pbdr_xml(borders: &ParaBorders) -> String {
     let edge = |name: &str, e: &ParaBorder| {
         let val = match e.style {
@@ -907,8 +916,9 @@ fn pbdr_xml(borders: &ParaBorders) -> String {
             BorderStyle::Double => "double",
         };
         format!(
-            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"1\" w:color=\"{}\"/>",
+            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"{}\" w:color=\"{}\"/>",
             (e.width_pt * 8.0).round().clamp(1.0, 96.0) as u32,
+            e.space_pt.round().clamp(0.0, 31.0) as u32,
             e.color
         )
     };
