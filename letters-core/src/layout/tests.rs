@@ -164,6 +164,22 @@ fn indents_and_alignment_position_lines() {
     assert!((line1_x + width - (595.3 - 72.0)).abs() < 1e-6, "right-aligned lines end at the right margin");
 }
 
+/// An unruled table's cells draw no rule, and its rows hold no rule's
+/// height: a one-line row is its line.
+#[test]
+fn an_unruled_tables_rows_are_their_lines() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.table_unruled.insert(table);
+    let t = lay(&d);
+    let cells: Vec<(bool, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Cell { ruled, height_pt, .. } => Some((*ruled, *height_pt)), _ => None })
+        .collect();
+    assert_eq!(cells, [(false, LINE)]);
+}
+
 #[test]
 fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
     let mut d = doc_of(1, "after");
