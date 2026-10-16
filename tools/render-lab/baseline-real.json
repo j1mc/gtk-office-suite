@@ -196,12 +196,12 @@
     "B": "amber"
   },
   "letters/real-road-safety-open-data-severity-adjustment-guidan": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-salary-template": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-sma-positive-result-call-checklist": {
     "A": "amber",
