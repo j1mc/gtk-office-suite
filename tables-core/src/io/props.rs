@@ -1423,3 +1423,148 @@ Due &lt;Friday&gt;</t></r></text></comment>
         w.finish().unwrap();
     }
 }
+
+/// The sheet a workbook opens on: the one the file was left on, unless it
+/// is hidden, else its first visible sheet, else the first. xlsx names it
+/// with `workbookView activeTab` and hides sheets with `state="hidden"`
+/// or `"veryHidden"`; ods with settings.xml's `ActiveTable` and a table
+/// style's `table:display="false"`.
+///
+/// Every sheet used to open on the first, hidden or not: a return
+/// template whose first seven sheets are hidden data opened on raw UUIDs
+/// where Excel and Calc open on its Contents (render-real
+/// `dpas-return-2025-to-2026-data-template`).
+pub fn opening_sheet(path: &str) -> usize {
+    sheet_visibility(path).map_or(0, |(active, hidden)| pick_opening(active, &hidden))
+}
+
+/// The first sheet a workbook prints: its first visible one, whichever
+/// sheet it was left on. Calc's PDF export starts there, so the render
+/// lab's dump shows this sheet to compare like with like; a user still
+/// opens on [`opening_sheet`]. Dumping the opening sheet scored the
+/// exceptional learning support form, left on its third sheet, against
+/// the first sheet Calc printed (render-real, amber to red).
+pub fn first_printed_sheet(path: &str) -> usize {
+    sheet_visibility(path).map_or(0, |(_, hidden)| pick_opening(None, &hidden))
+}
+
+/// The sheet a workbook was left on and whether each sheet is hidden.
+fn sheet_visibility(path: &str) -> Option<(Option<usize>, Vec<bool>)> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(f).ok()?;
+    let mut budget = ZipBudget::default();
+    budget.check_entry_count(zip.len()).ok()?;
+    if let Ok(workbook) = zip.part_to_string("xl/workbook.xml", &mut budget) {
+        Some(xlsx_opening(&workbook))
+    } else if let Ok(content) = zip.part_to_string("content.xml", &mut budget) {
+        let settings = zip.optional_part_to_string("settings.xml", &mut budget);
+        Some(ods_opening(&content, &settings))
+    } else {
+        None
+    }
+}
+
+/// The active sheet if it is visible, else the first visible one.
+fn pick_opening(active: Option<usize>, hidden: &[bool]) -> usize {
+    active
+        .filter(|&i| hidden.get(i) == Some(&false))
+        .or_else(|| hidden.iter().position(|h| !h))
+        .unwrap_or(0)
+}
+
+/// xlsx: (activeTab, whether each sheet is hidden), in sheet order.
+fn xlsx_opening(workbook: &str) -> (Option<usize>, Vec<bool>) {
+    let active = workbook
+        .split("<workbookView")
+        .nth(1)
+        .and_then(|tag| xml_attr(tag.split('>').next().unwrap_or(""), "activeTab"))
+        .and_then(|v| v.parse().ok())
+        .or(Some(0));
+    let sheets = workbook.split("<sheets>").nth(1).and_then(|s| s.split("</sheets>").next()).unwrap_or("");
+    let hidden = sheets
+        .split("<sheet ")
+        .skip(1)
+        .map(|tag| matches!(xml_attr(tag.split('>').next().unwrap_or(""), "state"), Some("hidden") | Some("veryHidden")))
+        .collect();
+    (active, hidden)
+}
+
+/// ods: (ActiveTable's index, whether each table is hidden), in table order.
+fn ods_opening(content: &str, settings: &str) -> (Option<usize>, Vec<bool>) {
+    // Table styles that hide their table.
+    let mut hiding = std::collections::HashSet::new();
+    for chunk in content.split("<style:style ").skip(1) {
+        let tag = chunk.split('>').next().unwrap_or("");
+        if xml_attr(tag, "style:family") != Some("table") {
+            continue;
+        }
+        let body = chunk.split("</style:style>").next().unwrap_or("");
+        if body.contains("table:display=\"false\"") {
+            hiding.extend(xml_attr(tag, "style:name").map(str::to_string));
+        }
+    }
+    let mut names = Vec::new();
+    let mut hidden = Vec::new();
+    for chunk in content.split("<table:table ").skip(1) {
+        let tag = chunk.split('>').next().unwrap_or("");
+        names.push(xml_attr(tag, "table:name").unwrap_or("").to_string());
+        hidden.push(xml_attr(tag, "table:style-name").is_some_and(|s| hiding.contains(s)));
+    }
+    let active = settings
+        .split("config:name=\"ActiveTable\"")
+        .nth(1)
+        .and_then(|rest| rest.split('>').nth(1))
+        .and_then(|rest| rest.split('<').next())
+        .and_then(|name| names.iter().position(|n| n == name));
+    (active, hidden)
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::*;
+
+    #[test]
+    fn an_xlsx_opens_on_its_active_sheet_and_never_on_a_hidden_one() {
+        let book = |view: &str, states: &[&str]| {
+            let sheets: String = states.iter().enumerate().map(|(i, s)| format!("<sheet name=\"S{i}\" sheetId=\"{i}\" {s} r:id=\"rId{i}\"/>")).collect();
+            format!("<workbook><bookViews><workbookView {view}/></bookViews><sheets>{sheets}</sheets></workbook>")
+        };
+        let pick = |xml: &str| { let (a, h) = xlsx_opening(xml); pick_opening(a, &h) };
+        assert_eq!(pick(&book("activeTab=\"2\"", &["state=\"hidden\"", "", ""])), 2);
+        assert_eq!(pick(&book("", &["state=\"hidden\"", "state=\"veryHidden\"", ""])), 2, "first visible when no active tab");
+        assert_eq!(pick(&book("activeTab=\"0\"", &["state=\"hidden\"", "", ""])), 1, "a hidden active tab is passed over");
+        assert_eq!(pick(&book("", &["", ""])), 0);
+    }
+
+    #[test]
+    fn an_ods_opens_on_its_active_table_and_never_on_a_hidden_one() {
+        let content = "<office:automatic-styles><style:style style:name=\"ta2\" style:family=\"table\"><style:table-properties table:display=\"false\"/></style:style>\
+            <style:style style:name=\"ta1\" style:family=\"table\"><style:table-properties table:display=\"true\"/></style:style></office:automatic-styles>\
+            <table:table table:name=\"Data\" table:style-name=\"ta2\"></table:table><table:table table:name=\"Front\" table:style-name=\"ta1\"></table:table>\
+            <table:table table:name=\"Notes\" table:style-name=\"ta1\"></table:table>";
+        let settings = |active: &str| format!("<config:config-item config:name=\"ActiveTable\" config:type=\"string\">{active}</config:config-item>");
+        let pick = |s: &str| { let (a, h) = ods_opening(content, s); pick_opening(a, &h) };
+        assert_eq!(pick(&settings("Notes")), 2);
+        assert_eq!(pick(&settings("Data")), 1, "a hidden active table is passed over");
+        assert_eq!(pick(""), 1, "no settings: the first visible table");
+    }
+
+    /// The render lab's dump compares against Calc's PDF, which starts at
+    /// the first visible sheet, not the one the file was left on.
+    #[test]
+    fn a_workbook_prints_from_its_first_visible_sheet_wherever_it_was_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("left-on-third.xlsx");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        w.start_file("xl/workbook.xml", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(
+            &mut w,
+            br#"<workbook><bookViews><workbookView activeTab="2"/></bookViews><sheets><sheet name="Data" sheetId="1" state="hidden" r:id="rId1"/><sheet name="Rules" sheetId="2" r:id="rId2"/><sheet name="Costs" sheetId="3" r:id="rId3"/></sheets></workbook>"#,
+        )
+        .unwrap();
+        w.finish().unwrap();
+        let path = path.to_str().unwrap();
+        assert_eq!(opening_sheet(path), 2, "a user opens where the file was left");
+        assert_eq!(first_printed_sheet(path), 1, "printing starts at the first visible sheet");
+    }
+}

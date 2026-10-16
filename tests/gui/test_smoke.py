@@ -8663,6 +8663,57 @@ class LettersPageSetupSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "letters crashed in Page Setup")
 
 
+class LettersSectionSetupSmoke(BaseGUITestCase):
+    """Insert Section Break starts a section at the caret; Page Setup there
+    sets that section's page only, and the page view lays each section on
+    its own page; Remove Section Break joins them; Undo takes each step
+    back (LET-005S)."""
+
+    app_name = "letters"
+    AID = "org.tunaos.letters"
+
+    def setUp(self):
+        self._snapshot_path = self.isolate_snapshot(prefix="letters-section-setup-")
+        super().setUp()
+
+    def _snap(self):
+        return self.trigger_snapshot(self.AID)
+
+    def _sections(self):
+        return [(s["range"]["start"], s["range"]["end"], round(s["geometry"]["margin_top_pt"]))
+                for s in self._snap().get("sections", [])]
+
+    def test_page_setup_sets_the_carets_section_and_undo_takes_it_back(self):
+        from dogtail import rawinput
+
+        self.new_letters_document()
+        rawinput.typeText("first")
+        rawinput.keyCombo("Return")
+        rawinput.typeText("second")
+        self.wait_until(lambda: len(self._snap()["paragraphs"]), lambda n: n == 2, description="two paragraphs")
+        self.gapplication_action(self.AID, "insert-section-break")
+        two = self.wait_until(self._sections, lambda s: [(a, b) for a, b, _ in s] == [(0, 2), (2, 3)],
+                              description="a section starting after 'second'")
+        top = two[0][2]
+
+        self.gapplication_action(self.AID, "page-setup")
+        spin = self.wait_for_node(roleName="spin button")
+        spin.queryValue().currentValue = 40.0  # Top margin, millimetres
+        self.wait_for_node(name="Apply", roleName="push button").do_action(0)
+        self.wait_until(self._sections, lambda s: len(s) == 2 and s[0][2] == top and s[1][2] == round(40.0 * 72 / 25.4),
+                        description="Page Setup changed the caret's section only")
+        self.wait_until(lambda: len(self._snap().get("view", {}).get("pages", [])), lambda n: n == 2,
+                        description="each section on its own page")
+
+        self.gapplication_action(self.AID, "undo")
+        self.wait_until(self._sections, lambda s: [m for _, _, m in s] == [top, top], description="Undo took the page back")
+        self.gapplication_action(self.AID, "remove-section-break")
+        self.wait_until(self._sections, lambda s: len(s) == 1, description="the sections joined")
+        self.gapplication_action(self.AID, "undo")
+        self.wait_until(self._sections, lambda s: len(s) == 2, description="Undo put the break back")
+        self.assertIsNone(self.process.poll(), "letters crashed in section setup")
+
+
 class _ButtonsAreNamed:
     """Every visible button says what it does: a name, or a tooltip (which
     GTK gives a screen reader as the button's description). An icon-only

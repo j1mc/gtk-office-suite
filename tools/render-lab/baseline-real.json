@@ -28,7 +28,7 @@
     "B": "green"
   },
   "decks/real-2024-11-20-presentation-pay-centre-impact-assess": {
-    "A": "amber",
+    "A": "green",
     "B": "amber"
   },
   "decks/real-2024-11-presentation-pay-centre-innovation": {
@@ -52,7 +52,7 @@
     "B": "green"
   },
   "decks/real-2025-02-03-dashboard-overpayment-project-2018": {
-    "A": "red",
+    "A": "amber",
     "B": "amber"
   },
   "decks/real-2025-02-03-dashboard-overpayment-project-2019": {
@@ -112,7 +112,7 @@
     "B": "amber"
   },
   "decks/real-supporting-every-young-person-to-achieve-and-thr": {
-    "A": "red",
+    "A": "amber",
     "B": "red"
   },
   "decks/real-the-children-s-people-and-nature-survey-2022-inf": {
@@ -133,7 +133,7 @@
   },
   "letters/real-consultation-questions-downloadable-alternative": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-crime-supervisor-declaration-form": {
     "A": "amber",
@@ -160,7 +160,7 @@
     "B": "amber"
   },
   "letters/real-expression-of-interest-form": {
-    "A": "red",
+    "A": "amber",
     "B": "amber"
   },
   "letters/real-notes-on-the-completion-of-form-w1-excise-wareho": {
@@ -185,23 +185,23 @@
   },
   "letters/real-provisional-agenda-for-the-sixth-trade-specialis": {
     "A": "green",
-    "B": "green"
+    "B": "amber"
   },
   "letters/real-questionnaire": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-questionnaire-2": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-road-safety-open-data-severity-adjustment-guidan": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-salary-template": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-sma-positive-result-call-checklist": {
     "A": "amber",
@@ -236,8 +236,8 @@
     "B": "amber"
   },
   "letters/real-wga-2025-26-cg-02-template-for-notification-of-t": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "tables/real-2020-deep-sea-stock": {
     "A": "red",
@@ -268,8 +268,8 @@
     "B": "amber"
   },
   "tables/real-dpas-return-2025-to-2026-data-template-for-refer": {
-    "A": "red",
-    "B": "red"
+    "A": "amber",
+    "B": "amber"
   },
   "tables/real-draft-schedule-4-complaint-log": {
     "A": "amber",

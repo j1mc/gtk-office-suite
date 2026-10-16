@@ -176,7 +176,7 @@ fn generate(rng: &mut Rng, controller: &DecksController) -> Command {
 }
 
 fn blank_slide() -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: String::new(),
         background: String::new(),
         background_picture: None,

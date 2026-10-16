@@ -77,7 +77,8 @@ jobs:
             exit 1
           }
           git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          run=$(python3 tools/render-lab/real_scope.py --app "$APP" --changed "$RUNNER_TEMP/changed.txt")
+          run=$(python3 tools/render-lab/real_scope.py --workflow .github/workflows/render-real.yml \
+                  --app "$APP" --changed "$RUNNER_TEMP/changed.txt")
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [ "$run" = false ]; then
             echo "Nothing this pull request changes reaches $APP's rendering (tools/render-lab/real_scope.py), so its real documents were not rendered: they would render as on main." >> "$GITHUB_STEP_SUMMARY"
@@ -118,6 +119,17 @@ jobs:
           restore-keys: |
             render-lab-corpus-${{ matrix.app }}-
 
+      # Main's last pixel scores (pixel_board.py), so the scoreboard below
+      # shows what this run moved; none yet is fine.
+      - name: Main's pixel scores
+        if: steps.scope.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p render-lab-out
+          python3 tools/render-lab/pixel_board.py previous --key "real-${{ matrix.app }}" \
+            --repo "${GITHUB_REPOSITORY}" > render-lab-out/pixel-previous.json || echo '{}' > render-lab-out/pixel-previous.json
+
       - name: Run render lab on the real documents
         if: steps.scope.outputs.run == 'true'
         id: run
@@ -128,7 +140,22 @@ jobs:
 
       - name: Job summary
         if: always() && steps.scope.outputs.run == 'true'
-        run: cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat render-lab-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          { echo; cat render-lab-out/pixel-scoreboard.md; } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      # The ranked pixel scoreboard, one pinned issue per app: the queue to
+      # fix from the top of. Only from main, whatever the ratchet said.
+      - name: Publish the pixel scoreboard
+        if: always() && steps.scope.outputs.run == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && hashFiles('render-lab-out/pixel-scores.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          python3 tools/render-lab/pixel_board.py publish
+          render-lab-out/pixel-scoreboard.md render-lab-out/pixel-scores.json
+          --key "real-${{ matrix.app }}" --title "Pixel scoreboard: ${{ matrix.app }} real documents"
+          --repo "${GITHUB_REPOSITORY}"
+          --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       # One `render-real` issue per document that is not green, closed
       # when it turns green; only from main, and only from a run whose
@@ -152,6 +179,8 @@ jobs:
             render-lab-out/summary.json
             render-lab-out/summary.md
             render-lab-out/scorecard.json
+            render-lab-out/pixel-scoreboard.md
+            render-lab-out/pixel-*.json
             render-lab-out/fixtures/manifest.json
             render-lab-out/${{ matrix.app }}/*/*.png
             render-lab-out/${{ matrix.app }}/*/*.log

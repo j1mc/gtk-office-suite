@@ -34,7 +34,7 @@ fn rect(x: f64) -> SlideObject {
 }
 
 fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.into(),
         background: "#ffffff".into(),
         background_picture: None,

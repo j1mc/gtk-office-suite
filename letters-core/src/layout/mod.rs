@@ -266,7 +266,7 @@ pub enum Item {
     /// A table cell's border box.
     /// A table cell's box and its background colour (six hex digits), if
     /// the file shades it.
-    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String> },
+    Cell { table: u32, row: u32, col: u32, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, ruled: bool, open: crate::model::OpenEdges },
     /// A paragraph's shading and borders: the text box of one run of its
     /// lines on this page (`x_pt`, `y_pt`, `width_pt`, `height_pt`), drawn
     /// under the text. A paragraph split across pages gets one box per
@@ -522,7 +522,8 @@ pub const NOTE_REF_RISE: f64 = 0.33;
 /// separator rule `NOTE_RULE_GAP_PT` above the first note (LibreOffice's
 /// footnote area: a thin line and a small gap).
 pub const NOTE_SEPARATOR_PT: f64 = 6.0;
-pub const NOTE_RULE_GAP_PT: f64 = 2.0;
+/// LibreOffice's default spacing between the rule and the notes: 0.1 cm.
+pub const NOTE_RULE_GAP_PT: f64 = 72.0 * 0.1 / 2.54;
 
 /// Length of the separator rule, relative to the text width (LibreOffice's
 /// default footnote line).
@@ -548,7 +549,12 @@ pub fn note_paragraph(doc: &Document, i: usize, opts: &LayoutOptions) -> Paragra
             space_after_pt: body.map_or(0.0, |s| s.space_after_pt),
             ..Default::default()
         },
-        runs: vec![Run::plain((i + 1).to_string()), Run { text: format!(" {text}"), style: size }],
+        // A Word note's text carries its own leading space after the
+        // reference mark; one without gets one.
+        runs: vec![
+            Run::plain((i + 1).to_string()),
+            Run { text: if text.starts_with(char::is_whitespace) { text } else { format!(" {text}") }, style: size },
+        ],
     }
 }
 
@@ -569,34 +575,27 @@ fn line_notes(para: &Paragraph, lb: &LineBox) -> Vec<usize> {
 
 pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> RenderTree {
     let opts = &opts.for_document(doc);
-    let mut geometry = doc.page.unwrap_or(opts.page);
-    // A header taller than the room above the top margin pushes the body
-    // down, and a tall footer pushes its foot up, as Word and LibreOffice
-    // lay a page out: a letterhead's logo is not drawn over the text.
-    let width = (geometry.width_pt - geometry.margin_left_pt - geometry.margin_right_pt).max(1.0);
-    let header_h = header_footer_height(&doc.header_pictures, doc.header.as_deref(), doc.header_alignment, width, opts, shaper);
-    let footer_h = header_footer_height(&doc.footer_pictures, doc.footer.as_deref(), doc.footer_alignment, width, opts, shaper);
-    if header_h > 0.0 {
-        geometry.margin_top_pt = geometry.margin_top_pt.max(opts.header_distance_pt + header_h);
-    }
-    if footer_h > 0.0 {
-        geometry.margin_bottom_pt = geometry.margin_bottom_pt.max(opts.footer_distance_pt + footer_h);
-    }
-    let mut flow = Flow::new(geometry, opts);
+    // Each section's paragraphs and page (LET-005S); a document of one
+    // section is one run on its own page or the application's.
+    let runs = crate::sections::runs(doc, opts.page);
+    let geometries: Vec<PageGeometry> = runs.iter().enumerate().map(|(k, (_, g))| section_geometry(doc, k, *g, opts, shaper)).collect();
+    let mut flow = Flow::new(geometries[0], opts);
     // Each footnote's height at the foot of a page, for the flow to keep
     // room for the notes of the lines it places.
-    let text_w = flow.content_width();
-    for i in 0..doc.footnotes.len() {
-        let p = note_paragraph(doc, i, opts);
-        let shaped = shape_paragraph(&p, text_w, opts, shaper);
-        flow.note_lines.push(shaped.lines.iter().map(|l| line_height(&p, l.natural_height())).collect());
-        flow.note_after.push(p.style.space_after_pt.max(0.0));
-    }
+    flow.shape_notes(doc, shaper);
     let ordinals = lists::ordinals(doc.paragraphs.iter().map(|p| &p.style));
-    let col_w = flow.column_width();
+    let mut col_w = flow.column_width();
+    let mut section = 0;
 
     let mut i = 0;
     while i < doc.paragraphs.len() {
+        // A section starts on a page of its own, laid out on its page.
+        while section + 1 < runs.len() && runs[section + 1].0.start <= i {
+            section += 1;
+            flow.start_section(geometries[section], section, doc, shaper);
+            col_w = flow.column_width();
+        }
+        let section_end = runs[section].0.end;
         let para = &doc.paragraphs[i];
         if let Some(cell) = para.style.table_cell {
             let end = doc.paragraphs[i..]
@@ -610,8 +609,9 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
         let shaped = shape_paragraph(para, col_w, opts, shaper);
         // Keep a heading, and any paragraph set to keep with the next (a
         // Title, a Word style's keepNext), with the first lines of what
-        // follows it.
-        let keep_next = if para.style.heading.is_some() || para.style.keep_with_next {
+        // follows it — in its own section: the next section starts a page
+        // anyway.
+        let keep_next = if (para.style.heading.is_some() || para.style.keep_with_next) && i + 1 < section_end {
             doc.paragraphs.get(i + 1).filter(|n| n.style.table_cell.is_none()).map(|n| {
                 let s = shape_paragraph(n, col_w, opts, shaper);
                 let (orphans, _) = orphan_widow(&n.style, opts);
@@ -622,10 +622,43 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
         } else {
             None
         };
-        place_paragraph(&mut flow, i, para, &shaped, ordinals[i], keep_next);
+        let group = border_group(doc, i, section_end);
+        place_paragraph(&mut flow, i, para, &shaped, ordinals[i], keep_next, group);
         i += 1;
     }
     flow.finish(doc, opts, shaper)
+}
+
+/// Section `k`'s page as the body sees it: a header taller than the room
+/// above the top margin pushes the body down, and a tall footer pushes its
+/// foot up, as Word and LibreOffice lay a page out: a letterhead's logo is
+/// not drawn over the text.
+fn section_geometry(doc: &Document, k: usize, page: PageGeometry, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> PageGeometry {
+    let mut geometry = page;
+    let width = content_width(&geometry);
+    let (header, header_own) = crate::sections::header(doc, k);
+    let (footer, footer_own) = crate::sections::footer(doc, k);
+    let header_pictures: &[Run] = if header_own { &doc.header_pictures } else { &[] };
+    let footer_pictures: &[Run] = if footer_own { &doc.footer_pictures } else { &[] };
+    let header_h = header_footer_height(header_pictures, header, doc.header_alignment, width, opts, shaper);
+    let footer_h = header_footer_height(footer_pictures, footer, doc.footer_alignment, width, opts, shaper);
+    if header_h > 0.0 {
+        geometry.margin_top_pt = geometry.margin_top_pt.max(opts.header_distance_pt + header_h);
+    }
+    if footer_h > 0.0 {
+        geometry.margin_bottom_pt = geometry.margin_bottom_pt.max(opts.footer_distance_pt + footer_h);
+    }
+    geometry
+}
+
+/// The width between a page's side margins.
+fn content_width(g: &PageGeometry) -> f64 {
+    (g.width_pt - g.margin_left_pt - g.margin_right_pt).max(1.0)
+}
+
+/// The foot of a page's text area, above its bottom margin.
+fn foot_of(g: &PageGeometry) -> f64 {
+    (g.height_pt - g.margin_bottom_pt).max(g.margin_top_pt + 1.0)
 }
 
 /// Line-height multiplier of a paragraph (1.0 when unset or nonsensical).
@@ -643,6 +676,19 @@ fn line_height(p: &Paragraph, natural: f64) -> f64 {
         Some(crate::model::LineHeight::Exact(pt)) if pt.is_finite() && pt > 0.0 => pt,
         Some(crate::model::LineHeight::Minimum(pt)) if pt.is_finite() && pt > 0.0 => multiple.max(pt),
         _ => multiple,
+    }
+}
+
+/// How far below its top a line of paragraph `p`, `height` points tall
+/// (`line_height`), puts its baseline. Writer's rule
+/// (`SwTextFormatter::CalcRealHeight`): an exact line's ascent is four
+/// fifths of its height whatever the font; a line an at-least rule grows
+/// takes the growth above its text; proportional spacing adds below.
+fn line_ascent(p: &Paragraph, lb: &LineBox, height: f64) -> f64 {
+    match p.style.line_height {
+        Some(crate::model::LineHeight::Exact(pt)) if pt.is_finite() && pt > 0.0 => 0.8 * height,
+        Some(crate::model::LineHeight::Minimum(pt)) if pt.is_finite() && pt > 0.0 => lb.ascent_pt + (height - lb.natural_height()).max(0.0),
+        _ => lb.ascent_pt,
     }
 }
 
@@ -760,7 +806,8 @@ pub fn paragraph_request<'a>(p: &'a Paragraph, box_w: f64, opts: &'a LayoutOptio
         runs: &p.runs,
         heading: st.heading,
         code: st.code_block.is_some(),
-        look: paragraph_look(st),
+        // A file's own Title is drawn as its runs say, not ours.
+        look: if st.own_look { Look::Body } else { paragraph_look(st) },
         alignment: st.alignment,
         width_pt: box_w,
         // A list item's first line starts at its text indent; the marker
@@ -792,7 +839,33 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
 /// Place a shaped paragraph in the flow, splitting it across columns and
 /// pages with orphan and widow control. `keep_next` is the height that must
 /// fit below the paragraph on the same page (a heading's follower).
-fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shaped, ordinal: u32, keep_next: Option<f64>) {
+/// How paragraph `i` joins the bordered group around it: whether the
+/// paragraph before it has the same borders and indents (so no top edge or
+/// top gap here), and, when the one after does, the space between them,
+/// which the group's box spans. Writer and Word draw a run of paragraphs
+/// with identical borders as one box, its gaps at its top and bottom only.
+fn border_group(doc: &Document, i: usize, section_end: usize) -> (bool, Option<f64>) {
+    let p = &doc.paragraphs[i];
+    if p.style.borders.is_empty() {
+        return (false, None);
+    }
+    let same = |o: &Paragraph| {
+        o.style.table_cell.is_none()
+            && o.style.borders == p.style.borders
+            && (o.style.left_indent_pt - p.style.left_indent_pt).abs() < 0.01
+            && (o.style.right_indent_pt - p.style.right_indent_pt).abs() < 0.01
+    };
+    let joins_prev = i > 0 && same(&doc.paragraphs[i - 1]) && !p.style.page_break_before;
+    let next_gap = doc
+        .paragraphs
+        .get(i + 1)
+        .filter(|n| i + 1 < section_end && same(n) && !n.style.page_break_before)
+        .map(|n| p.style.space_after_pt.max(0.0).max(n.style.space_before_pt.max(0.0)));
+    (joins_prev, next_gap)
+}
+
+fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shaped, ordinal: u32, keep_next: Option<f64>, group: (bool, Option<f64>)) {
+    let (joins_prev, next_gap) = group;
     let st = &para.style;
     if st.page_break_before && !flow.page_is_empty() {
         flow.new_page();
@@ -885,9 +958,15 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         let chunk_top = flow.y;
         let chunk_x = flow.column_x();
         let chunk_at = flow.page_len();
+        let (opens, closes) = (line == 0 && !joins_prev, line + fit == n && next_gap.is_none());
+        // Writer's border box: a top border stands its width and gap above
+        // the first line.
+        if let Some(b) = st.borders.top.as_ref().filter(|_| opens && fit > 0) {
+            flow.y += b.inset_pt();
+        }
         for (k, (lb, &height)) in shaped.lines.iter().zip(&heights).enumerate().skip(line).take(fit) {
             let top = flow.y;
-            let baseline = top + lb.ascent_pt;
+            let baseline = top + line_ascent(para, lb, height);
             let x0 = flow.column_x();
             if k == 0 && st.list != ListKind::None {
                 if let Some(text) = lists::marker_for(st, ordinal) {
@@ -902,24 +981,41 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
             }
             flow.y += height;
         }
+        // A bottom border stands its gap below the last line's natural
+        // foot; that line's proportional extra goes below the border
+        // (Writer: measured 13.8pt lines at 1.15 and 2.0 spacing).
+        let mut below = 0.0;
+        if let Some(b) = st.borders.bottom.as_ref().filter(|_| closes && fit > 0) {
+            if para.style.line_height.is_none() {
+                let last = &shaped.lines[line + fit - 1];
+                below = (heights[line + fit - 1] - last.natural_height()).max(0.0);
+            }
+            flow.y += b.inset_pt() - below;
+        }
         // A shaded or bordered paragraph draws its box under this chunk's
         // lines: one box per page, opening where the paragraph continues.
+        // Side borders stand off the text by their width and gap.
         if (st.shading.is_some() || !st.borders.is_empty()) && fit > 0 {
+            let left = st.borders.left.as_ref().map_or(0.0, crate::model::ParaBorder::inset_pt);
+            let right = st.borders.right.as_ref().map_or(0.0, crate::model::ParaBorder::inset_pt);
             flow.insert(
                 chunk_at,
                 Item::ParaBox {
                     para: idx,
-                    x_pt: chunk_x + shaped.box_x,
+                    x_pt: chunk_x + shaped.box_x - left,
                     y_pt: chunk_top,
-                    width_pt: shaped.box_w,
-                    height_pt: flow.y - chunk_top,
+                    width_pt: shaped.box_w + left + right,
+                    // A group's box runs on over the gap to its next
+                    // paragraph, so its sides do not break there.
+                    height_pt: flow.y - chunk_top + if line + fit == n { next_gap.unwrap_or(0.0) } else { 0.0 },
                     fill: st.shading.clone(),
                     borders: st.borders.clone(),
-                    top_edge: line == 0,
-                    bottom_edge: line + fit == n,
+                    top_edge: opens,
+                    bottom_edge: closes,
                 },
             );
         }
+        flow.y += below;
         line += fit;
         if line < n {
             flow.next_column();
@@ -933,7 +1029,7 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
 /// `box_x` and top at `top`, and the images on it.
 #[allow(clippy::too_many_arguments)]
 fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: usize, lb: &LineBox, box_x: f64, box_w: f64, top: f64, height: f64) {
-    let baseline = top + lb.ascent_pt;
+    let baseline = top + line_ascent(para, lb, height);
     // A paragraph's floating images are placed from its first line's top:
     // those behind the text before the line, the rest after it.
     if k == 0 {
@@ -1027,6 +1123,10 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let cells: Vec<(usize, crate::model::TableCell)> =
         range.clone().filter_map(|i| doc.paragraphs[i].style.table_cell.map(|c| (i, c))).collect();
     let Some(&(_, first)) = cells.first() else { return };
+    // A table that starts a page (a page break the file put before it).
+    if doc.paragraphs[range.start].style.page_break_before && !flow.page_is_empty() {
+        flow.new_page();
+    }
     let cols = cells.iter().map(|(_, c)| c.col).max().unwrap_or(0) + 1;
     let rows = cells.iter().map(|(_, c)| c.row).max().unwrap_or(0) + 1;
     let table_w = flow.column_width();
@@ -1043,6 +1143,12 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         }
     };
     let span_w = |col: u32, n: u32| -> f64 { widths[col as usize..(col + n) as usize].iter().sum() };
+    // The room inside each cell around its text. The table sits out to
+    // the left by its left padding, so cell text lines up with the margin.
+    let pad = doc.table_padding.get(&first.table).copied().unwrap_or_default();
+    // A table without rules has no rule in its rows' height either.
+    let ruled = !doc.table_unruled.contains(&first.table);
+    let rule_pt = if ruled { CELL_RULE_PT } else { 0.0 };
     let opts = flow.opts.clone();
     flow.y += std::mem::take(&mut flow.pending_after);
 
@@ -1055,7 +1161,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         for col in 0..cols {
             let Some((ncols, nrows)) = cell_at(row, col) else { continue };
             let width = span_w(col, ncols);
-            let inner_w = (width - 2.0 * CELL_PADDING_PT).max(1.0);
+            let inner_w = (width - pad.left_pt - pad.right_pt).max(1.0);
             let mut paras = Vec::new();
             for &(i, _) in cells.iter().filter(|(_, c)| c.row == row && c.col == col) {
                 let p = &doc.paragraphs[i];
@@ -1071,14 +1177,15 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 row_cells.push((col, width, paras));
             }
         }
+        let open = |col: u32| open_edges(doc, first.table, row, col);
         let fill = |col: u32| doc.table_fills.get(&first.table).and_then(|f| f.iter().find(|f| f.row == row && f.col == col)).map(|f| f.color.clone());
         // Lay the merged cells that start in this row down from its top.
         let mut start_tall = |flow: &mut Flow, tall: &mut Vec<Tall>, top: f64| {
             for (col, width, last_row, paras) in starting.drain(..) {
-                let cx = flow.column_x() - CELL_PADDING_PT + col_x[col as usize];
-                let slices = cell_slices(doc, &paras);
-                place_slices(flow, doc, &paras, &slices, cx, top);
-                let bottom = top + slices.iter().map(Slice::height).sum::<f64>() + CELL_RULE_PT;
+                let cx = flow.column_x() - pad.left_pt + col_x[col as usize];
+                let slices = cell_slices(doc, &paras, &pad);
+                place_slices(flow, doc, &paras, &slices, cx + pad.left_pt, top);
+                let bottom = top + slices.iter().map(Slice::height).sum::<f64>() + rule_pt;
                 tall.push(Tall { row, col, width, last_row, top, page: flow.pages.len(), column: flow.column, bottom, fill: fill(col) });
             }
         };
@@ -1093,13 +1200,13 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             let x0 = flow.column_x();
             start_tall(flow, &mut tall, top);
             for (col, width, paras) in &row_cells {
-                let cx = x0 - CELL_PADDING_PT + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col) });
-                let slices = cell_slices(doc, paras);
-                place_slices(flow, doc, paras, &slices, cx, top);
+                let cx = x0 - pad.left_pt + col_x[*col as usize];
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: h.pt, fill: fill(*col), ruled, open: open(*col) });
+                let slices = cell_slices(doc, paras, &pad);
+                place_slices(flow, doc, paras, &slices, cx + pad.left_pt, top);
             }
             flow.y = top + h.pt;
-            close_tall(flow, &mut tall, first.table, row, &col_x);
+            close_tall(flow, doc, &mut tall, first.table, row, &col_x, pad.left_pt);
             continue;
         }
         // Otherwise the row splits across pages, as Word and LibreOffice
@@ -1108,7 +1215,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         // the next. A minimum height (an answer box) is made up by the
         // last piece. Moved whole, a tall row left a page of blank space
         // before it and a row taller than a page ran off its foot.
-        let slices: Vec<Vec<Slice>> = row_cells.iter().map(|(_, _, paras)| cell_slices(doc, paras)).collect();
+        let slices: Vec<Vec<Slice>> = row_cells.iter().map(|(_, _, paras)| cell_slices(doc, paras, &pad)).collect();
         let mut next = vec![0usize; slices.len()];
         // A merged cell that ends here needs the row to reach the end of
         // its content, when the two are in the same column of one page.
@@ -1120,7 +1227,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         let mut min_left = file_h.map_or(0.0, |h| h.pt).max(tall_need);
         let mut first_piece = true;
         loop {
-            let room = flow.bottom() - flow.y - CELL_RULE_PT;
+            let room = flow.bottom() - flow.y - rule_pt;
             // How many of each cell's remaining slices fit in `room`.
             let fit = |cell: &[Slice], from: usize| -> (usize, f64) {
                 let mut h = 0.0;
@@ -1145,7 +1252,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 takes
             };
             let done = takes.iter().zip(&slices).all(|((n, _), c)| *n == c.len());
-            let content = takes.iter().map(|(_, h)| *h).fold(0.0, f64::max) + CELL_RULE_PT;
+            let content = takes.iter().map(|(_, h)| *h).fold(0.0, f64::max) + rule_pt;
             let height = if done {
                 content.max(min_left.min((flow.bottom() - flow.y).max(content)))
             } else {
@@ -1157,9 +1264,9 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 start_tall(flow, &mut tall, top);
             }
             for (((col, width, paras), cell), (&from, &(to, _))) in row_cells.iter().zip(&slices).zip(next.iter().zip(&takes)) {
-                let cx = x0 - CELL_PADDING_PT + col_x[*col as usize];
-                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col) });
-                place_slices(flow, doc, paras, &cell[from..to], cx, top);
+                let cx = x0 - pad.left_pt + col_x[*col as usize];
+                flow.push(Item::Cell { table: first.table, row, col: *col, x_pt: cx, y_pt: top, width_pt: *width, height_pt: height, fill: fill(*col), ruled, open: open(*col) });
+                place_slices(flow, doc, paras, &cell[from..to], cx + pad.left_pt, top);
             }
             for (n, (to, _)) in next.iter_mut().zip(&takes) {
                 *n = *to;
@@ -1171,7 +1278,7 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             }
             flow.next_column();
         }
-        close_tall(flow, &mut tall, first.table, row, &col_x);
+        close_tall(flow, doc, &mut tall, first.table, row, &col_x, pad.left_pt);
     }
 }
 
@@ -1191,16 +1298,22 @@ struct Tall {
     fill: Option<String>,
 }
 
+/// A cell's sides the file draws no rule on.
+fn open_edges(doc: &Document, table: u32, row: u32, col: u32) -> crate::model::OpenEdges {
+    doc.table_open_edges.get(&table).and_then(|e| e.iter().find(|e| (e.row, e.col) == (row, col))).map(|e| e.open).unwrap_or_default()
+}
+
 /// Draw the box of each merged cell whose last row is `row`, now placed:
 /// from its first row's top to here, when both are in this column of this
 /// page. One that crossed a page keeps its content and loses its box.
-fn close_tall(flow: &mut Flow, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64]) {
+fn close_tall(flow: &mut Flow, doc: &Document, tall: &mut Vec<Tall>, table: u32, row: u32, col_x: &[f64], left_pad: f64) {
+    let ruled = !doc.table_unruled.contains(&table);
     let (page, column, y, x0) = (flow.pages.len(), flow.column, flow.y, flow.column_x());
     let (ending, rest): (Vec<Tall>, Vec<Tall>) = std::mem::take(tall).into_iter().partition(|t| t.last_row == row);
     *tall = rest;
     for t in ending.into_iter().filter(|t| (t.page, t.column) == (page, column)) {
-        let cx = x0 - CELL_PADDING_PT + col_x[t.col as usize];
-        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone() });
+        let cx = x0 - left_pad + col_x[t.col as usize];
+        flow.push(Item::Cell { table, row: t.row, col: t.col, x_pt: cx, y_pt: t.top, width_pt: t.width, height_pt: y - t.top, fill: t.fill.clone(), ruled, open: open_edges(doc, table, t.row, t.col) });
     }
 }
 
@@ -1221,22 +1334,31 @@ impl Slice {
     }
 }
 
-/// A cell's content as the steps it is laid down in.
-fn cell_slices(doc: &Document, paras: &[CellParagraph]) -> Vec<Slice> {
-    let mut out = Vec::new();
+/// A cell's content as the steps it is laid down in, inside the cell's
+/// top and bottom padding.
+fn cell_slices(doc: &Document, paras: &[CellParagraph], pad: &crate::model::CellPadding) -> Vec<Slice> {
+    let mut out = vec![Slice::Gap(pad.top_pt)];
+    // Between two paragraphs of a cell the larger of the space after the
+    // first and the space before the second applies, as in the body
+    // (measured in Writer: 4.5pt before and after stand 4.5pt apart in a
+    // cell too, not 9pt).
+    let mut after = 0.0;
     for (k, (i, s, _)) in paras.iter().enumerate() {
         let p = &doc.paragraphs[*i];
-        out.push(Slice::Gap(p.style.space_before_pt.max(0.0)));
+        out.push(Slice::Gap(p.style.space_before_pt.max(0.0).max(after)));
         out.extend(s.lines.iter().enumerate().map(|(l, lb)| Slice::Line(k, l, line_height(p, lb.natural_height()))));
-        out.push(Slice::Gap(p.style.space_after_pt.max(0.0)));
+        after = p.style.space_after_pt.max(0.0);
     }
+    out.push(Slice::Gap(after));
+    out.push(Slice::Gap(pad.bottom_pt));
     out
 }
 
-/// Draw a run of a cell's slices from `top` down, in the cell at `cx`.
+/// Draw a run of a cell's slices from `top` down, its text's left edge at
+/// `text_x` (the cell's, inside its padding).
 /// A shaded or bordered cell paragraph gets its box under its lines
 /// here too, opening where the cell continues on another page.
-fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices: &[Slice], cx: f64, top: f64) {
+fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices: &[Slice], text_x: f64, top: f64) {
     // One box per paragraph run of lines, under the text: collect the
     // runs first, since the box precedes its lines. A run is (paragraph,
     // top, bottom, first line, last line); gaps always end one.
@@ -1276,7 +1398,7 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
         }
         flow.push(Item::ParaBox {
             para: *i,
-            x_pt: cx + CELL_PADDING_PT + s.box_x,
+            x_pt: text_x + s.box_x,
             y_pt: rtop,
             width_pt: s.box_w,
             height_pt: rbottom - rtop,
@@ -1292,7 +1414,7 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
             let (i, s, _) = &paras[k];
             let p = &doc.paragraphs[*i];
             let text: Vec<char> = layout_text(&p.runs).chars().collect();
-            emit_line(flow, *i, p, &text, l, &s.lines[l], cx + CELL_PADDING_PT + s.box_x, s.box_w, y, h);
+            emit_line(flow, *i, p, &text, l, &s.lines[l], text_x + s.box_x, s.box_w, y, h);
         }
         y += slice.height();
     }
@@ -1332,6 +1454,11 @@ struct Flow<'o> {
     page_notes: Vec<Vec<NotePiece>>,
     /// What continues at the foot of the next page.
     carry: Vec<NotePiece>,
+    /// The section (index into the document's sections, 0 for a document
+    /// of one) being laid out, and the one each page belongs to: whose
+    /// header and footer it shows.
+    section: usize,
+    page_sections: Vec<usize>,
 }
 
 impl<'o> Flow<'o> {
@@ -1348,9 +1475,65 @@ impl<'o> Flow<'o> {
             note_after: Vec::new(),
             page_notes: Vec::new(),
             carry: Vec::new(),
+            section: 0,
+            page_sections: Vec::new(),
         };
         f.new_page();
         f
+    }
+
+    /// Shape the document's footnotes at this page's text width: the
+    /// heights the flow keeps room for.
+    fn shape_notes(&mut self, doc: &Document, shaper: &mut dyn Shaper) {
+        let text_w = self.content_width();
+        self.note_lines.clear();
+        self.note_after.clear();
+        for i in 0..doc.footnotes.len() {
+            let p = note_paragraph(doc, i, self.opts);
+            let shaped = shape_paragraph(&p, text_w, self.opts, shaper);
+            self.note_lines.push(shaped.lines.iter().map(|l| line_height(&p, l.natural_height())).collect());
+            self.note_after.push(p.style.space_after_pt.max(0.0));
+        }
+    }
+
+    /// Start section `section` on `geometry`: on a page of its own, or on
+    /// the current one if nothing is on it yet (no blank page between).
+    /// Footnotes are reshaped when the text is a different width; a note
+    /// continued across the break keeps the lines that are left of it.
+    fn start_section(&mut self, geometry: PageGeometry, section: usize, doc: &Document, shaper: &mut dyn Shaper) {
+        let width = self.content_width();
+        self.geometry = geometry;
+        self.section = section;
+        if self.page_is_empty() {
+            if let Some(page) = self.pages.last_mut() {
+                page.width_pt = geometry.width_pt;
+                page.height_pt = geometry.height_pt;
+                page.geometry = geometry;
+            }
+            if let Some(s) = self.page_sections.last_mut() {
+                *s = section;
+            }
+            self.column = 0;
+            self.y = self.top();
+            self.column_items = 0;
+            self.pending_after = 0.0;
+        } else {
+            self.new_page();
+        }
+        if (self.content_width() - width).abs() > 1e-6 && !doc.footnotes.is_empty() {
+            self.shape_notes(doc, shaper);
+            let lens: Vec<usize> = self.note_lines.iter().map(Vec::len).collect();
+            let clamp = |p: &mut NotePiece| {
+                let len = lens.get(p.note).copied().unwrap_or(0);
+                p.to = p.to.min(len);
+                p.from = p.from.min(p.to);
+            };
+            self.carry.iter_mut().for_each(clamp);
+            if let Some(pieces) = self.page_notes.last_mut() {
+                pieces.iter_mut().for_each(clamp);
+                pieces.retain(|p| p.to > p.from);
+            }
+        }
     }
 
     fn columns(&self) -> usize {
@@ -1358,7 +1541,7 @@ impl<'o> Flow<'o> {
     }
 
     fn content_width(&self) -> f64 {
-        (self.geometry.width_pt - self.geometry.margin_left_pt - self.geometry.margin_right_pt).max(1.0)
+        content_width(&self.geometry)
     }
 
     fn column_width(&self) -> f64 {
@@ -1376,7 +1559,7 @@ impl<'o> Flow<'o> {
 
     /// The foot of the text area, above the bottom margin.
     fn foot(&self) -> f64 {
-        (self.geometry.height_pt - self.geometry.margin_bottom_pt).max(self.top() + 1.0)
+        foot_of(&self.geometry)
     }
 
     fn note_len(&self, note: usize) -> usize {
@@ -1496,6 +1679,7 @@ impl<'o> Flow<'o> {
             geometry: self.geometry,
             items: Vec::new(),
         });
+        self.page_sections.push(self.section);
         // A footnote continued from the page before comes first.
         let carried = std::mem::take(&mut self.carry);
         self.page_notes.push(carried);
@@ -1535,39 +1719,60 @@ impl<'o> Flow<'o> {
         items.insert(at.min(items.len()), item);
     }
 
-    /// Add headers and footers now that the page count is known.
+    /// Add footnotes, headers and footers now that the page count is
+    /// known: each page on its own section's page, with its section's
+    /// header and footer.
     fn finish(mut self, doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> RenderTree {
         let total = self.pages.len();
-        let width = self.content_width();
-        let (left, height) = (self.geometry.margin_left_pt, self.geometry.height_pt);
         // Each page's footnotes, ending at the foot of its text area under
         // a short rule.
-        let foot = self.foot();
         let page_notes = std::mem::take(&mut self.page_notes);
         for (page, pieces) in self.pages.iter_mut().zip(&page_notes) {
             if pieces.is_empty() {
                 continue;
             }
+            let g = page.geometry;
+            let (left, width, foot) = (g.margin_left_pt, content_width(&g), foot_of(&g));
+            let notes: Vec<(Paragraph, Vec<LineBox>)> = pieces
+                .iter()
+                .map(|piece| {
+                    let p = note_paragraph(doc, piece.note, opts);
+                    let lines = shape_paragraph(&p, width, opts, shaper).lines;
+                    (p, lines)
+                })
+                .collect();
+            let ends = |piece: &NotePiece, lines: &[LineBox]| piece.to >= lines.len();
             // The last piece ends at the foot; a note's space after it is
             // not drawn.
-            let after = pieces.last().filter(|p| p.to >= self.note_lines.get(p.note).map_or(0, Vec::len)).map_or(0.0, |p| self.note_after[p.note]);
+            let after = pieces.last().zip(notes.last()).filter(|(piece, (_, lines))| ends(piece, lines)).map_or(0.0, |(_, (p, _))| p.style.space_after_pt.max(0.0));
             let total: f64 = pieces
                 .iter()
-                .map(|p| {
-                    let lines = &self.note_lines[p.note];
-                    lines[p.from.min(lines.len())..p.to.min(lines.len())].iter().sum::<f64>()
-                        + if p.to >= lines.len() { self.note_after[p.note] } else { 0.0 }
+                .zip(&notes)
+                .map(|(piece, (p, lines))| {
+                    lines[piece.from.min(lines.len())..piece.to.min(lines.len())].iter().map(|lb| line_height(p, lb.natural_height())).sum::<f64>()
+                        + if ends(piece, lines) { p.style.space_after_pt.max(0.0) } else { 0.0 }
                 })
                 .sum();
-            let mut y = foot + after - total;
+            // As at a bordered paragraph's foot, the last line's
+            // proportional extra hangs below the foot: its natural foot
+            // sits on it (Writer, render-lab letters/footnotes).
+            // A note split at the page's foot hangs the same way.
+            let hang = pieces
+                .last()
+                .zip(notes.last())
+                .filter(|(_, (p, _))| p.style.line_height.is_none())
+                .and_then(|(piece, (p, lines))| {
+                    let lb = lines.get(piece.to.min(lines.len()).checked_sub(1)?)?;
+                    Some((line_height(p, lb.natural_height()) - lb.natural_height()).max(0.0))
+                })
+                .unwrap_or(0.0);
+            let mut y = foot + after + hang - total;
             page.items.push(Item::Rule { x_pt: left, y_pt: y - NOTE_RULE_GAP_PT, width_pt: width * NOTE_RULE_FRACTION });
-            for piece in pieces {
+            for (piece, (p, lines)) in pieces.iter().zip(&notes) {
                 let i = piece.note;
-                let p = note_paragraph(doc, i, opts);
-                let shaped = shape_paragraph(&p, width, opts, shaper);
                 let chars: Vec<char> = layout_text(&p.runs).chars().collect();
-                for (k, lb) in shaped.lines.iter().enumerate().take(piece.to).skip(piece.from) {
-                    let h = line_height(&p, lb.natural_height());
+                for (k, lb) in lines.iter().enumerate().take(piece.to).skip(piece.from) {
+                    let h = line_height(p, lb.natural_height());
                     page.items.push(Item::Line {
                         source: Source::Footnote(i),
                         line: k,
@@ -1578,23 +1783,29 @@ impl<'o> Flow<'o> {
                         box_width_pt: width,
                         x_pt: left + lb.x_pt,
                         top_pt: y,
-                        baseline_pt: y + lb.ascent_pt,
+                        baseline_pt: y + line_ascent(p, lb, h),
                         height_pt: h,
                     });
                     y += h;
                 }
-                if piece.to >= shaped.lines.len() {
+                if ends(piece, lines) {
                     y += p.style.space_after_pt.max(0.0);
                 }
             }
         }
+        let page_sections = std::mem::take(&mut self.page_sections);
         for page in &mut self.pages {
+            let g = page.geometry;
+            let (left, width, height) = (g.margin_left_pt, content_width(&g), page.height_pt);
+            let section = page_sections.get(page.index).copied().unwrap_or(0);
+            let (header, header_own) = crate::sections::header(doc, section);
+            let (footer, footer_own) = crate::sections::footer(doc, section);
             for (source, template, pictures, alignment) in [
-                (Source::Header, &doc.header, &doc.header_pictures, doc.header_alignment),
-                (Source::Footer, &doc.footer, &doc.footer_pictures, doc.footer_alignment),
+                (Source::Header, header, if header_own { doc.header_pictures.as_slice() } else { &[] }, doc.header_alignment),
+                (Source::Footer, footer, if footer_own { doc.footer_pictures.as_slice() } else { &[] }, doc.footer_alignment),
             ] {
                 let row_h = picture_row_height(pictures, width);
-                let text_h = template.as_deref().filter(|t| !t.is_empty()).map_or(0.0, |t| {
+                let text_h = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
                     header_footer_lines(&page_field_text(t, page.index + 1, total), alignment, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
                 });
                 let top = match source {
@@ -1602,7 +1813,7 @@ impl<'o> Flow<'o> {
                     _ => height - opts.footer_distance_pt - row_h - text_h,
                 };
                 place_header_footer_pictures(page, pictures, left, width, top, height);
-                let Some(template) = template.as_deref().filter(|t| !t.is_empty()) else { continue };
+                let Some(template) = template.filter(|t| !t.is_empty()) else { continue };
                 let text = page_field_text(template, page.index + 1, total);
                 let lines = header_footer_lines(&text, alignment, pictures, width, opts, shaper);
                 // Under the pictures' row.

@@ -281,7 +281,7 @@ fn inspect_package(
     }
     if names.contains("xl/workbook.xml") {
         let xml = read_part(zip, "xl/workbook.xml", budget)?;
-        if xml.contains("<workbookProtection") || xml.contains(":workbookProtection") {
+        if workbook_protected(&xml) {
             record(report, WORKBOOK_PROTECTION, "xl/workbook.xml", "protection of the sheet list (adding, renaming, moving and deleting sheets) or of the window, and its password, aren't kept");
         }
         // `_xlnm.Print_Area` and `_xlnm._FilterDatabase` are sheet-scoped
@@ -339,6 +339,25 @@ fn inspect_package(
         }
     }
     Ok(())
+}
+
+/// Whether `xl/workbook.xml`'s `<workbookProtection>` protects anything: a
+/// lock that is on, or a password. Calc writes an empty element into every
+/// xlsx it saves, which locks nothing and must not ask before a save.
+fn workbook_protected(xml: &str) -> bool {
+    use std::sync::LazyLock;
+    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?workbookProtection\b[^>]*>").unwrap()
+    });
+    TAG.find_iter(xml).any(|tag| {
+        super::sheet_protection::attributes(tag.as_str()).iter().any(|(name, value)| {
+            if name.starts_with("lock") {
+                matches!(value.trim(), "1" | "true")
+            } else {
+                name.contains("Password") || name.contains("HashValue")
+            }
+        })
+    })
 }
 
 /// What one worksheet `<autoFilter>` holds that the model cannot carry:
@@ -676,6 +695,23 @@ mod tests {
         ]);
         let report = content_a_save_drops(Some(ods.to_str().unwrap()), &[sheet()]);
         assert_eq!(ids(&report), ["sheet-protection-password", "workbook-protection"]);
+    }
+
+    /// Calc writes `<workbookProtection/>` into every xlsx it saves; an
+    /// element that locks nothing is no protection to lose.
+    #[test]
+    fn an_empty_or_unlocked_workbook_protection_is_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, element) in [
+            ("calc.xlsx", "<workbookProtection/>"),
+            ("unlocked.xlsx", r#"<x:workbookProtection lockStructure="0" lockWindows="false"/>"#),
+        ] {
+            let path = dir.path().join(name);
+            package(&path, &[("xl/workbook.xml", &format!("<workbook>{element}<sheets/></workbook>"))]);
+            assert!(content_a_save_drops(Some(path.to_str().unwrap()), &[sheet()]).features.is_empty(), "{name}");
+        }
+        assert!(workbook_protected(r#"<workbookProtection lockWindows="true"/>"#));
+        assert!(workbook_protected(r#"<workbookProtection workbookAlgorithmName="SHA-512" workbookHashValue="x"/>"#));
     }
 
     #[test]

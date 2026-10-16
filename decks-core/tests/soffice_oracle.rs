@@ -89,7 +89,7 @@ fn impress_survives_multi_slide_deck() {
     if !require_or_skip() { return; }
     let mut deck = sample_deck();
     for i in 2..=5 {
-        deck.slides.push(decks_core::engine::Slide {
+        deck.slides.push(decks_core::engine::Slide { hidden: false,
             title: format!("Slide {}", i),
             background: "#ffffff".into(),
             background_picture: None,
@@ -142,7 +142,7 @@ fn through_impress(deck: &Deck, stem: &str) -> Option<Deck> {
 }
 
 fn text_slide(title: &str, text: &str, notes: &str) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -249,7 +249,7 @@ fn is_ellipse(o: &SlideObject) -> bool {
 #[test]
 fn shape_kinds_survive_impress_rewrite() {
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "shapes".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -274,7 +274,7 @@ fn shape_kinds_survive_impress_rewrite() {
 #[test]
 fn positions_approx_survive_impress_rewrite() {
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "pos".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -319,7 +319,7 @@ fn empty_slide_survives_impress_rewrite() {
     let mut deck = Deck::new();
     deck.slides = vec![
         text_slide("one", "content", ""),
-        Slide {
+        Slide { hidden: false,
             title: "empty".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -341,7 +341,7 @@ fn empty_slide_survives_impress_rewrite() {
 fn bold_run_survives_impress_rewrite() {
     use letters_core::model::{Run, RunStyle};
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "styled".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -428,7 +428,7 @@ use letters_core::model::{Run, RunStyle};
 
 fn styled_run_slide(runs: Vec<Run>) -> Slide {
     let text = runs.iter().map(|r| r.text.as_str()).collect::<String>();
-    Slide {
+    Slide { hidden: false,
         title: "styled".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -529,7 +529,7 @@ fn image_object_survives_impress_rewrite() {
     std::fs::write(&png_path, png).unwrap();
 
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "img".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -625,7 +625,7 @@ fn odp_notes_survive_impress_rewrite() {
 #[test]
 fn odp_geometry_survives_impress_rewrite() {
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "g".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -682,7 +682,7 @@ fn odp_slide_order_survives_impress_rewrite() {
 fn odp_bold_run_survives_impress_rewrite() {
     use letters_core::model::{Run as LRun, RunStyle as LRunStyle};
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "styled".into(),
         background: "#ffffff".into(),
         background_picture: None,
@@ -1084,7 +1084,7 @@ fn impress_keeps_the_font_we_write_into_an_odp() {
 #[test]
 fn impress_runs_in_one_paragraph_come_back_as_one_line() {
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "T".into(),
         background: String::new(),
         background_picture: None,
@@ -1143,7 +1143,7 @@ fn a_styled_multiline_box_keeps_its_break_and_its_styling_through_impress() {
         return;
     }
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "T".into(),
         background: String::new(),
         background_picture: None,
@@ -1279,7 +1279,7 @@ fn geometry_survives_a_conversion_between_the_two_formats() {
         return;
     }
     let mut deck = Deck::new();
-    deck.slides = vec![Slide {
+    deck.slides = vec![Slide { hidden: false,
         title: "T".into(),
         background: String::new(),
         background_picture: None,
@@ -2052,4 +2052,72 @@ fn a_merged_table_cell_survives_impress() {
     assert_eq!(t.rows[0][0].span(), (2, 1), "{:?}", t.rows[0]);
     assert!(t.rows[0][1].covered, "{:?}", t.rows[0]);
     assert_eq!(t.rows[0][0].text(), "Title");
+}
+
+/// A hidden slide stays hidden through Impress: our pptx and our odp,
+/// each converted to the other format, still hide the middle slide.
+#[test]
+fn a_hidden_slide_stays_hidden_through_impress() {
+    if !require_or_skip() {
+        return;
+    }
+    let mut deck = Deck::new();
+    let proto = deck.slides[0].clone();
+    deck.slides = (1..=3)
+        .map(|k| {
+            let mut s = proto.clone();
+            s.title = format!("S{k}");
+            s.hidden = k == 2;
+            s
+        })
+        .collect();
+    for (ext, to) in [("pptx", "odp"), ("odp", "pptx")] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("hidden.{ext}"));
+        decks_core::write_deck(path.to_str().unwrap(), &deck).expect("write");
+        let back = convert(&path, to).unwrap_or_else(|e| panic!("Impress converts our {ext}: {e}"));
+        let read = decks_core::read_deck(back.to_str().unwrap()).expect("read Impress's file");
+        let got: Vec<bool> = read.slides.iter().map(|s| s.hidden).collect();
+        assert_eq!(got, [false, true, false], "{ext} → {to}");
+    }
+}
+
+/// A freeform survives Impress rewriting it in either format: it comes
+/// back with its own paths, not as its box.
+#[test]
+fn a_freeform_survives_impress_in_both_formats() {
+    if !require_or_skip() {
+        return;
+    }
+    use decks_core::engine::freeform::{FreePath, PathCmd};
+    use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle};
+    let wedge = FreePath {
+        w: 1000.0,
+        h: 1000.0,
+        cmds: vec![PathCmd::Move(500.0, 500.0), PathCmd::Line(1000.0, 500.0), PathCmd::Arc { wr: 500.0, hr: 500.0, start: 0.0, swing: 90.0 }, PathCmd::Close],
+        fill: true,
+        stroke: true,
+    };
+    let mut deck = Deck::new();
+    deck.slides[0].objects = vec![SlideObject::Shape {
+        kind: ShapeKind::Freeform(vec![wedge]),
+        x: 100.0,
+        y: 100.0,
+        w: 200.0,
+        h: 200.0,
+        rotation: 0.0,
+        style: ShapeStyle { fill: Some(Color(0x44, 0x72, 0xC4)), gradient: None, stroke: None, fill_src: None, stroke_src: None },
+    }];
+    for ext in ["pptx", "odp"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("freeform.{ext}"));
+        decks_core::write_deck(path.to_str().unwrap(), &deck).expect("write");
+        let back = convert(&path, ext).unwrap_or_else(|e| panic!("Impress rewrites our {ext}: {e}"));
+        let read = decks_core::read_deck(back.to_str().unwrap()).expect("read Impress's file");
+        let kinds: Vec<_> = read.slides[0].objects.iter().filter_map(|o| match o { SlideObject::Shape { kind, .. } => Some(kind.clone()), _ => None }).collect();
+        assert!(
+            matches!(kinds.as_slice(), [ShapeKind::Freeform(p)] if p.len() == 1 && p[0].cmds.len() >= 3),
+            "{ext}: {kinds:?}"
+        );
+    }
 }
