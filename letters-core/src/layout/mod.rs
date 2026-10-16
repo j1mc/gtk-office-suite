@@ -672,6 +672,19 @@ fn line_height(p: &Paragraph, natural: f64) -> f64 {
     }
 }
 
+/// How far below its top a line of paragraph `p`, `height` points tall
+/// (`line_height`), puts its baseline. Writer's rule
+/// (`SwTextFormatter::CalcRealHeight`): an exact line's ascent is four
+/// fifths of its height whatever the font; a line an at-least rule grows
+/// takes the growth above its text; proportional spacing adds below.
+fn line_ascent(p: &Paragraph, lb: &LineBox, height: f64) -> f64 {
+    match p.style.line_height {
+        Some(crate::model::LineHeight::Exact(pt)) if pt.is_finite() && pt > 0.0 => 0.8 * height,
+        Some(crate::model::LineHeight::Minimum(pt)) if pt.is_finite() && pt > 0.0 => lb.ascent_pt + (height - lb.natural_height()).max(0.0),
+        _ => lb.ascent_pt,
+    }
+}
+
 /// The orphan/widow counts that govern paragraph `p`: its own
 /// `widow_control` when it switches control off (single lines may
 /// strand), else the document default.
@@ -913,7 +926,7 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         let chunk_at = flow.page_len();
         for (k, (lb, &height)) in shaped.lines.iter().zip(&heights).enumerate().skip(line).take(fit) {
             let top = flow.y;
-            let baseline = top + lb.ascent_pt;
+            let baseline = top + line_ascent(para, lb, height);
             let x0 = flow.column_x();
             if k == 0 && st.list != ListKind::None {
                 if let Some(text) = lists::marker_for(st, ordinal) {
@@ -959,7 +972,7 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
 /// `box_x` and top at `top`, and the images on it.
 #[allow(clippy::too_many_arguments)]
 fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: usize, lb: &LineBox, box_x: f64, box_w: f64, top: f64, height: f64) {
-    let baseline = top + lb.ascent_pt;
+    let baseline = top + line_ascent(para, lb, height);
     // A paragraph's floating images are placed from its first line's top:
     // those behind the text before the line, the rest after it.
     if k == 0 {
@@ -1680,7 +1693,7 @@ impl<'o> Flow<'o> {
                         box_width_pt: width,
                         x_pt: left + lb.x_pt,
                         top_pt: y,
-                        baseline_pt: y + lb.ascent_pt,
+                        baseline_pt: y + line_ascent(p, lb, h),
                         height_pt: h,
                     });
                     y += h;
