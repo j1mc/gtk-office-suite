@@ -1839,7 +1839,7 @@ fn parse_para_border(v: &str) -> Option<ParaBorder> {
     if color.len() != 6 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    Some(ParaBorder { style, color, width_pt })
+    Some(ParaBorder { style, color, width_pt, space_pt: 0.0 })
 }
 
 /// A list that continues the numbering of the one before it with its

@@ -964,11 +964,14 @@ impl Typeset {
             let _ = cr.fill();
             let _ = cr.restore();
         }
+        // Each border lies inside the box, its outer edge on the box's.
+        let half = |e: &Option<crate::model::ParaBorder>| e.as_ref().map_or(0.0, |e| e.width_pt.clamp(0.25, 12.0) / 2.0);
+        let (t, b, l, r) = (half(&borders.top), half(&borders.bottom), half(&borders.left), half(&borders.right));
         for (edge, (x0, y0), (x1, y1)) in [
-            (borders.top.clone().filter(|_| top_edge), (x, y), (x + w, y)),
-            (borders.bottom.clone().filter(|_| bottom_edge), (x, y + h), (x + w, y + h)),
-            (borders.left.clone(), (x, y), (x, y + h)),
-            (borders.right.clone(), (x + w, y), (x + w, y + h)),
+            (borders.top.clone().filter(|_| top_edge), (x, y + t), (x + w, y + t)),
+            (borders.bottom.clone().filter(|_| bottom_edge), (x, y + h - b), (x + w, y + h - b)),
+            (borders.left.clone(), (x + l, y), (x + l, y + h)),
+            (borders.right.clone(), (x + w - r, y), (x + w - r, y + h)),
         ] {
             let Some(edge) = edge else { continue };
             let Some((r, g, b)) = parse_hex(&edge.color) else { continue };

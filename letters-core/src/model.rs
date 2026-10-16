@@ -267,12 +267,22 @@ pub enum LineHeight {
 }
 
 /// One side of a paragraph's border (OOXML `w:pBdr`, ODF `fo:border-*`):
-/// its look, its colour as RRGGBB hex, and its width in points.
+/// its look, its colour as RRGGBB hex, its width in points, and the gap
+/// between it and the text (`w:space`, ODF `fo:padding-*`) in points.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParaBorder {
     pub style: BorderStyle,
     pub color: String,
     pub width_pt: f64,
+    #[serde(default)]
+    pub space_pt: f64,
+}
+
+impl ParaBorder {
+    /// How far this side stands off the text: its gap plus its width.
+    pub fn inset_pt(&self) -> f64 {
+        self.space_pt.max(0.0) + self.width_pt.max(0.0)
+    }
 }
 
 /// A paragraph border's look. Only the looks both formats name the same
@@ -1492,7 +1502,7 @@ mod structured_editing_tests {
         style.line_height = Some(LineHeight::Minimum(18.0));
         style.shading = Some("D9D9D9".to_string());
         style.borders = ParaBorders {
-            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75 }),
+            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75, space_pt: 0.0 }),
             ..ParaBorders::default()
         };
         style.tab_stops_pt = vec![TabStop { pos_pt: 72.0, align: TabAlign::Right, leader: TabLeader::Dot }];

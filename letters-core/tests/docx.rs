@@ -517,6 +517,19 @@ fn page_breaks_and_named_styles_survive() {
     assert!(!rt.paragraphs[0].style.page_break_before);
 }
 
+/// A border's gap to the text (`w:space`, points) is read and written:
+/// it sets where Writer draws the border and how tall the paragraph is.
+#[test]
+fn border_gaps_survive() {
+    let mut d = Document::from_plain_text("ruled\nboxed");
+    let edge = |gap: f64| Some(ParaBorder { style: BorderStyle::Single, color: "4F81BD".into(), width_pt: 1.0, space_pt: gap });
+    d.paragraphs[0].style.borders = ParaBorders { bottom: edge(4.0), ..Default::default() };
+    d.paragraphs[1].style.borders = ParaBorders { top: edge(1.0), left: edge(0.0), ..Default::default() };
+    let rt = round_trip(&d);
+    assert_eq!(rt.paragraphs[0].style.borders, d.paragraphs[0].style.borders);
+    assert_eq!(rt.paragraphs[1].style.borders, d.paragraphs[1].style.borders);
+}
+
 /// A file's own Title and Subtitle styles are its look: their runs carry
 /// the style's size, colour and letter spacing (python-docx's template:
 /// 26pt plain, 12pt italic spaced 0.75pt), and layout adds none of
