@@ -564,7 +564,6 @@ fn shapes_xml(
                 // text, as Impress writes one: a custom shape painted by a
                 // graphic style.
                 SlideObject::TextBox { text, x, y, w, h, rotation, runs, body } if body.frame.is_some() => {
-                    use crate::engine::shape::ShapeKind;
                     let frame = body.frame.as_ref().expect("matched on it");
                     let inner: Vec<String> = if runs.is_empty() {
                         text.split('\n').map(esc_breaks).collect()
@@ -580,17 +579,9 @@ fn shapes_xml(
                         graphics.text.paragraphs(body, &inner)
                     };
                     let gs = graphics.name_of(&frame.style);
-                    let ty = match &frame.kind {
-                        ShapeKind::Rect => "rectangle".to_string(),
-                        ShapeKind::RoundRect { .. } => "round-rectangle".to_string(),
-                        ShapeKind::Ellipse => "ellipse".to_string(),
-                        ShapeKind::Triangle => "isosceles-triangle".to_string(),
-                        ShapeKind::Diamond => "diamond".to_string(),
-                        other => format!("ooxml-{}", other.prst()),
-                    };
+                    let geom = enhanced_geometry(&frame.kind);
                     pages.push_str(&format!(
-                        "<draw:custom-shape draw:style-name=\"{gs}\" {}>{paras}\
-                         <draw:enhanced-geometry draw:type=\"{ty}\"/></draw:custom-shape>",
+                        "<draw:custom-shape draw:style-name=\"{gs}\" {}>{paras}{geom}</draw:custom-shape>",
                         geometry(*x, *y, *w, *h, *rotation)
                     ));
                 }
@@ -690,17 +681,7 @@ fn shapes_xml(
                         ),
                         ShapeKind::Ellipse => format!("<draw:ellipse draw:style-name=\"{gs}\" {at}/>"),
                         // Impress's names for the other DrawingML presets.
-                        other => {
-                            let ty = match other {
-                                ShapeKind::Triangle => "isosceles-triangle".to_string(),
-                                ShapeKind::Diamond => "diamond".to_string(),
-                                _ => format!("ooxml-{}", other.prst()),
-                            };
-                            format!(
-                                "<draw:custom-shape draw:style-name=\"{gs}\" {at}>\
-                                 <draw:enhanced-geometry draw:type=\"{ty}\"/></draw:custom-shape>"
-                            )
-                        }
+                        other => format!("<draw:custom-shape draw:style-name=\"{gs}\" {at}>{}</draw:custom-shape>", enhanced_geometry(other)),
                     });
                 }
                 SlideObject::Chart { x, y, w, h, rotation, chart } => {
@@ -1268,8 +1249,53 @@ fn transition_of(smil_type: Option<&str>, decks: Option<&str>) -> Transition {
     }
 }
 
+/// A `draw:enhanced-geometry`'s own paths, when it is not a preset: its
+/// enhanced path over its view box (`freeform::from_enhanced_path`).
+fn freeform_paths(e: &quick_xml::events::BytesStart) -> Option<Vec<crate::engine::freeform::FreePath>> {
+    let ty = attr(e, "draw:type").unwrap_or_default();
+    if !matches!(ty.as_str(), "non-primitive" | "ooxml-non-primitive") {
+        return None;
+    }
+    let view: Vec<f64> = attr(e, "svg:viewBox")?.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+    let [_, _, vw, vh] = view.as_slice() else { return None };
+    crate::engine::freeform::from_enhanced_path(&attr(e, "draw:enhanced-path")?, *vw, *vh)
+}
+
+/// A custom shape's kind: its own paths if it has them, else its preset.
+fn custom_kind(shape_type: Option<&str>, paths: Option<Vec<crate::engine::freeform::FreePath>>) -> crate::engine::shape::ShapeKind {
+    match paths {
+        Some(paths) => crate::engine::shape::ShapeKind::Freeform(paths),
+        None => crate::odp_graphics::kind_of("draw:custom-shape", shape_type, None),
+    }
+}
+
+/// A custom shape's `draw:enhanced-geometry`: Impress's name for its
+/// preset, or a freeform's paths as an enhanced path over a 21600 box (the
+/// size Impress's own custom shapes use).
+fn enhanced_geometry(kind: &crate::engine::shape::ShapeKind) -> String {
+    use crate::engine::shape::ShapeKind;
+    let ty = match kind {
+        ShapeKind::Rect => "rectangle".to_string(),
+        ShapeKind::RoundRect { .. } => "round-rectangle".to_string(),
+        ShapeKind::Ellipse => "ellipse".to_string(),
+        ShapeKind::Triangle => "isosceles-triangle".to_string(),
+        ShapeKind::Diamond => "diamond".to_string(),
+        ShapeKind::Freeform(paths) => {
+            let d = crate::engine::freeform::to_enhanced_path(paths, FREEFORM_VIEW);
+            return format!("<draw:enhanced-geometry svg:viewBox=\"0 0 {v} {v}\" draw:type=\"non-primitive\" draw:enhanced-path=\"{d}\"/>", v = FREEFORM_VIEW);
+        }
+        other => format!("ooxml-{}", other.prst()),
+    };
+    format!("<draw:enhanced-geometry draw:type=\"{ty}\"/>")
+}
+
+/// The view box a freeform's enhanced path is written over.
+const FREEFORM_VIEW: f64 = 21600.0;
+
 /// A slide's drawing-page style properties, or `None` when it needs no
-/// style (absent background, no transition). An explicit white background
+/// style (absent background, no transition, shown). A hidden slide needs
+/// one even with neither, because Impress's "Hide Slide" lives there
+/// (`presentation:visibility`). An explicit white background
 /// keeps its style (DCK-006): it is not the absence of one. A background
 /// picture fills the page with the fill image `styles.xml` declares for it
 /// (`background_fill_images`), stretched. ODF has no counterpart to
@@ -1284,7 +1310,8 @@ fn drawing_page_props(slide: &Slide, si: usize) -> Option<String> {
         String::new()
     };
     let trans = transition_attrs(slide.transition).unwrap_or_default();
-    (!fill.is_empty() || !trans.is_empty()).then(|| format!("{fill}{trans}"))
+    let visibility = if slide.hidden { " presentation:visibility=\"hidden\"" } else { "" };
+    (!fill.is_empty() || !trans.is_empty() || slide.hidden).then(|| format!("{fill}{trans}{visibility}"))
 }
 
 /// The fill image slide `si`'s background picture is declared as.
@@ -1336,6 +1363,26 @@ fn fill_images(
                     if let (Some(name), Some(href)) = (attr(&e, "draw:name"), attr(&e, "xlink:href")) {
                         images.insert(name, href);
                     }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+}
+
+/// The drawing-page styles in a part that hide their slide
+/// (`presentation:visibility="hidden"`, Impress's "Hide Slide").
+fn hidden_pages(xml: &str, hidden: &mut std::collections::HashSet<String>) {
+    let mut reader = Reader::from_str(xml);
+    let mut cur: Option<String> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                "style:style" => cur = attr(&e, "style:name"),
+                "style:drawing-page-properties" if attr(&e, "presentation:visibility").as_deref() == Some("hidden") => {
+                    hidden.extend(cur.clone());
                 }
                 _ => {}
             },
@@ -1571,6 +1618,9 @@ fn parse_pages(
     let mut span_style: Option<RunStyle> = None;
     let mut in_text = false;
     let mut shape_type: Option<String> = None;
+    // A custom shape's own paths, when its geometry is not a preset
+    // (`draw:type` "non-primitive", as for a freeform).
+    let mut shape_paths: Option<Vec<crate::engine::freeform::FreePath>> = None;
     // Paragraph layout of the box being read: the frame's graphic style,
     // the open `text:list`s' style names, and one style per `text:p`.
     let mut frame_style: Option<String> = None;
@@ -1664,7 +1714,7 @@ fn parse_pages(
                     page_style = attr(e, "draw:style-name");
                     page_layout = attr(e, "presentation:presentation-page-layout-name");
                     layout_of = attr(e, "decks:layout-of").zip(attr(e, "decks:layout").and_then(|j| j.parse().ok()));
-                    slide = Some(Slide {
+                    slide = Some(Slide { hidden: false,
                         title: attr(e, "draw:name")
                             .or_else(|| attr(e, "style:name").map(|n| decode_style_name(&n)))
                             .unwrap_or_default(),
@@ -1737,11 +1787,13 @@ fn parse_pages(
                     textbox = Some((Vec::new(), Vec::new()));
                     paras.clear();
                     shape_type = None;
+                    shape_paths = None;
                 }
                 "draw:enhanced-geometry" => {
                     if let Some(t) = attr(e, "draw:type") {
                         shape_type = Some(t);
                     }
+                    shape_paths = freeform_paths(e);
                 }
                 "text:p" => {
                     let list = lists.iter().flatten().next().map(String::as_str);
@@ -1797,6 +1849,7 @@ fn parse_pages(
                     if let Some(t) = attr(e, "draw:type") {
                         shape_type = Some(t);
                     }
+                    shape_paths = freeform_paths(e);
                 }
                 "draw:rect" => {
                     if let (Some(s), false) = (slide.as_mut(), in_notes) {
@@ -1927,12 +1980,12 @@ fn parse_pages(
                                     .and_then(|n| graphics.style(n, scale.0))
                                     .filter(|st| st.fill.is_some() || st.gradient.is_some() || st.stroke.is_some())
                                     .map(|style| crate::engine::text_body::Frame {
-                                        kind: crate::odp_graphics::kind_of("draw:custom-shape", shape_type.as_deref(), None),
+                                        kind: custom_kind(shape_type.as_deref(), shape_paths.take()),
                                         style,
                                     });
                                 s.objects.push(SlideObject::TextBox { text, x, y, w, h, rotation, runs, body });
                             } else if let Some(style) = frame_style.as_deref().and_then(|n| graphics.style(n, scale.0)) {
-                                let kind = crate::odp_graphics::kind_of("draw:custom-shape", shape_type.as_deref(), None);
+                                let kind = custom_kind(shape_type.as_deref(), shape_paths.take());
                                 s.objects.push(SlideObject::Shape { kind, x, y, w, h, rotation, style });
                             } else if shape_type.as_deref().is_some_and(|t| t.contains("ellipse")) {
                                 let r = (w.max(h)) / 2.0;
@@ -2180,8 +2233,12 @@ pub fn read(path: &str) -> Result<Deck, String> {
     let (mut page_image, mut images) = (Default::default(), Default::default());
     fill_images(&content, &mut page_image, &mut images);
     fill_images(&styles, &mut page_image, &mut images);
+    // A slide's page style is an automatic style of `content.xml`.
+    let mut hidden = std::collections::HashSet::new();
+    hidden_pages(&content, &mut hidden);
     for (i, page) in slide_pages.into_iter().enumerate() {
         let mut slide = page.slide;
+        slide.hidden = page.style.as_ref().is_some_and(|n| hidden.contains(n));
         slide.background_picture = page
             .style
             .as_ref()
@@ -2221,7 +2278,7 @@ pub fn read(path: &str) -> Result<Deck, String> {
     }
 
     if deck.slides.is_empty() {
-        deck.slides.push(Slide {
+        deck.slides.push(Slide { hidden: false,
             title: "Slide 1".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2270,7 +2327,7 @@ mod tests {
     }
 
     fn text_slide(title: &str, text: &str, notes: &str) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: title.into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2489,7 +2546,7 @@ mod tests {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: "one".into(),
                 background: String::new(),
                 background_picture: None,
@@ -2541,7 +2598,7 @@ mod tests {
                 color_map: Default::default(),
                 layouts: Vec::new(),
             }],
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: "p".into(),
                 background: String::new(),
                 background_picture: None,
@@ -2737,7 +2794,7 @@ mod tests {
     #[test]
     fn geometry_round_trips() {
         let mut deck = Deck::new();
-        deck.slides = vec![Slide {
+        deck.slides = vec![Slide { hidden: false,
             title: "g".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2775,7 +2832,7 @@ mod tests {
     #[test]
     fn styled_runs_round_trip() {
         let mut deck = Deck::new();
-        deck.slides = vec![Slide {
+        deck.slides = vec![Slide { hidden: false,
             title: "s".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -2951,7 +3008,7 @@ mod tests {
     /// One slide holding a single text box at (`at`, `at`).
     fn deck_with_box(text: &str, at: f64) -> Deck {
         Deck {
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,

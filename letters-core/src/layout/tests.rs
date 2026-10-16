@@ -2,7 +2,7 @@
 // line, so an A4 page with 1in margins holds 75 chars × 46 lines.
 
 use super::*;
-use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell};
+use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
 
 const LINE: f64 = 15.0;
 const LINES_PER_PAGE: usize = 46;
@@ -162,6 +162,70 @@ fn indents_and_alignment_position_lines() {
         _ => unreachable!(),
     };
     assert!((line1_x + width - (595.3 - 72.0)).abs() < 1e-6, "right-aligned lines end at the right margin");
+}
+
+/// Two paragraphs of one cell stand the larger of the space between them
+/// apart, as in the body (Writer: 4.5pt after and 4.5pt before is 4.5pt
+/// in a cell too); the cell's first and last keep theirs.
+#[test]
+fn a_cells_paragraphs_collapse_the_space_between_them() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let para = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, space_before_pt: 4.5, space_after_pt: 4.5, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [para("one"), para("two")]);
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops[1] - tops[0], LINE + 4.5, "{tops:?}");
+    let height = t.pages[0].items.iter().find_map(|i| match i { Item::Cell { height_pt, .. } => Some(*height_pt), _ => None }).unwrap();
+    assert_eq!(height, 4.5 + LINE + 4.5 + LINE + 4.5 + CELL_RULE_PT);
+}
+
+/// An unruled table's cells draw no rule, and its rows hold no rule's
+/// height: a one-line row is its line.
+#[test]
+fn an_unruled_tables_rows_are_their_lines() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.table_unruled.insert(table);
+    let t = lay(&d);
+    let cells: Vec<(bool, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Cell { ruled, height_pt, .. } => Some((*ruled, *height_pt)), _ => None })
+        .collect();
+    assert_eq!(cells, [(false, LINE)]);
+}
+
+/// A table whose first cell has a page break before it starts a page.
+#[test]
+fn a_table_after_a_page_break_starts_a_page() {
+    let mut d = doc_of(2, "text");
+    let table = d.insert_table_at(1, 1, 1);
+    let first = d.paragraphs.iter().position(|p| p.style.table_cell.is_some_and(|c| c.table == table)).unwrap();
+    d.paragraphs[first].style.page_break_before = true;
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    assert!(!t.pages[0].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+    assert!(t.pages[1].items.iter().any(|i| matches!(i, Item::Cell { .. })));
+}
+
+/// A cell's bare sides reach the painter with it; its neighbours keep
+/// their own.
+#[test]
+fn a_cells_bare_sides_are_laid_with_it() {
+    use crate::model::{CellEdges, OpenEdges};
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 2);
+    let bare = OpenEdges { right: true, ..Default::default() };
+    d.table_open_edges.insert(table, vec![CellEdges { row: 0, col: 0, open: bare }]);
+    let open: Vec<(u32, OpenEdges)> = lay(&d).pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Cell { col, open, .. } => Some((*col, *open)), _ => None })
+        .collect();
+    assert_eq!(open, [(0, bare), (1, OpenEdges::default())]);
 }
 
 #[test]
@@ -375,6 +439,28 @@ fn an_aligned_header_and_footer_sit_where_the_document_puts_them() {
     assert!((fx + fn_ as f64 * 3.0 - page.width_pt / 2.0).abs() < 1e-6, "centred: {fx}");
 }
 
+/// A table's own cell padding: the row is as tall as its text and the
+/// padding above and below it, the text inset by the left padding, and
+/// the table out to the left by it so the text lines up with the margin.
+#[test]
+fn a_tables_cell_padding_sizes_its_rows_and_insets_its_text() {
+    let cells = |d: &Document| -> Vec<(f64, f64, f64)> {
+        lay(d).pages[0].items.iter().filter_map(|i| match i { Item::Cell { x_pt, y_pt, height_pt, .. } => Some((*x_pt, *y_pt, *height_pt)), _ => None }).collect()
+    };
+    let text_x = |d: &Document| lay(d).pages[0].lines().find_map(|l| match l { Item::Line { text, x_pt, top_pt, .. } if text == "cell" => Some((*x_pt, *top_pt)), _ => None }).unwrap();
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.paragraphs[0].runs = vec![Run::plain("cell")];
+    let plain = cells(&d)[0];
+    assert_eq!(text_x(&d).0, 72.0);
+    d.table_padding.insert(table, CellPadding { top_pt: 6.0, bottom_pt: 4.0, left_pt: 9.0, right_pt: 9.0 });
+    let padded = cells(&d)[0];
+    assert_eq!(padded.0, 72.0 - 9.0, "the table sits out by its left padding");
+    assert!((padded.2 - (plain.2 + 10.0)).abs() < 1e-9, "6pt above and 4pt below: {padded:?} vs {plain:?}");
+    let (x, top) = text_x(&d);
+    assert_eq!((x, top), (72.0, padded.1 + 6.0), "text inside the padding, at the margin");
+}
+
 #[test]
 fn headers_and_footers_repeat_with_page_numbers() {
     let mut d = doc_of(60, "x");
@@ -559,6 +645,30 @@ fn with_note(text: &str, n: usize) -> Paragraph {
         style: ParaStyle::default(),
         runs: vec![Run::plain(text), Run { text: String::new(), style: crate::model::RunStyle { footnote: Some(n), ..Default::default() } }],
     }
+}
+
+/// Writer at the foot: a note's last line stands on the bottom margin by
+/// its natural foot, its proportional extra hanging below; and a Word
+/// note's own leading space is the only one after its number.
+#[test]
+fn a_spaced_note_stands_on_the_margin_by_its_natural_foot() {
+    let mut d = doc_of(2, "body");
+    d.paragraphs.insert(1, with_note("noted", 0));
+    for p in &mut d.paragraphs {
+        p.style.line_spacing = 2.0;
+    }
+    d.footnotes = vec![" The note.".into()];
+    assert_eq!(note_paragraph(&d, 0, &opts()).runs[1].text, " The note.");
+    let t = lay(&d);
+    let foot = 841.9 - 72.0;
+    let note: Vec<(f64, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i { Item::Line { source: Source::Footnote(0), top_pt, height_pt, .. } => Some((*top_pt, *height_pt)), _ => None })
+        .collect();
+    // A 30pt line (15pt natural at 2.0): its top is 15pt above the foot.
+    assert_eq!(note.len(), 1);
+    assert!((note[0].1 - 30.0).abs() < 1e-9 && (note[0].0 + 15.0 - foot).abs() < 1e-6, "{note:?}");
 }
 
 #[test]
@@ -821,6 +931,31 @@ fn exact_and_minimum_line_heights_size_lines() {
 }
 
 #[test]
+fn fixed_and_grown_lines_place_the_baseline_as_writer_does() {
+    let mut d = doc_of(4, "x");
+    d.paragraphs[0].style.line_height = Some(LineHeight::Exact(30.0));
+    d.paragraphs[1].style.line_height = Some(LineHeight::Minimum(30.0));
+    d.paragraphs[2].style.line_height = Some(LineHeight::Minimum(5.0));
+    let t = lay(&d);
+    let drops: Vec<f64> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Line { source: Source::Paragraph(_), top_pt, baseline_pt, .. } => Some(baseline_pt - top_pt),
+            _ => None,
+        })
+        .collect();
+    // The plain last paragraph shows the natural ascent; its line is 15pt.
+    let natural = drops[3];
+    // Exact: four fifths of the fixed height, whatever the font.
+    assert!((drops[0] - 24.0).abs() < 1e-9, "{drops:?}");
+    // atLeast grown from 15pt to 30pt: the 15pt growth goes above the text.
+    assert!((drops[1] - (natural + 15.0)).abs() < 1e-9, "{drops:?}");
+    // atLeast the natural line outgrows: unchanged.
+    assert!((drops[2] - natural).abs() < 1e-9, "{drops:?}");
+}
+
+#[test]
 fn tab_requests_carry_alignment_and_default_grid() {
     let mut d = doc_of(1, "a\tb");
     d.paragraphs[0].style.tab_stops_pt =
@@ -865,7 +1000,7 @@ fn bordered_paragraphs_open_their_box_where_they_split() {
     d.paragraphs.push(Paragraph {
         style: ParaStyle {
             borders: ParaBorders {
-                bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 0.75 }),
+                bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 0.75, space_pt: 0.0 }),
                 ..Default::default()
             },
             ..Default::default()
@@ -875,6 +1010,84 @@ fn bordered_paragraphs_open_their_box_where_they_split() {
     let t = lay(&d);
     assert_eq!(lines_per_page(&t), vec![46, 3]);
     assert_eq!(para_boxes(&t).iter().map(|b| (b.2, b.3)).collect::<Vec<_>>(), vec![(true, false), (false, true)]);
+}
+
+/// Writer's border box (measured in LibreOffice at 10 px/pt): a top
+/// border stands its width plus gap above the first line, a bottom one
+/// its gap below the last line's natural foot, with that line's
+/// proportional extra below the border, and side borders stand off the
+/// text by their width plus gap.
+#[test]
+fn borders_stand_off_the_text_by_their_width_and_gap() {
+    let edge = |w: f64, gap: f64| Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: w, space_pt: gap });
+    let mut d = doc_of(3, "x");
+    d.paragraphs[1].style.line_spacing = 2.0;
+    d.paragraphs[1].style.borders = ParaBorders { top: edge(1.0, 4.0), bottom: edge(1.0, 4.0), left: edge(0.5, 1.0), right: edge(0.5, 1.0) };
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    let boxes: Vec<(f64, f64, f64, f64)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::ParaBox { x_pt, y_pt, width_pt, height_pt, .. } => Some((*x_pt, *y_pt, *width_pt, *height_pt)),
+            _ => None,
+        })
+        .collect();
+    // MonoShaper lines are 15pt; the bordered one is 30pt at 2.0.
+    let (x, y, w, h) = boxes[0];
+    assert_eq!(y, tops[0] + 15.0, "the box opens where the paragraph does");
+    assert_eq!(tops[1], y + 5.0, "text below the top border's width and gap");
+    // Natural foot (15pt in), the gap and the width close the box ...
+    assert_eq!(h, 5.0 + 15.0 + 5.0);
+    // ... and the line's other 15pt follow it.
+    assert_eq!(tops[2], y + h + 15.0);
+    let text_x = line_items(&t.pages[0])[0].2;
+    assert_eq!((x, w), (text_x - 1.5, t.pages[0].width_pt - t.pages[0].geometry.margin_left_pt - t.pages[0].geometry.margin_right_pt + 3.0));
+}
+
+/// Paragraphs with the same borders are one box: its gaps and its top
+/// and bottom edges at the run's ends only, its sides unbroken across the
+/// space between them (Writer and Word group them so).
+#[test]
+fn paragraphs_with_the_same_borders_are_one_box() {
+    let edge = || Some(ParaBorder { style: BorderStyle::Single, color: "000000".into(), width_pt: 1.0, space_pt: 4.0 });
+    let mut d = doc_of(4, "x");
+    for p in &mut d.paragraphs[1..3] {
+        p.style.borders = ParaBorders { top: edge(), bottom: edge(), left: edge(), right: edge() };
+        p.style.space_after_pt = 6.0;
+    }
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    let boxes: Vec<(f64, f64, bool, bool)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::ParaBox { y_pt, height_pt, top_edge, bottom_edge, .. } => Some((*y_pt, *height_pt, *top_edge, *bottom_edge)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boxes.len(), 2);
+    // The first opens the group, the second closes it.
+    assert!(boxes[0].2 && !boxes[0].3 && !boxes[1].2 && boxes[1].3, "{boxes:?}");
+    assert_eq!(tops[1], boxes[0].0 + 5.0, "the top gap above the first only");
+    assert_eq!(tops[2], tops[1] + 15.0 + 6.0, "no gaps between them");
+    assert_eq!(boxes[0].0 + boxes[0].1, boxes[1].0, "the box runs on over the space between");
+    assert_eq!(boxes[1].1, 15.0 + 5.0, "the bottom gap below the last only");
+}
+
+/// An invisible edge keeps its gap: Word's `w:val="none"` with a
+/// `w:space` pads a paragraph above and below in Writer, and draws
+/// nothing (render-lab `real-questionnaire`'s blank line between tables).
+#[test]
+fn an_invisible_edge_keeps_its_gap() {
+    let none = || Some(ParaBorder { style: BorderStyle::None, color: "FFFFFF".into(), width_pt: 12.0, space_pt: 31.0 });
+    let mut d = doc_of(3, "x");
+    d.paragraphs[1].style.borders = ParaBorders { top: none(), bottom: none(), ..Default::default() };
+    let t = lay(&d);
+    let tops: Vec<f64> = line_items(&t.pages[0]).iter().map(|l| l.3).collect();
+    // 31pt above and below, none for the width it names.
+    assert_eq!(tops[1] - tops[0], 15.0 + 31.0);
+    assert_eq!(tops[2] - tops[1], 15.0 + 31.0);
 }
 
 /// Give `doc` sections starting at `starts`, on `pages` (LET-005S).

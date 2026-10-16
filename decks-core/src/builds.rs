@@ -168,7 +168,7 @@ mod tests {
 
     fn slide(builds: Vec<Build>) -> Slide {
         // Builds name objects by these stable ids, not z-positions.
-        Slide {
+        Slide { hidden: false,
             title: String::new(),
             background: "#ffffff".into(),
             background_picture: None,

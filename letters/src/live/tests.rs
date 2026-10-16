@@ -424,7 +424,7 @@ fn every_field() -> Document {
             left_indent_pt: 18.0, right_indent_pt: 9.0, first_line_indent_pt: 12.0, tab_stops_pt: vec![TabStop::left(72.0), TabStop::left(144.0)],
             keep_with_next: true, keep_lines: true, widow_control: Some(false),
             line_height: Some(letters_core::LineHeight::Minimum(18.0)), shading: Some("D9D9D9".into()),
-            borders: letters_core::ParaBorders { bottom: Some(letters_core::ParaBorder { style: letters_core::BorderStyle::Single, color: "000000".into(), width_pt: 0.75 }), ..Default::default() },
+            borders: letters_core::ParaBorders { bottom: Some(letters_core::ParaBorder { style: letters_core::BorderStyle::Single, color: "000000".into(), width_pt: 0.75, space_pt: 0.0 }), ..Default::default() },
             ..Default::default() }, vec![
             run("bold ", RunStyle { bold: true, ..Default::default() }),
             run("italic ", RunStyle { italic: true, underline: true, ..Default::default() }),

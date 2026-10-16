@@ -1045,9 +1045,33 @@ pub fn draw_shape(
     (x, y, w, h): (f64, f64, f64, f64),
     scale: f64,
 ) {
-    use decks_core::engine::shape::{is_elliptical, outline, ShapeKind};
+    use decks_core::engine::shape::{is_elliptical, is_line, outline, ShapeKind};
     cr.new_path();
     match kind {
+        // A line (a separator rule, a connector) is its outline alone,
+        // corner to corner; a horizontal one has no height at all.
+        k if is_line(k) => {
+            cr.move_to(x, y);
+            cr.line_to(x + w, y + h);
+            paint_path(cr, style, (x, y, w, h), scale, false, true);
+            cr.new_path();
+            return;
+        }
+        ShapeKind::Freeform(paths) => {
+            // Its filled paths filled, then its outlined paths outlined: a
+            // chart's axis line is outlined and not filled.
+            for p in paths.iter().filter(|p| p.fill) {
+                trace_freeform(cr, p, (x, y, w, h));
+            }
+            paint_path(cr, style, (x, y, w, h), scale, true, false);
+            cr.new_path();
+            for p in paths.iter().filter(|p| p.stroke) {
+                trace_freeform(cr, p, (x, y, w, h));
+            }
+            paint_path(cr, style, (x, y, w, h), scale, false, true);
+            cr.new_path();
+            return;
+        }
         k if is_elliptical(k) => {
             if w <= 0.0 || h <= 0.0 {
                 return;
@@ -1082,44 +1106,101 @@ pub fn draw_shape(
                     }
                     cr.close_path();
                 }
-                paint_path(cr, style, (x, y, w, h), scale);
+                paint_path(cr, style, (x, y, w, h), scale, true, true);
+                cr.new_path();
             }
             return;
         }
     }
-    paint_path(cr, style, (x, y, w, h), scale);
+    paint_path(cr, style, (x, y, w, h), scale, true, true);
+    cr.new_path();
 }
 
-/// Fill and stroke the current path in `style` over the box `(x, y, w, h)`,
-/// then clear it.
-fn paint_path(cr: &cairo::Context, style: &decks_core::engine::shape::ShapeStyle, (x, y, w, h): (f64, f64, f64, f64), scale: f64) {
-    if let Some(grad) = &style.gradient {
-        // Colours run along `angle` (clockwise from left-to-right) across
-        // the box: the line through its centre, from the box's projection
-        // at one end to the other.
-        let a = grad.angle.to_radians();
-        let (dx, dy) = (a.cos(), a.sin());
-        let half = (w * dx.abs() + h * dy.abs()) / 2.0;
-        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
-        let pattern = cairo::LinearGradient::new(cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half);
-        for stop in &grad.stops {
-            let (r, g, b) = stop.color.to_f64();
-            pattern.add_color_stop_rgb(stop.pos, r, g, b);
+/// Fill (with `fill`) and outline (with `stroke`) the current path in a
+/// shape's style; the box `(x, y, w, h)` is what a gradient spans.
+fn paint_path(
+    cr: &cairo::Context,
+    style: &decks_core::engine::shape::ShapeStyle,
+    (x, y, w, h): (f64, f64, f64, f64),
+    scale: f64,
+    fill: bool,
+    stroke: bool,
+) {
+    if fill {
+        if let Some(grad) = &style.gradient {
+            // Colours run along `angle` (clockwise from left-to-right) across
+            // the box: the line through its centre, from the box's projection
+            // at one end to the other.
+            let a = grad.angle.to_radians();
+            let (dx, dy) = (a.cos(), a.sin());
+            let half = (w * dx.abs() + h * dy.abs()) / 2.0;
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            let pattern = cairo::LinearGradient::new(cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half);
+            for stop in &grad.stops {
+                let (r, g, b) = stop.color.to_f64();
+                pattern.add_color_stop_rgb(stop.pos, r, g, b);
+            }
+            cr.set_source(&pattern).unwrap();
+            cr.fill_preserve().unwrap();
+        } else if let Some(fill) = style.fill {
+            let (r, g, b) = fill.to_f64();
+            cr.set_source_rgb(r, g, b);
+            cr.fill_preserve().unwrap();
         }
-        cr.set_source(&pattern).unwrap();
-        cr.fill_preserve().unwrap();
-    } else if let Some(fill) = style.fill {
-        let (r, g, b) = fill.to_f64();
-        cr.set_source_rgb(r, g, b);
-        cr.fill_preserve().unwrap();
     }
-    if let Some(stroke) = style.stroke {
-        let (r, g, b) = stroke.color.to_f64();
-        cr.set_source_rgb(r, g, b);
-        cr.set_line_width((stroke.width * scale).max(0.5));
-        cr.stroke_preserve().unwrap();
+    if stroke {
+        if let Some(stroke) = style.stroke {
+            let (r, g, b) = stroke.color.to_f64();
+            cr.set_source_rgb(r, g, b);
+            cr.set_line_width((stroke.width * scale).max(0.5));
+            cr.stroke_preserve().unwrap();
+        }
     }
-    cr.new_path();
+}
+
+/// Add a freeform path to the current path, its own `w`×`h` space
+/// stretched to the box `(x, y, w, h)`. An arc and a quadratic curve are
+/// drawn as the cubic Béziers they are.
+fn trace_freeform(cr: &cairo::Context, path: &decks_core::engine::freeform::FreePath, (x, y, w, h): (f64, f64, f64, f64)) {
+    use decks_core::engine::freeform::{arc_as_cubics, PathCmd};
+    let (sx, sy) = (w / path.w.max(1e-9), h / path.h.max(1e-9));
+    let at = |px: f64, py: f64| (x + px * sx, y + py * sy);
+    let mut cur = (0.0, 0.0);
+    for c in &path.cmds {
+        match *c {
+            PathCmd::Move(px, py) => {
+                cr.new_sub_path();
+                let (a, b) = at(px, py);
+                cr.move_to(a, b);
+                cur = (px, py);
+            }
+            PathCmd::Line(px, py) => {
+                let (a, b) = at(px, py);
+                cr.line_to(a, b);
+                cur = (px, py);
+            }
+            PathCmd::Cubic(x1, y1, x2, y2, px, py) => {
+                let ((a1, b1), (a2, b2), (a, b)) = (at(x1, y1), at(x2, y2), at(px, py));
+                cr.curve_to(a1, b1, a2, b2, a, b);
+                cur = (px, py);
+            }
+            PathCmd::Quad(qx, qy, px, py) => {
+                let c1 = (cur.0 + 2.0 / 3.0 * (qx - cur.0), cur.1 + 2.0 / 3.0 * (qy - cur.1));
+                let c2 = (px + 2.0 / 3.0 * (qx - px), py + 2.0 / 3.0 * (qy - py));
+                let ((a1, b1), (a2, b2), (a, b)) = (at(c1.0, c1.1), at(c2.0, c2.1), at(px, py));
+                cr.curve_to(a1, b1, a2, b2, a, b);
+                cur = (px, py);
+            }
+            PathCmd::Arc { wr, hr, start, swing } => {
+                for [c1, c2, e] in arc_as_cubics(cur, wr, hr, start, swing) {
+                    let ((a1, b1), (a2, b2), (a, b)) = (at(c1.0, c1.1), at(c2.0, c2.1), at(e.0, e.1));
+                    cr.curve_to(a1, b1, a2, b2, a, b);
+                    cur = e;
+                }
+            }
+            PathCmd::Close => cr.close_path(),
+        }
+    }
 }
 
 /// Draw a table in the box `(x, y, w, h)` (canvas pixels): each cell's
@@ -1133,13 +1214,43 @@ pub fn draw_table(
     scale: f64,
     font: &pango::FontDescription,
 ) {
-    let (cols, rows) = table.fitted(w, h);
+    let (cols, mut rows) = table.fitted(w, h);
     let (mx, my) = table.margins();
     let (pad_x, pad_y) = (mx * scale, my * scale);
     // A merged cell is drawn once, over every column and row it spans; a
     // cell it covers draws nothing of its own.
     let owners = table.owners();
     let owner = |r: usize, c: usize| owners.get(r).and_then(|o| o.get(c)).copied().unwrap_or((r, c));
+    // A cell's text, laid out to its width (`cw`) in its paint.
+    let layout_of = |r: usize, c: usize, cw: f64| -> Option<pango::Layout> {
+        let cell = table.rows.get(r)?.get(c)?;
+        let layout = pangocairo::functions::create_layout(cr);
+        layout.set_font_description(Some(font));
+        layout.set_width(((cw - 2.0 * pad_x).max(1.0) * pango::SCALE as f64) as i32);
+        layout.set_wrap(pango::WrapMode::WordChar);
+        set_styled_text(&layout, &cell.text(), &cell.runs, scale);
+        if table.cell_paint(r, c).bold {
+            let attrs = layout.attributes().unwrap_or_default();
+            attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
+            layout.set_attributes(Some(&attrs));
+        }
+        Some(layout)
+    };
+    // A row is as tall as the file says, or as its text needs: a height in
+    // a table is a least height, which PowerPoint and Impress grow to fit
+    // what wraps. A merged cell over several rows does not grow one.
+    for (r, row_h) in rows.iter_mut().enumerate() {
+        for c in 0..cols.len() {
+            let one_row = table.rows.get(r).and_then(|row| row.get(c)).is_some_and(|cell| cell.span().1 == 1);
+            if owner(r, c) != (r, c) || !one_row {
+                continue;
+            }
+            let cw: f64 = cols.iter().skip(c).take(table.rows[r][c].span().0).sum();
+            if let Some(layout) = layout_of(r, c, cw) {
+                *row_h = row_h.max(f64::from(layout.pixel_size().1) + 2.0 * pad_y);
+            }
+        }
+    }
     let spanned = |r: usize, c: usize| {
         let (cs, rs) = table.rows.get(r).and_then(|row| row.get(c)).map_or((1, 1), |cell| cell.span());
         let w: f64 = cols.iter().skip(c).take(cs).sum();
@@ -1163,17 +1274,7 @@ pub fn draw_table(
                 cr.rectangle(cx, cy, *cw, *rh);
                 cr.fill().unwrap();
             }
-            if let Some(cell) = table.rows.get(r).and_then(|row| row.get(c)) {
-                let layout = pangocairo::functions::create_layout(cr);
-                layout.set_font_description(Some(font));
-                layout.set_width(((cw - 2.0 * pad_x).max(1.0) * pango::SCALE as f64) as i32);
-                layout.set_wrap(pango::WrapMode::WordChar);
-                set_styled_text(&layout, &cell.text(), &cell.runs, scale);
-                if paint.bold {
-                    let attrs = layout.attributes().unwrap_or_default();
-                    attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
-                    layout.set_attributes(Some(&attrs));
-                }
+            if let Some(layout) = layout_of(r, c, *cw) {
                 let (tr, tg, tb) = paint.text.to_f64();
                 cr.set_source_rgb(tr, tg, tb);
                 cr.save().unwrap();
@@ -1187,25 +1288,43 @@ pub fn draw_table(
         }
         cy += row_h;
     }
-    // "Medium Style 2" separates cells with white 1 pt rules: between two
-    // grid positions only where they are different cells.
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.set_line_width((1.0 * 960.0 / 720.0 * scale).max(1.0));
+    // The style's rules ("Medium Style 2": white 1 pt rules inside),
+    // between two grid positions only where they are different cells.
+    let Some(rules) = table.rules() else { return };
+    let (lr, lg, lb) = rules.color.to_f64();
+    cr.set_source_rgb(lr, lg, lb);
+    let width = |pt: f64| (pt * 960.0 / 720.0 * scale).max(1.0);
+    cr.set_line_width(width(rules.width_pt));
     let col_x: Vec<f64> = std::iter::once(x).chain(cols.iter().scan(x, |at, cw| { *at += cw; Some(*at) })).collect();
     let row_y: Vec<f64> = std::iter::once(y).chain(rows.iter().scan(y, |at, rh| { *at += rh; Some(*at) })).collect();
+    let (right, bottom) = (col_x[cols.len()], row_y[rows.len()]);
     for r in 0..rows.len() {
         for c in 0..cols.len() {
-            if c + 1 < cols.len() && owner(r, c) != owner(r, c + 1) {
+            if rules.inside_v && c + 1 < cols.len() && owner(r, c) != owner(r, c + 1) {
                 cr.move_to(col_x[c + 1], row_y[r]);
                 cr.line_to(col_x[c + 1], row_y[r + 1]);
             }
-            if r + 1 < rows.len() && owner(r, c) != owner(r + 1, c) {
+            if rules.inside_h && r + 1 < rows.len() && owner(r, c) != owner(r + 1, c) {
                 cr.move_to(col_x[c], row_y[r + 1]);
                 cr.line_to(col_x[c + 1], row_y[r + 1]);
             }
         }
     }
+    if rules.outer {
+        cr.rectangle(x, y, right - x, bottom - y);
+    } else if rules.top_bottom {
+        cr.move_to(x, y);
+        cr.line_to(right, y);
+        cr.move_to(x, bottom);
+        cr.line_to(right, bottom);
+    }
     cr.stroke().unwrap();
+    if let (Some(pt), Some(&under)) = (rules.header, row_y.get(1)) {
+        cr.set_line_width(width(pt));
+        cr.move_to(x, under);
+        cr.line_to(right, under);
+        cr.stroke().unwrap();
+    }
 }
 
 /// Render slide `index` exactly as the editor canvas draws it, cropped to
@@ -1261,7 +1380,8 @@ pub fn render_slides_pdf(
     // Model units are 1/96in; PDF points are 1/72in.
     const MODEL_W: f64 = 960.0;
     const MODEL_H: f64 = 540.0;
-    for index in 0..slides.len() {
+    // A hidden slide is left out, as Impress and PowerPoint leave it out.
+    for index in decks_core::engine::shown_slides(slides) {
         // A slide of another aspect keeps its own page size; today every
         // slide shares the model's size, but the call is per-page anyway.
         surface.set_size(page_w, page_h).map_err(|e| e.to_string())?;
@@ -1276,6 +1396,67 @@ pub fn render_slides_pdf(
     match surface.status() {
         Ok(()) => Ok(()),
         Err(e) => Err(format!("cannot write {}: {e}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use decks_core::engine::table::{TableCell, TableData};
+    use decks_core::engine::Run;
+
+    /// A row's height in the file is a least height: text that wraps
+    /// grows the row, and the grid's bottom rule moves down with it.
+    #[test]
+    fn a_row_grows_to_fit_the_text_that_wraps() {
+        let table = TableData {
+            col_widths: vec![60.0],
+            row_heights: vec![20.0],
+            rows: vec![vec![TableCell { runs: vec![Run::plain("several words that wrap over lines")], ..Default::default() }]],
+            style_id: Some("{5940675A-B579-460E-94D1-54222C63F5DA}".into()),
+            ..Default::default()
+        };
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 200).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            let font = pango::FontDescription::from_string("Sans 8");
+            super::draw_table(&cr, &table, (10.0, 10.0, 60.0, 20.0), 1.0, &font);
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        // The grid's left rule, at x = 10, reaches well below the file's
+        // 20 units.
+        let lowest = (0..200).rev().find(|&y| data[y * stride + 10 * 4 + 3] > 0).unwrap();
+        assert!(lowest > 45, "the rule ends at y = {lowest}");
+    }
+}
+
+#[cfg(test)]
+mod freeform_tests {
+    use decks_core::engine::freeform::{FreePath, PathCmd};
+    use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle};
+
+    /// A freeform is drawn as its paths: a quarter-circle wedge fills the
+    /// quarter its arc closes, and leaves the rest of its box empty.
+    #[test]
+    fn a_freeform_draws_its_paths_not_its_box() {
+        let wedge = FreePath {
+            w: 100.0,
+            h: 100.0,
+            cmds: vec![PathCmd::Move(0.0, 0.0), PathCmd::Line(100.0, 0.0), PathCmd::Arc { wr: 100.0, hr: 100.0, start: 0.0, swing: 90.0 }, PathCmd::Close],
+            fill: true,
+            stroke: true,
+        };
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 100).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            let style = ShapeStyle { fill: Some(Color(255, 0, 0)), gradient: None, stroke: None, fill_src: None, stroke_src: None };
+            super::draw_shape(&cr, &ShapeKind::Freeform(vec![wedge]), &style, (0.0, 0.0, 100.0, 100.0), 1.0);
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let alpha = |x: usize, y: usize| data[y * stride + x * 4 + 3];
+        assert_eq!(alpha(20, 20), 255, "inside the wedge");
+        assert_eq!(alpha(95, 95), 0, "outside the arc, inside the box");
     }
 }
 
@@ -1301,7 +1482,7 @@ mod font_tests {
             rotation: 0.0,
             style: ShapeStyle { fill: Some(c), gradient: None, stroke: None, fill_src: None, stroke_src: None },
         };
-        let slide = Slide {
+        let slide = Slide { hidden: false,
             title: String::new(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -1376,6 +1557,21 @@ mod font_tests {
         // the PDF (pdftoppm) and looking, not here: Cairo may subset fonts.
     }
 
+    /// A hidden slide gets no page, as Impress prints none for it.
+    #[test]
+    fn the_pdf_export_leaves_out_a_hidden_slide() {
+        let mut hidden = slide(Some(7));
+        hidden.hidden = true;
+        let slides = [slide(Some(7)), hidden, slide(Some(7))];
+        let dir = std::env::temp_dir().join(format!("decks-export-pdf-hidden-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.pdf");
+        render_slides_pdf(&slides, &[master(7, "Sans")], &path).expect("export");
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        let page_objects = text.matches("/Type /Page").count() - text.matches("/Type /Pages").count();
+        assert_eq!(page_objects, 2, "the hidden slide has no page");
+    }
+
     #[test]
     fn exporting_no_slides_is_an_error_not_an_empty_pdf() {
         let dir = std::env::temp_dir().join(format!("decks-export-pdf-empty-{}", std::process::id()));
@@ -1398,7 +1594,7 @@ mod font_tests {
     }
 
     fn slide(master_id: Option<u64>) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: "S".into(),
             background: "#ffffff".into(),
             background_picture: None,
@@ -1752,5 +1948,44 @@ mod font_tests {
                 .as_deref(),
             Some("Liberation Serif")
         );
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+    use decks_core::engine::shape::{Color, ShapeKind, ShapeStyle, Stroke};
+
+    /// #1397's tile separators are `line` presets: a line from the box's
+    /// top-left corner to its bottom-right, stroked in its outline colour,
+    /// with nothing filled. The shared outline path has no outline for a
+    /// line and fell back to the box, so a line with any height drew as a
+    /// rectangle, filled with a shape's default accent.
+    #[test]
+    fn a_line_is_stroked_corner_to_corner_and_never_filled() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 40).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.paint().unwrap();
+            let style = ShapeStyle {
+                fill: Some(Color(68, 114, 196)),
+                gradient: None,
+                stroke: Some(Stroke { color: Color(255, 255, 255), width: 2.0 }),
+                fill_src: None,
+                stroke_src: None,
+            };
+            draw_shape(&cr, &ShapeKind::Other("line".into()), &style, (10.0, 5.0, 80.0, 30.0), 1.0);
+        }
+        let mut surface = surface;
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = |x: usize, y: usize| {
+            let i = y * stride + x * 4;
+            (data[i + 2], data[i + 1], data[i])
+        };
+        assert_eq!(px(50, 20), (255, 255, 255), "the middle of the diagonal, in white");
+        assert_eq!(px(80, 5), (0, 0, 0), "no box: its top edge is not drawn");
+        assert_eq!(px(70, 30), (0, 0, 0), "nothing filled below the line");
     }
 }

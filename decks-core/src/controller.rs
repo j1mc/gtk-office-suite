@@ -193,7 +193,7 @@ struct MasterEdit {
 /// The master as the stand-in slide the master view edits: its
 /// decorations as the slide's objects, its background as the slide's.
 fn master_as_slide(m: &MasterSlide) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: m.name.clone(),
         background: m.background.clone(),
         background_picture: None,
@@ -1659,7 +1659,7 @@ mod tests {
     use crate::engine::Slide;
 
     fn slide(title: &str) -> Slide {
-        Slide { title: title.into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: String::new(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None }
+        Slide { hidden: false, title: title.into(), background: "#fff".into(), background_picture: None, objects: vec![], notes: String::new(), master_id: None, transition: Default::default(), builds: Vec::new(), ids: Default::default(), layout_id: None }
     }
 
     fn rect(x: f64, y: f64) -> SlideObject {

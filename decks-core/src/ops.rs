@@ -430,7 +430,7 @@ mod tests {
     use super::*;
 
     fn slide(title: &str, n: usize) -> Slide {
-        Slide {
+        Slide { hidden: false,
             title: title.into(),
             background: "#ffffff".into(),
             background_picture: None,

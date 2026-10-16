@@ -21,6 +21,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Backtraces keep file and line; full debug info only made target/ (and
+  # so the cache) several times larger and linking slower. Incremental
+  # state is never reused on a fresh runner.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
 
 # Least privilege: every job here only reads the repository. Nothing posts
 # comments, pushes tags, or publishes packages, so the default write-capable
@@ -101,6 +107,7 @@ jobs:
             tests/test_autosave_defaults.py \
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
+            tests/test_pixel_scoreboard.py \
             tests/test_render_lab_locate.py \
             tests/test_office_bench.py \
             tests/test_render_real_scope.py \
@@ -180,6 +187,7 @@ jobs:
             tests/test_autosave_defaults.py \
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
+            tests/test_pixel_scoreboard.py \
             tests/test_render_lab_locate.py \
             tests/test_office_bench.py \
             tests/test_render_real_scope.py \
@@ -279,8 +287,16 @@ jobs:
         with:
           tool: nextest
 
-      - name: cargo check
-        run: cargo check --workspace
+      # This job compiled the whole workspace from nothing on every pull
+      # request: it had no cargo cache. Pull requests restore main's cache
+      # and never save their own, so a burst of PRs cannot evict main's
+      # entry from the repository's 10 GB cache budget.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # No separate `cargo check --workspace`: clippy below runs the same
+      # checks over every target, so it compiled the workspace twice.
 
       - name: cargo clippy (deny warnings, all crates)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -398,4 +414,10 @@ jobs:
         with:
           bundle: ${{ matrix.app }}.flatpak
           manifest-path: flatpak/org.tunaos.${{ matrix.app }}.json
+          # Keyed by commit, this cache could never be restored by a later
+          # run, and the module does `cargo clean` and rebuilds from its
+          # source directory regardless; every pull request push only
+          # uploaded three more entries that evicted the caches other jobs
+          # do reuse. Off on pull requests.
+          cache: ${{ github.event_name != 'pull_request' }}
           cache-key: flatpak-${{ matrix.app }}-${{ github.sha }}

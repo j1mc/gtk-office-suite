@@ -158,7 +158,7 @@ fn bullet() -> ParaStyle {
 }
 
 fn slide(title: &str, objects: Vec<SlideObject>) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.into(),
         // White is "unset": the slide shows its master's background.
         background: "#ffffff".into(),
