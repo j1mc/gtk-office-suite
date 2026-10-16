@@ -133,7 +133,7 @@
   },
   "letters/real-consultation-questions-downloadable-alternative": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-crime-supervisor-declaration-form": {
     "A": "amber",
@@ -185,7 +185,7 @@
   },
   "letters/real-provisional-agenda-for-the-sixth-trade-specialis": {
     "A": "green",
-    "B": "green"
+    "B": "amber"
   },
   "letters/real-questionnaire": {
     "A": "amber",
