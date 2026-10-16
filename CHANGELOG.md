@@ -21,6 +21,7 @@ Features added after the v1.0 tag and GitHub release.
 - Canvas undo/redo via Command pattern (Ctrl+Z / Ctrl+Shift+Z)
 - Image loading and rendering (PNG/JPEG/WebP/GIF) on slide canvas
 - Inline text editing on slides (double-click TextBox → GtkTextView overlay)
+- Rich text in the in-place editor (DCK-007): bold, italic, underline, strikethrough, font, size and colour on the selected characters; alignment, lists, indent and spacing on the paragraphs it touches; its own undo, styled copy/paste, and one undo step on Apply — saved in PPTX and ODP
 - Object drag with snap-to-grid (20px) via GestureDrag
 - Slide transitions: Fade, PushLeft, WipeLeft, CoverLeft, SplitHorizontal
 - Speaker notes pane (collapsible GtkExpander with auto-save)

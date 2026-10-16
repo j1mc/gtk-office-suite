@@ -65,6 +65,13 @@ action of their own; each is one undo step:
 | Style ▸ Fill and Outline colours, No Outline | the shape's fill and outline | `a_fill_edit_on_a_plain_rectangle_makes_it_a_styled_shape_that_looks_the_same_until_then`, `outline_edits_keep_the_other_half` |
 | Text ▸ Bold | the text box's runs, one undo step | `DecksAdvertisedActionsSmoke` |
 | Text ▸ Italic, font, size, colour, alignment, list | the text box's runs and paragraphs | `text_edits_style_every_run_of_a_plain_box`, `a_list_gives_every_paragraph_a_marker_on_a_hanging_indent_and_back` |
+| Text ▸ Underline, Strikethrough, indent, space before/after, inner margin | the whole box's runs, paragraphs or insets | `indent_spacing_insets_and_scope_reach_what_they_name`, `a_whole_box_format_on_an_empty_box_is_its_typing_style` |
+| Double-click a text box | opens the in-place editor (a text session; the slide is untouched until Apply) | `DecksInlineTextSmoke`, `DecksRichTextRangeSmoke` |
+| Editor ▸ Ctrl+B/I/U and the bar's bold, italic, underline, strikethrough, font, size, colour | the selection's runs only; at a caret, the typing style | `DecksRichTextRangeSmoke`, `DecksRichTextEditRenderJourney`, `range_format_splits_only_the_selection_and_never_the_whole_box` |
+| Editor ▸ alignment, list, indent, paragraph spacing | the paragraphs the selection touches | `DecksRichTextEditRenderJourney`, `range_format_splits_only_the_selection_and_never_the_whole_box` |
+| Editor ▸ Ctrl+Z / Ctrl+Shift+Z | the session's own undo and redo; the deck's undo is refused while editing | `DecksRichTextRangeSmoke`, `a_text_session_commits_one_step_and_cancels_without_trace` |
+| Editor ▸ Ctrl+C / Ctrl+X / Ctrl+V | styled copy of the selection; paste keeps supported styles and paragraphs and names what it flattened | `a_copied_range_keeps_its_paragraphs_styles_and_pastes_back_into_a_session`, `pasting_flattens_what_a_slide_cannot_hold_and_never_parses_html` |
+| Editor ▸ Ctrl+Enter / Apply, Escape / Cancel | commits the session as one undo step, or drops it without trace | `DecksRichTextRangeSmoke`, `DecksInlineTextSmoke` |
 | Arrange ▸ position, size, rotation fields | the object's geometry | `arrange_edits_move_resize_and_rotate` |
 | Arrange ▸ Send to Back, Bring to Front, … | the object order | `DecksFormatInspectorSmoke` |
 | Tab / Shift+Tab on the canvas | the selection, object by object | `DecksPictureCropSmoke` |

@@ -92,6 +92,27 @@ pub struct TxnOutcome {
     pub selection: SelectionState,
 }
 
+/// Why an in-place text edit could not be committed (DCK-007).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSessionError {
+    /// No text session is open.
+    NoSession,
+    /// Its text box was deleted, or the view it was on closed.
+    Gone,
+    /// Its text box was changed by something else meanwhile.
+    Changed,
+}
+
+impl std::fmt::Display for TextSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TextSessionError::NoSession => "No text is being edited",
+            TextSessionError::Gone => "The text box being edited is no longer on the slide",
+            TextSessionError::Changed => "The text box was changed while it was being edited",
+        })
+    }
+}
+
 pub struct DecksController {
     pub slides: Rc<RefCell<Vec<Slide>>>,
     pub masters: Rc<RefCell<Vec<MasterSlide>>>,
@@ -147,6 +168,12 @@ pub struct DecksController {
     saved_revision: Cell<Option<u64>>,
     /// Controller-owned selection (DCK-005): stable ids, never positions.
     selection: RefCell<SelectionState>,
+    /// The in-place text edit under way, if any (DCK-007): a working copy
+    /// of one text box with its own undo. It is not the document: commit
+    /// records it as one history step, cancel drops it without trace, and
+    /// document undo/redo are refused while it is open so a text
+    /// session's Ctrl+Z can never undo a slide.
+    text_session: RefCell<Option<crate::rich_text::TextSession>>,
 }
 
 /// What the master view put aside, to put back on Done.
@@ -243,6 +270,7 @@ impl DecksController {
             revision: Cell::new(0),
             saved_revision: Cell::new(None),
             selection: RefCell::new(selection),
+            text_session: RefCell::new(None),
         }
     }
 
@@ -311,6 +339,8 @@ impl DecksController {
         self.saved_revision.set(None);
         let first = self.slides.borrow().first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
         *self.selection.borrow_mut() = first;
+        // A replaced deck has nothing for an open text edit to commit to.
+        *self.text_session.borrow_mut() = None;
     }
 
     /// Clone of the session's source context for a recovery snapshot, if
@@ -348,6 +378,7 @@ impl DecksController {
         self.dirty.set(true);
         let first = self.slides.borrow().first().map(|s| SelectionState::single(s.ids.slide, None)).unwrap_or_else(SelectionState::none);
         *self.selection.borrow_mut() = first;
+        *self.text_session.borrow_mut() = None;
     }
 
     /// Drop the session's provenance: recovery adopts a snapshot's bytes,
@@ -473,7 +504,7 @@ impl DecksController {
     /// the master's stable id, or `None` when the view is already open or
     /// there is no such master.
     pub fn edit_master(&self, slide_id: u64) -> Option<u64> {
-        if self.master_edit.borrow().is_some() {
+        if self.master_edit.borrow().is_some() || self.text_session.borrow().is_some() {
             return None;
         }
         let master_id = self.master_id_for_slide(slide_id)?;
@@ -956,41 +987,161 @@ impl DecksController {
 
     /// Replace the object's text with `new_text`, keeping the surrounding
     /// run and paragraph styles. The canonical object, not a caller's
-    /// stale snapshot, owns the diff and the undo.
+    /// stale snapshot, owns the diff and the undo: the common prefix and
+    /// suffix stay, and the middle is one `RichText::replace`.
     pub fn change_text(&self, slide_id: u64, object_id: u64, new_text: String) {
-        let at = match self.object_index(slide_id, object_id) {
-            Some(at) => at,
-            None => return,
-        };
-        self.edit_objects(slide_id, |o| {
-            if let Some(SlideObject::TextBox { text, runs, body, .. }) = o.get_mut(at) {
-                if *text == new_text {
-                    return;
-                }
-                let start: usize = text.chars().zip(new_text.chars())
-                    .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
-                let suffix: usize = text[start..].chars().rev().zip(new_text[start..].chars().rev())
-                    .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
-                let end = text.len() - suffix;
-                let replacement = &new_text[start..new_text.len() - suffix];
-                if !runs.is_empty() {
-                    replace_run_text(runs, start, end, replacement);
-                }
-                let first_para = text[..start].bytes().filter(|b| *b == b'\n').count();
-                let removed_breaks = text[start..end].bytes().filter(|b| *b == b'\n').count();
-                let added_breaks = replacement.bytes().filter(|b| *b == b'\n').count();
-                if !body.paras.is_empty() && (removed_breaks != 0 || added_breaks != 0) {
-                    let mut paras: Vec<_> = (0..text.split('\n').count()).map(|i| body.para(i)).collect();
-                    let inherited = paras[first_para].clone();
-                    paras.splice(
-                        first_para + 1..first_para + removed_breaks + 1,
-                        std::iter::repeat_n(inherited, added_breaks),
-                    );
-                    body.paras = paras;
-                }
-                *text = new_text;
+        self.edit_text(slide_id, object_id, |rt| {
+            let text = &rt.text;
+            if *text == new_text {
+                return false;
             }
+            let start: usize = text.chars().zip(new_text.chars())
+                .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+            let suffix: usize = text[start..].chars().rev().zip(new_text[start..].chars().rev())
+                .take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
+            let end = text.len() - suffix;
+            rt.replace(start, end, &new_text[start..new_text.len() - suffix], None).unwrap_or(false)
         });
+    }
+
+    /// Replace bytes `start..end` of text box `object_id`'s text with
+    /// `text` (DCK-007), in the style of the run the range starts in, as
+    /// one undo step. Unaffected runs and paragraph styles stay as they
+    /// are. `false`, recording nothing, for an invalid range, a non-text
+    /// object or no change.
+    pub fn replace_text_range(&self, slide_id: u64, object_id: u64, start: usize, end: usize, text: &str) -> bool {
+        self.edit_text(slide_id, object_id, |rt| rt.replace(start, end, text, None).unwrap_or(false))
+    }
+
+    /// Apply `edit` to bytes `start..end` of text box `object_id` as far
+    /// as its scope reaches (characters, the paragraphs touched, or the
+    /// box: `FormatEdit::scope`), as one undo step. A range edit never
+    /// widens to the whole box; `format_objects` is the whole-box command.
+    pub fn format_text_range(&self, slide_id: u64, object_id: u64, start: usize, end: usize, edit: &crate::format::FormatEdit) -> bool {
+        self.edit_text(slide_id, object_id, |rt| rt.format(start, end, edit).unwrap_or(false))
+    }
+
+    /// One text edit of one box as one undo step: `edit` changes a copy
+    /// of its text and says whether it changed anything. Refused while a
+    /// text session is open on that box, whose commit would otherwise
+    /// overwrite the edit.
+    fn edit_text(&self, slide_id: u64, object_id: u64, edit: impl FnOnce(&mut crate::rich_text::RichText) -> bool) -> bool {
+        if self.text_session.borrow().as_ref().is_some_and(|s| s.object_id == object_id) {
+            return false;
+        }
+        let Some(at) = self.object_index(slide_id, object_id) else { return false };
+        let rt = {
+            let slides = self.slides.borrow();
+            slides.iter().find(|s| s.ids.slide == slide_id).and_then(|s| s.objects.get(at)).and_then(crate::rich_text::RichText::of)
+        };
+        let Some(mut rt) = rt else { return false };
+        if !edit(&mut rt) {
+            return false;
+        }
+        self.edit_objects(slide_id, |o| {
+            if let Some(obj) = o.get_mut(at) {
+                rt.write_to(obj);
+            }
+        })
+    }
+
+    /// Open an in-place text edit of text box `object_id` (DCK-007): a
+    /// working copy with its own undo, the caret at its end, the
+    /// selection in text mode. Nothing in the document changes until
+    /// [`DecksController::commit_text_session`]. `false` when a session is
+    /// already open or the object is not a text box on that slide.
+    pub fn begin_text_session(&self, slide_id: u64, object_id: u64) -> bool {
+        if self.text_session.borrow().is_some() {
+            return false;
+        }
+        let Some(at) = self.object_index(slide_id, object_id) else { return false };
+        let rt = {
+            let slides = self.slides.borrow();
+            slides.iter().find(|s| s.ids.slide == slide_id).and_then(|s| s.objects.get(at)).and_then(crate::rich_text::RichText::of)
+        };
+        let Some(rt) = rt else { return false };
+        let session = crate::rich_text::TextSession::new(slide_id, object_id, self.editing_master(), rt);
+        let (start, end) = session.range();
+        self.select_objects(slide_id, &[object_id], Some(object_id), SelectionMode::Object);
+        self.set_text_range(object_id, start, end);
+        *self.text_session.borrow_mut() = Some(session);
+        true
+    }
+
+    /// Whether an in-place text edit is open.
+    pub fn has_text_session(&self) -> bool {
+        self.text_session.borrow().is_some()
+    }
+
+    /// Read the open text session. `f` must not call back into the
+    /// controller.
+    pub fn text_session<R>(&self, f: impl FnOnce(&crate::rich_text::TextSession) -> R) -> Option<R> {
+        self.text_session.borrow().as_ref().map(f)
+    }
+
+    /// Edit the open text session (type, format, move the caret, its own
+    /// undo). The document, its history and its dirty state are never
+    /// touched. `f` must not call back into the controller.
+    pub fn edit_text_session<R>(&self, f: impl FnOnce(&mut crate::rich_text::TextSession) -> R) -> Option<R> {
+        self.text_session.borrow_mut().as_mut().map(f)
+    }
+
+    /// Record the open text session as one undo step, end it, and leave
+    /// its box selected in object mode. `Ok(false)` when it changed
+    /// nothing: nothing is recorded or dirtied. When its box is gone or
+    /// was changed underneath it, the session stays open and the error
+    /// says why, so the editor can keep focus and show it.
+    pub fn commit_text_session(&self) -> Result<bool, TextSessionError> {
+        let Some(session) = self.text_session.borrow_mut().take() else { return Err(TextSessionError::NoSession) };
+        let target = self.session_target(&session);
+        let at = match target {
+            Ok(at) => at,
+            Err(e) => {
+                *self.text_session.borrow_mut() = Some(session);
+                return Err(e);
+            }
+        };
+        // The step's undo restores this selection: the box, as it was
+        // selected before the edit began.
+        self.select_objects(session.slide_id, &[session.object_id], Some(session.object_id), SelectionMode::Object);
+        if !session.changed() {
+            return Ok(false);
+        }
+        let working = session.working().clone();
+        Ok(self.edit_objects(session.slide_id, |o| {
+            if let Some(obj) = o.get_mut(at) {
+                working.write_to(obj);
+            }
+        }))
+    }
+
+    /// End the open text session without changing anything: the
+    /// document, its history, dirty state and revision are exactly as
+    /// before it began. Returns whether one was open.
+    pub fn cancel_text_session(&self) -> bool {
+        let Some(session) = self.text_session.borrow_mut().take() else { return false };
+        if self.slide_index(session.slide_id).is_some() {
+            self.select_objects(session.slide_id, &[session.object_id], Some(session.object_id), SelectionMode::Object);
+        } else {
+            self.repair_selection();
+        }
+        true
+    }
+
+    /// Where the session's box is now, if it is still the box the
+    /// session opened: same view (deck or master), same slide, same text.
+    fn session_target(&self, session: &crate::rich_text::TextSession) -> Result<usize, TextSessionError> {
+        if self.editing_master() != session.master {
+            return Err(TextSessionError::Gone);
+        }
+        let at = self.object_index(session.slide_id, session.object_id).ok_or(TextSessionError::Gone)?;
+        let slides = self.slides.borrow();
+        let current = slides.iter().find(|s| s.ids.slide == session.slide_id).and_then(|s| s.objects.get(at)).and_then(crate::rich_text::RichText::of);
+        match current {
+            Some(rt) if rt == *session.original() => Ok(at),
+            Some(_) => Err(TextSessionError::Changed),
+            None => Err(TextSessionError::Gone),
+        }
     }
 
     pub fn resize_object(&self, slide_id: u64, object_id: u64, new_bounds: (f64, f64, f64, f64)) {
@@ -1412,8 +1563,12 @@ impl DecksController {
     /// Undo one step. The document, the revision and the selection all go
     /// back: the selection the undone step saw is restored (repaired
     /// against what is present), so an undone insert cannot leave the
-    /// window pointing past the end.
+    /// window pointing past the end. Refused while a text session is open:
+    /// its own undo is the session's (`TextSession::undo`).
     pub fn undo(&self) -> bool {
+        if self.has_text_session() {
+            return false;
+        }
         let pre = self.selection.borrow().clone();
         let mut history = self.history.borrow_mut();
         let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
@@ -1448,6 +1603,9 @@ impl DecksController {
     /// still exists); the step goes back on the undo stack, so undoing
     /// it restores the selection it saw.
     pub fn redo(&self) -> bool {
+        if self.has_text_session() {
+            return false;
+        }
         let pre = self.selection.borrow().clone();
         let mut history = self.history.borrow_mut();
         let done = crate::ops::with_doc(&mut self.slides.borrow_mut(), &mut self.masters.borrow_mut(), |doc| {
@@ -1482,68 +1640,6 @@ impl DecksController {
 
     pub fn can_redo(&self) -> bool {
         self.history.borrow().can_redo()
-    }
-}
-
-
-
-/// Byte offsets are Unicode scalar boundaries from the common prefix and
-/// suffix. Like Letters' `style_at`, insertion inherits the run to its right,
-/// or the last run at the end; replacement inherits before deleting anything.
-fn replace_run_text(runs: &mut Vec<letters_core::model::Run>, start: usize, end: usize, replacement: &str) {
-    use letters_core::model::Run;
-    let mut pos = 0;
-    let inherited = runs.iter().find(|run| {
-        pos += run.text.len();
-        start < pos
-    }).or_else(|| runs.last()).map(|run| run.style.clone()).unwrap_or_default();
-    let mut edited = Vec::with_capacity(runs.len() + 2);
-    let mut inserted = false;
-    pos = 0;
-    for mut run in runs.drain(..) {
-        let len = run.text.len();
-        let prefix = start.saturating_sub(pos).min(len);
-        let suffix = end.saturating_sub(pos).min(len);
-        pos += len;
-        if prefix == len {
-            append_text_run(&mut edited, run);
-            continue;
-        }
-        if suffix == 0 {
-            if !inserted {
-                append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
-                inserted = true;
-            }
-            append_text_run(&mut edited, run);
-            continue;
-        }
-        let tail = run.text.split_off(suffix);
-        run.text.truncate(prefix);
-        let style = run.style.clone();
-        append_text_run(&mut edited, run);
-        if !inserted {
-            append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
-            inserted = true;
-        }
-        append_text_run(&mut edited, Run { text: tail, style });
-    }
-    if !inserted {
-        append_text_run(&mut edited, Run { text: replacement.into(), style: inherited.clone() });
-    }
-    // Keep the typing style when the box is emptied.
-    if edited.is_empty() {
-        edited.push(Run { text: String::new(), style: inherited });
-    }
-    *runs = edited;
-}
-
-fn append_text_run(runs: &mut Vec<letters_core::model::Run>, run: letters_core::model::Run) {
-    if run.text.is_empty() {
-        return;
-    }
-    match runs.last_mut() {
-        Some(last) if last.style == run.style => last.text.push_str(&run.text),
-        _ => runs.push(run),
     }
 }
 
@@ -2397,5 +2493,107 @@ mod tests {
         let unknown = c.apply_ops_txn(vec![Op::DeleteObject { slide: s, id: u64::MAX }]);
         assert!(!unknown.applied);
         assert!(!c.dirty.get() || c.revision() == outcome.revision, "no new revision");
+    }
+
+    /// DCK-007: an in-place text edit is one transaction. Typing and
+    /// formatting inside it touch neither the document nor its history;
+    /// commit records one step whose undo restores the text and the
+    /// object selection; cancel leaves dirty, revision and redo exactly
+    /// as they were; document undo is refused while it is open.
+    #[test]
+    fn a_text_session_commits_one_step_and_cancels_without_trace() {
+        use crate::format::FormatEdit;
+        use letters_core::model::{Run, RunStyle};
+        let bold = RunStyle { bold: true, ..Default::default() };
+        let c = styled_text_controller(vec![Run { text: "Alpha ".into(), style: bold.clone() }, Run { text: "Beta".into(), style: RunStyle::default() }], Default::default());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        // An earlier, unrelated edit gives undo something to take back.
+        c.move_object(s, o, 1.0, 0.0);
+        let before = text_state(&c);
+        let revision = c.revision();
+        assert!(c.begin_text_session(s, o));
+        assert!(!c.begin_text_session(s, o), "one session at a time");
+        assert_eq!(c.selection().mode, SelectionMode::Text);
+        c.edit_text_session(|t| {
+            t.set_range(6, 10).unwrap();
+            assert!(t.format(&FormatEdit::Italic(true)));
+            t.replace(10, 10, "\nGamma").unwrap();
+        });
+        assert_eq!(text_state(&c), before, "the session is not the document");
+        assert_eq!(c.revision(), revision);
+        assert!(!c.undo(), "document undo is refused during a session");
+        assert!(!c.redo());
+        assert_eq!(c.object_format(s, o).unwrap().bounds.0, 13.0, "the earlier move was not undone");
+        assert_eq!(c.commit_text_session(), Ok(true));
+        assert!(!c.has_text_session());
+        let (text, runs, _) = text_state(&c);
+        assert_eq!(text, "Alpha Beta\nGamma");
+        assert!(runs.iter().any(|r| r.text.starts_with("Beta") && r.style.italic), "{runs:?}");
+        assert_eq!(c.selection().mode, SelectionMode::Object);
+        assert!(c.undo(), "one step");
+        assert_eq!(text_state(&c), before);
+        assert_eq!(c.selection().primary_object_id, Some(o));
+        assert!(c.redo());
+        assert_eq!(text_state(&c).0, "Alpha Beta\nGamma");
+
+        // Cancel: same text, same dirty flag, same revision, redo kept.
+        assert!(c.undo());
+        let (dirty, revision, redo) = (c.dirty.get(), c.revision(), c.can_redo());
+        assert!(c.begin_text_session(s, o));
+        c.edit_text_session(|t| t.replace(0, 0, "Discard ").unwrap());
+        assert!(c.cancel_text_session());
+        assert_eq!(text_state(&c), before);
+        assert_eq!((c.dirty.get(), c.revision(), c.can_redo()), (dirty, revision, redo));
+        // A session that changed nothing commits nothing.
+        assert!(c.begin_text_session(s, o));
+        assert_eq!(c.commit_text_session(), Ok(false));
+        assert_eq!(c.revision(), revision);
+        assert!(c.can_redo(), "a no-op commit keeps redo");
+    }
+
+    #[test]
+    fn a_text_session_whose_box_vanished_or_changed_stays_open_with_an_error() {
+        use letters_core::model::Run;
+        let c = styled_text_controller(vec![Run::plain("one")], Default::default());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        assert!(c.begin_text_session(s, o));
+        c.edit_text_session(|t| t.replace(3, 3, " two").unwrap());
+        // Something outside the session changes the box (automation).
+        c.edit_objects(s, |objs| {
+            if let SlideObject::TextBox { text, runs, .. } = &mut objs[0] {
+                *text = "changed".into();
+                runs.clear();
+            }
+        });
+        assert_eq!(c.commit_text_session(), Err(TextSessionError::Changed));
+        assert!(c.has_text_session(), "kept open so the editor can show the error");
+        assert!(!c.replace_text_range(s, o, 0, 0, "x"), "no direct edit under an open session");
+        assert!(c.cancel_text_session());
+        assert!(c.begin_text_session(s, o));
+        assert!(c.delete_object(s, o));
+        assert_eq!(c.commit_text_session(), Err(TextSessionError::Gone));
+        assert!(c.cancel_text_session());
+        assert_eq!(c.commit_text_session(), Err(TextSessionError::NoSession));
+    }
+
+    #[test]
+    fn range_commands_are_one_step_each_and_reject_bad_ranges() {
+        use crate::format::FormatEdit;
+        use letters_core::model::Run;
+        let c = styled_text_controller(vec![Run::plain("héllo wörld")], Default::default());
+        let (s, o) = (sid(&c, 0), oid(&c, 0, 0));
+        assert!(!c.format_text_range(s, o, 2, 3, &FormatEdit::Bold(true)), "mid-character");
+        assert!(!c.replace_text_range(s, o, 5, 2, "x"), "reversed");
+        assert!(!c.can_undo(), "rejected commands record nothing");
+        let world = "héllo ".len();
+        assert!(c.format_text_range(s, o, world, world + "wörld".len(), &FormatEdit::Bold(true)));
+        assert!(c.replace_text_range(s, o, 0, "héllo".len(), "hi"));
+        let (text, runs, _) = text_state(&c);
+        assert_eq!(text, "hi wörld");
+        assert_eq!(runs.iter().filter(|r| r.style.bold).map(|r| r.text.as_str()).collect::<String>(), "wörld");
+        assert!(c.undo());
+        assert!(c.undo());
+        assert_eq!(text_state(&c).0, "héllo wörld");
+        assert!(text_state(&c).1.iter().all(|r| !r.style.bold));
     }
 }

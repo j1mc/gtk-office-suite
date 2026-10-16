@@ -208,6 +208,155 @@ pub fn draw_text_body(
     }
 }
 
+/// A plain box's one layout (no paragraph styles), and where it is drawn:
+/// the canvas's small inset, wrapped to the box. The canvas draws it and
+/// the text editor's caret and selection are measured on it, so the two
+/// can never disagree.
+pub fn plain_layout(
+    cr: &cairo::Context,
+    text: &str,
+    runs: &[Run],
+    (sx, sy, sw, _): (f64, f64, f64, f64),
+    scale: f64,
+    desc: &pango::FontDescription,
+) -> (pango::Layout, (f64, f64)) {
+    let layout = pangocairo::functions::create_layout(cr);
+    layout.set_width(((sw - 2.0 * PLAIN_INSET).max(8.0) as i32) * pango::SCALE);
+    layout.set_wrap(pango::WrapMode::WordChar);
+    layout.set_font_description(Some(desc));
+    set_styled_text(&layout, text, runs, scale);
+    (layout, (sx + PLAIN_INSET, sy + PLAIN_INSET))
+}
+
+/// One laid-out stretch of a box's text: a layout, where it is drawn, and
+/// which bytes of the box's text it shows.
+struct Stretch {
+    layout: pango::Layout,
+    x: f64,
+    y: f64,
+    start: usize,
+    len: usize,
+}
+
+/// The box's text as the canvas lays it out (DCK-007): one stretch for a
+/// plain box, one per paragraph otherwise.
+#[allow(clippy::too_many_arguments)]
+fn stretches(
+    cr: &cairo::Context,
+    text: &str,
+    runs: &[Run],
+    body: &TextBody,
+    rect: (f64, f64, f64, f64),
+    scale: f64,
+    desc: &pango::FontDescription,
+) -> Vec<Stretch> {
+    if body.is_plain() {
+        let (layout, (x, y)) = plain_layout(cr, text, runs, rect, scale, desc);
+        return vec![Stretch { layout, x, y, start: 0, len: text.len() }];
+    }
+    let mut start = 0;
+    place(cr, text, runs, body, rect, scale, desc)
+        .into_iter()
+        .zip(text.split('\n'))
+        .map(|(p, para)| {
+            let s = Stretch { layout: p.layout, x: p.x, y: p.y, start, len: para.len() };
+            start += para.len() + 1;
+            s
+        })
+        .collect()
+}
+
+/// Rectangles (canvas pixels, in the box's unrotated frame) covering bytes
+/// `start..end` of the box's text, line by line; for a caret, one thin
+/// bar where the next character goes.
+#[allow(clippy::too_many_arguments)]
+pub fn range_rects(
+    cr: &cairo::Context,
+    text: &str,
+    runs: &[Run],
+    body: &TextBody,
+    rect: (f64, f64, f64, f64),
+    scale: f64,
+    desc: &pango::FontDescription,
+    (start, end): (usize, usize),
+) -> Vec<(f64, f64, f64, f64)> {
+    let k = pango::SCALE as f64;
+    let mut out = Vec::new();
+    for s in stretches(cr, text, runs, body, rect, scale, desc) {
+        let (ps, pe) = (s.start, s.start + s.len);
+        if start == end {
+            if (ps..=pe).contains(&start) {
+                let (strong, _) = s.layout.cursor_pos((start - ps) as i32);
+                out.push((s.x + strong.x() as f64 / k, s.y + strong.y() as f64 / k, 1.5, (strong.height() as f64 / k).max(1.0)));
+                break;
+            }
+            continue;
+        }
+        if end <= ps || start > pe {
+            continue;
+        }
+        let (a, b) = ((start.max(ps) - ps) as i32, (end.min(pe) - ps) as i32);
+        let mut iter = s.layout.iter();
+        loop {
+            if let Some(line) = iter.line_readonly() {
+                let (_, logical) = iter.line_extents();
+                let (ls, le) = (line.start_index(), line.start_index() + line.length());
+                let top = s.y + logical.y() as f64 / k;
+                let height = logical.height() as f64 / k;
+                if a < le && b > ls {
+                    for pair in line.x_ranges(a.max(ls), b.min(le)).chunks(2) {
+                        if let [x0, x1] = pair {
+                            out.push((s.x + *x0 as f64 / k, top, (*x1 - *x0) as f64 / k, height));
+                        }
+                    }
+                } else if s.len == 0 {
+                    // A selected empty paragraph: a sliver, so the
+                    // selection visibly spans it.
+                    out.push((s.x + logical.x() as f64 / k, top, 4.0, height));
+                }
+            }
+            if !iter.next_line() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The byte offset of the box's text nearest the canvas point `(px, py)`
+/// in the box's unrotated frame: where a click puts the caret.
+#[allow(clippy::too_many_arguments)]
+pub fn offset_at(
+    cr: &cairo::Context,
+    text: &str,
+    runs: &[Run],
+    body: &TextBody,
+    rect: (f64, f64, f64, f64),
+    scale: f64,
+    desc: &pango::FontDescription,
+    (px, py): (f64, f64),
+) -> usize {
+    let all = stretches(cr, text, runs, body, rect, scale, desc);
+    // The paragraph under the point, else the last one above it.
+    let Some(s) = all
+        .iter()
+        .rev()
+        .find(|s| py >= s.y)
+        .or(all.first())
+    else {
+        return 0;
+    };
+    let k = pango::SCALE as f64;
+    let (_, index, trailing) = s.layout.xy_to_index(((px - s.x) * k) as i32, ((py - s.y) * k) as i32);
+    let para = &text[s.start..s.start + s.len];
+    let mut at = (index.max(0) as usize).min(para.len());
+    while !para.is_char_boundary(at) {
+        at -= 1;
+    }
+    let at = para[at..].char_indices().nth(trailing.max(0) as usize).map_or(para.len(), |(i, _)| at + i);
+    s.start + at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +467,34 @@ mod tests {
         assert_eq!(placed[1].layout.alignment(), pango::Alignment::Right);
         assert!(placed[1].y > placed[0].y);
         assert_eq!(placed[0].x, PLAIN_INSET, "no insets stated: the plain inset");
+    }
+
+    /// DCK-007: the editor's caret, selection and click placement are
+    /// measured on the layouts the canvas draws, plain or styled.
+    #[test]
+    fn a_selection_and_a_click_measure_the_text_the_canvas_draws() {
+        let zero = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+        let body = TextBody { paras: vec![ParaStyle::default(), ParaStyle { margin_left: 30.0, ..Default::default() }], insets: Some(zero), ..Default::default() };
+        let text = "Alpha Beta\nGamma";
+        let runs = runs(text);
+        let rect = (10.0, 10.0, 300.0, 200.0);
+        let caret = range_rects(&ctx(), text, &runs, &body, rect, 1.0, &desc(), (11, 11));
+        assert_eq!(caret.len(), 1, "{caret:?}");
+        assert!((caret[0].0 - 40.0).abs() < 0.5, "the second paragraph starts at its margin: {caret:?}");
+        let sel = range_rects(&ctx(), text, &runs, &body, rect, 1.0, &desc(), (6, 10));
+        assert_eq!(sel.len(), 1, "{sel:?}");
+        assert!(sel[0].0 > 10.0 && sel[0].2 > 0.0 && sel[0].1 < caret[0].1, "{sel:?}");
+        assert!(range_rects(&ctx(), text, &runs, &body, rect, 1.0, &desc(), (6, 13)).len() >= 2, "a selection across the break covers both");
+        let (x, y, w, h) = sel[0];
+        let at = offset_at(&ctx(), text, &runs, &body, rect, 1.0, &desc(), (x + w / 2.0, y + h / 2.0));
+        assert!((6..=10).contains(&at), "{at}");
+        let at = offset_at(&ctx(), text, &runs, &body, rect, 1.0, &desc(), (caret[0].0 + 1.0, caret[0].1 + caret[0].3 / 2.0));
+        assert!(at >= 11, "{at}");
+        // The plain path: one layout at the canvas's own inset.
+        let plain = TextBody::default();
+        let r = range_rects(&ctx(), text, &runs, &plain, rect, 1.0, &desc(), (0, 5));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!((r[0].0 - 14.0).abs() < 0.5, "{r:?}");
     }
 
     /// #1397's figure tiles: two blank paragraphs written at 14pt lead a
