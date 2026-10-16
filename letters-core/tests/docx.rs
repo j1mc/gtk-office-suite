@@ -579,6 +579,30 @@ fn a_files_own_title_and_subtitle_styles_are_its_look() {
     assert_eq!(round_trip(&rt).paragraphs[1].runs[0].style.letter_spacing_tw, Some(15));
 }
 
+/// A page break in a table cell breaks nothing, as in Writer: the WGA
+/// form's logo cell opens with two, and its logo sits at the cell's top.
+/// They read as two blank lines and a page break before the table.
+#[test]
+fn a_page_break_in_a_table_cell_is_dropped() {
+    use letters_core::model::TableCell;
+    let mut d = Document::from_plain_text("");
+    d.paragraphs = vec![
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 0 }), ..Default::default() }, runs: vec![Run::plain("logo")] },
+        Paragraph { style: ParaStyle { table_cell: Some(TableCell { table: 0, row: 0, col: 1 }), ..Default::default() }, runs: vec![Run::plain("Form CG02")] },
+        Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] },
+    ];
+    let rt = doctor_parts(&d, |parts| {
+        let doc = parts.get_mut("word/document.xml").unwrap();
+        let at = doc.find(">logo<").expect("the cell's text");
+        let run = doc[..at].rfind("<w:r>").or_else(|| doc[..at].rfind("<w:r ")).expect("its run");
+        doc.insert_str(run, "<w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"page\"/></w:r>");
+    });
+    let cell = &rt.paragraphs[0];
+    assert!(cell.style.table_cell.is_some());
+    assert_eq!(cell.text(), "logo");
+    assert!(!cell.style.page_break_before);
+}
+
 #[test]
 fn header_footer_survive() {
     let mut d = Document::from_plain_text("body text");
