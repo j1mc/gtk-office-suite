@@ -1538,6 +1538,42 @@ fn list_style_kinds(xml: &str) -> std::collections::HashMap<String, Vec<ListKind
     out
 }
 
+/// Each `text:list-style` in `xml`: where each level puts its text, in
+/// points from the paragraph's indent (`fo:margin-left` of its
+/// label-alignment properties, Word's 0.5in for a first level), by level,
+/// 0-based. None where a level declares no position.
+fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option<f64>>> {
+    let mut out: std::collections::HashMap<String, Vec<Option<f64>>> = Default::default();
+    let mut reader = Reader::from_str(xml);
+    let mut current: Option<String> = None;
+    let mut level: Option<usize> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                "text:list-style" => current = attr_val(&e, "style:name"),
+                "text:list-level-style-number" | "text:list-level-style-bullet" | "text:list-level-style-image" => {
+                    level = attr_val(&e, "text:level").and_then(|l| l.parse::<usize>().ok()).filter(|l| (1..=10).contains(l));
+                }
+                "style:list-level-label-alignment" => {
+                    let (Some(style), Some(l)) = (current.as_ref(), level) else { continue };
+                    if let Some(margin) = attr_val(&e, "fo:margin-left").and_then(|v| parse_length_pt(&v)) {
+                        let levels = out.entry(style.clone()).or_default();
+                        if levels.len() < l {
+                            levels.resize(l, None);
+                        }
+                        levels[l - 1] = Some(margin);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(e)) if e.name().as_ref() == "text:list-style" => current = None,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 fn parse_auto_styles(xml: &str) -> AutoStyles {
     let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
@@ -2323,6 +2359,8 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     list_styles.extend(list_style_kinds(&content));
     let mut list_labels = list_style_labels(&styles);
     list_labels.extend(list_style_labels(&content));
+    let mut list_indents = list_style_indents(&styles);
+    list_indents.extend(list_style_indents(&content));
     // The label of a numbered item at `level` (1-based) of the list style
     // `name`.
     let label_of = |name: Option<&String>, level: u8| -> Option<ListLabel> {
@@ -2819,6 +2857,22 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     style.list_level = list_level.saturating_sub(1);
                     style.list_start = pending_start.take();
                     style.list_label = label;
+                    // Where the list style puts the item's text, unless the
+                    // paragraph places it itself: the model's indent is
+                    // that less the list indent the layout adds (as for a
+                    // Word list, `docx::list_indent_from_declared`). A
+                    // Word-made .odt's 0.5in level is drawn at 0.5in.
+                    if kind != ListKind::None && style.left_indent_pt == 0.0 {
+                        let own = item_styles.get(usize::from(list_level.max(1) - 1)).cloned().flatten();
+                        let name = own.as_ref().or_else(|| list_style_names.last().and_then(Option::as_ref));
+                        let declared = name.and_then(|n| list_indents.get(n)).and_then(|l| l.get(usize::from(list_level.max(1) - 1)).copied().flatten());
+                        if let Some(declared) = declared {
+                            style.left_indent_pt = (declared - crate::lists::text_indent_pt(style.list_level)).max(0.0);
+                            if style.first_line_indent_pt < 0.0 {
+                                style.first_line_indent_pt = 0.0;
+                            }
+                        }
+                    }
                     if in_toc && !in_index_title {
                         let name = attr_val(&e, "text:style-name").unwrap_or_default();
                         let base = auto.para_parent.get(&name).cloned().unwrap_or(name);
@@ -3929,6 +3983,36 @@ mod tests {
     /// font is the default style's, named by its font face. All four were
     /// lost: a Calibri agenda opened in the serif fallback with a plain
     /// title and tight table rows.
+    /// A list style's label-alignment position is where its items' text
+    /// goes: a Word-made .odt's first level (margin 0.5in, label 0.25in
+    /// back) is drawn with its text at 0.5in and its number at 0.25in, as
+    /// Writer draws it, not at the built-in 18pt (render-lab
+    /// `real-explanatory-note`, `real-salary-template`).
+    #[test]
+    fn list_items_sit_where_their_list_style_puts_them() {
+        let content = "<office:document-content><office:automatic-styles>\
+            <text:list-style style:name=\"L1\"><text:list-level-style-number text:level=\"1\" style:num-suffix=\".\" style:num-format=\"1\">\
+              <style:list-level-properties text:list-level-position-and-space-mode=\"label-alignment\">\
+              <style:list-level-label-alignment text:label-followed-by=\"listtab\" fo:margin-left=\"0.5in\" fo:text-indent=\"-0.25in\"/>\
+              </style:list-level-properties></text:list-level-style-number></text:list-style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:list text:style-name=\"L1\"><text:list-item><text:p>one</text:p></text:list-item></text:list>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let item = &d.paragraphs[0];
+        assert_eq!(item.style.list, ListKind::Numbered);
+        let text_x = crate::layout::paragraph_box_x(item);
+        assert!((text_x - 36.0).abs() < 0.01, "text at 0.5in: {text_x}");
+        // A list Letters wrote reads back at its own indent.
+        let mut d = Document::from_plain_text("a\nb");
+        d.paragraphs[0].style.list = ListKind::Bullet;
+        d.paragraphs[1].style.list = ListKind::Bullet;
+        d.paragraphs[1].style.list_level = 1;
+        let rt = round_trip(&d);
+        assert_eq!(rt.paragraphs[0].style.left_indent_pt, 0.0);
+        assert_eq!(rt.paragraphs[1].style.left_indent_pt, 0.0);
+    }
+
     #[test]
     fn paragraph_and_default_styles_are_inherited() {
         let content = "<office:document-content><office:automatic-styles>\
