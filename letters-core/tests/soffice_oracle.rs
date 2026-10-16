@@ -2323,6 +2323,32 @@ fn multi_section_geometry_survives_writer_both_ways() {
     check(&rt, "odt → Writer → docx");
 }
 
+/// A heading's run set back to regular weight stays regular through
+/// Writer, both ways: the vessel declaration's Heading 3 cells.
+#[test]
+fn a_regular_run_in_a_heading_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("Towing Operations\nafter");
+    d.paragraphs[0].style.heading = Some(3);
+    d.paragraphs[0].runs[0].style.regular = true;
+    let close = |got: &Document, how: &str| {
+        let p = para_with_text(got, "Towing Operations");
+        assert!(p.style.heading.is_some(), "{how}: still a heading");
+        assert!(p.runs.iter().all(|r| r.style.regular && !r.style.bold), "{how}: {:?}", p.runs);
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("regular.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("regular.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+
+    let Some(rt) = through_lo_to_docx(&d, "regular") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// A table cell's bare sides and its place in the row through Writer,
 /// both ways: the expression-of-interest form's two-cell header band, and
 /// the vessel declaration's labels set in the middle of their rows.

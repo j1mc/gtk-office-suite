@@ -581,15 +581,17 @@ pub fn load_ods_workbook(path: &str) -> Result<(TablesEngine, Vec<SheetModel>), 
             .copied()
             .filter(|(r, c, _, _)| *r < sheet.rows && *c < sheet.cols)
             .collect();
-        // Number formats, cell styles and borders, as the xlsx reader
-        // applies them.
+        // Number formats, cell styles, borders and cell protection, as the
+        // xlsx reader applies them, and the sheet's protection (TBL-005).
         for (r, c, x) in &p.cell_styles {
             if *r < sheet.rows && *c < sheet.cols {
                 sheet.formats[*r][*c] = x.format.clone();
                 sheet.styles[*r][*c] = x.style.clone();
                 sheet.borders[*r][*c] = x.border.clone();
+                sheet.cell_protections[*r][*c] = x.protection.clone();
             }
         }
+        sheet.protection = p.protection.clone();
         for (r, c, note) in &p.notes {
             if *r < sheet.rows && *c < sheet.cols {
                 sheet.notes[*r][*c] = Some(note.clone());
@@ -743,21 +745,24 @@ mod tests {
             ],
         );
         let (_, sheets) = load_xlsx_workbook(path.to_str().unwrap()).unwrap();
-        let protected = SheetProtection { protected: true, ..SheetProtection::default() };
+        // An element's absent `objects`/`scenarios` mean allowed (ECMA-376
+        // defaults), unlike the model's defaults for a sheet with none.
+        let element = SheetProtection { allow_edit_objects: true, allow_edit_scenarios: true, ..SheetProtection::default() };
+        let protected = SheetProtection { protected: true, ..element.clone() };
         assert_eq!(sheets[0].protection, SheetProtection::default());
         assert_eq!(sheets[1].protection, protected);
         assert_eq!(sheets[2].protection, SheetProtection {
             protected: true,
-            password_hash: None,
             allow_select_locked: false,
             allow_select_unlocked: false,
             allow_format_cells: true,
             allow_insert_rows: true,
             allow_delete_rows: true,
+            ..element.clone()
         });
         assert_eq!(sheets[3].protection, protected);
-        assert_eq!(sheets[4].protection, SheetProtection::default());
-        assert_eq!(sheets[5].protection, SheetProtection::default());
+        assert_eq!(sheets[4].protection, element);
+        assert_eq!(sheets[5].protection, element);
     }
 
     // ── build_named_workbook unit tests ───────────────────────────────────
@@ -933,6 +938,51 @@ mod tests {
         let names: Vec<&str> = sheets.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Accounts"]);
         assert_eq!(engine.cell(0, 1), "42");
+    }
+
+    /// Calc's sheet protection opens protected, with its selection and
+    /// row/column permissions and its cells' protect flags (TBL-005).
+    #[test]
+    fn ods_imports_sheet_and_cell_protection() {
+        use crate::sheet::{CellProtection, SheetProtection};
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("protected.ods");
+        let content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" office:version="1.3">
+<office:automatic-styles>
+<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties style:cell-protect="none"/></style:style>
+<style:style style:name="ce2" style:family="table-cell"><style:table-cell-properties style:cell-protect="protected formula-hidden"/></style:style>
+<style:style style:name="ce3" style:family="table-cell"><style:table-cell-properties style:cell-protect="formula-hidden"/></style:style>
+</office:automatic-styles>
+<office:body><office:spreadsheet>
+<table:table table:name="Open"><table:table-row><table:table-cell office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table>
+<table:table table:name="Locked" table:protected="true"><loext:table-protection loext:select-protected-cells="false" loext:select-unprotected-cells="true" loext:insert-rows="true" loext:delete-columns="true"/><table:table-row><table:table-cell table:style-name="ce1" office:value-type="float" office:value="2"><text:p>2</text:p></table:table-cell><table:table-cell table:style-name="ce2" table:formula="of:=[.A1]*3" office:value-type="float" office:value="6"><text:p>6</text:p></table:table-cell><table:table-cell table:style-name="ce3" office:value-type="float" office:value="7"><text:p>7</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="8"><text:p>8</text:p></table:table-cell></table:table-row></table:table>
+</office:spreadsheet></office:body></office:document-content>"#;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/vnd.oasis.opendocument.spreadsheet").unwrap();
+        zip.start_file("META-INF/manifest.xml", stored).unwrap();
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#).unwrap();
+        zip.start_file("content.xml", stored).unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        let (_, sheets) = load_ods_workbook(path.to_str().unwrap()).expect("the workbook opens");
+        assert_eq!(sheets[0].protection, SheetProtection::default());
+        assert_eq!(sheets[1].protection, SheetProtection {
+            protected: true,
+            allow_select_locked: false,
+            allow_insert_rows: true,
+            allow_delete_columns: true,
+            ..SheetProtection::default()
+        });
+        let cells = &sheets[1].cell_protections[0];
+        assert_eq!(cells[0], CellProtection { locked: false, hidden_formula: false });
+        assert_eq!(cells[1], CellProtection { locked: true, hidden_formula: true });
+        assert_eq!(cells[2], CellProtection { locked: false, hidden_formula: true });
+        assert_eq!(cells[3], CellProtection::default());
+        assert!(sheets[1].formula_hidden(0, 1));
     }
 
     #[test]

@@ -2028,7 +2028,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         }
                         let Some(run) = run else { break };
                         let mut r = cp.add_run(&run.text);
-                        if run.style.bold { r = r.bold(true); }
+                        if run.style.bold { r = r.bold(true); } else if run.style.regular { r = r.bold(false); }
                         if run.style.italic { r = r.italic(true); }
                         if run.style.underline { r = r.underline(true); }
                         if run.style.strikethrough { r = r.strike(true); }
@@ -2331,7 +2331,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             let mut p = out.last_paragraph_mut().expect("paragraph just added");
             let text = bracketed(&mut revisions, run);
             let mut r = p.add_run(&text);
-            if run.style.bold { r = r.bold(true); }
+            if run.style.bold { r = r.bold(true); } else if run.style.regular { r = r.bold(false); }
             if run.style.italic { r = r.italic(true); }
             if run.style.underline { r = r.underline(true); }
             if run.style.strikethrough { r = r.strike(true); }
@@ -3175,6 +3175,8 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
             text,
             style: RunStyle {
                 bold: r.bold_value().unwrap_or(eff.bold == Some(true)),
+                // Not bold in a heading, which is drawn bold.
+                regular: heading.is_some() && r.bold_value().or(eff.bold) == Some(false),
                 italic: r.italic_value().unwrap_or(eff.italic == Some(true)),
                 underline: r.is_underline(),
                 strikethrough: r.is_strike(),

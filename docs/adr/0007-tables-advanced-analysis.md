@@ -53,10 +53,10 @@ Issue #114 requires scoping advanced spreadsheet capabilities for Tables:
   - `hidden_formula: bool` (hides formula string when protected).
 - **Sheet Protection (`SheetProtection`):**
   - `protected: bool`.
-  - `password_hash: Option<String>` (SHA-256 or legacy OOXML hash).
-  - `allow_select_locked: bool`, `allow_select_unlocked: bool`, `allow_format_cells: bool`, `allow_insert_rows: bool`, `allow_delete_rows: bool`, etc.
-- **Current enforcement:** `WorkbookController::edit_cell` refuses edits to locked cells on protected sheets by returning without mutation. The GUI uses `refuses_edit` to explain the refusal; this API does not return `Err("Sheet is protected")`.
-- **Persistence target, not current capability:** preserve supported cell protection and `<sheetProtection>` attributes; explicitly warn about unsupported losses. Currently XLSX persistence retains only the sheet-protected boolean, not the full permissions/password/cell-lock model. Sheet protection is not encryption.
+  - `password_hash: Option<String>`: an opaque imported value, not yet a typed or verifiable credential (TBL-005 part 2).
+  - One `allow_*` per OOXML `<sheetProtection>` permission (selection, format cells/columns/rows, insert/delete columns/rows, hyperlinks, sort, filters, pivot tables, objects, scenarios); `tables-core/src/io/sheet_protection.rs` maps each to its attribute and ECMA-376 default.
+- **Current enforcement (TBL-005 part 1):** the controller authorizes every user operation group before it runs. Locked cells refuse edits, and each modeled permission governs its own operations; delete and sort permissions never bypass locked cells. Selection permissions apply to mouse, keyboard and name-box selection, and a cell that cannot be selected cannot be edited. A protected hidden formula shows its value, but the formula bar, clipboard and fill sources withhold its text. Changing protection is one undo step through the Sheet Protection dialog.
+- **Persistence:** cell locks and hidden flags, plus every permission (also on unprotected sheets), round-trip through XLSX; ODS import reads Calc's sheet and cell protection. Credentials, Allow Edit Ranges and workbook structure protection warn before a save drops them. Sheet protection is not encryption and is not a security boundary.
 
 ### 5. Recalculation & Large-Workbook Budget
 

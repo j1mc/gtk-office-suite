@@ -16,6 +16,7 @@ mod sheet_bar;
 mod persistence;
 mod window_dialogs;
 mod sheet_actions;
+mod protection_ui;
 mod loss_ui;
 mod preferences;
 pub mod grid_render;

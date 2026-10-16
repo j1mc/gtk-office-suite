@@ -194,9 +194,22 @@ pub fn parse_ods_cell_styles(content_xml: &str, data_styles: &HashMap<String, Nu
             color: rgb.to_f64(),
         };
         let format = attr(&head, "style:data-style-name").and_then(|n| data_styles.get(n)).cloned().unwrap_or_default();
-        out.insert(name.to_string(), XfStyle { format, style, border, ..XfStyle::default() });
+        let protection = attr(cell, "style:cell-protect").map(cell_protect).unwrap_or_default();
+        out.insert(name.to_string(), XfStyle { format, style, border, protection });
     }
     out
+}
+
+/// ODF `style:cell-protect` (ODF 1.3 §20.200): `none`, `hidden-and-protected`,
+/// or a list of `protected` and `formula-hidden`. Absent means the default
+/// style's `protected`, as in OOXML.
+fn cell_protect(value: &str) -> crate::sheet::CellProtection {
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let both = tokens.contains(&"hidden-and-protected");
+    crate::sheet::CellProtection {
+        locked: both || tokens.contains(&"protected"),
+        hidden_formula: both || tokens.contains(&"formula-hidden"),
+    }
 }
 
 #[cfg(test)]

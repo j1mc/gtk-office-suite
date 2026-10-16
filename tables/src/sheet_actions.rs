@@ -65,6 +65,7 @@ pub(crate) fn main_menu_section() -> gio::Menu {
         (&i18n("Set Print _Area"), "app.set-print-area"),
         (&i18n("_Freeze Rows"), "app.toggle-freeze-rows"),
         (&i18n("Pro_tect Sheet"), "app.toggle-sheet-protection"),
+        (&i18n("Sheet Protection _Settings…"), "app.protection-settings"),
     ])
 }
 
@@ -190,13 +191,5 @@ pub(crate) fn install(app: &impl IsA<gio::ActionMap>, ctl: &Ctl, grid: &gtk::Dra
         app.add_action(&act);
     }
 
-    let (ctl, grid, toasts) = (ctl.clone(), grid.clone(), toasts.clone());
-    let act = gio::SimpleAction::new("toggle-sheet-protection", None);
-    act.connect_activate(move |_, _| {
-        let protect = !ctl.borrow().sheet_is_protected();
-        ctl.borrow_mut().set_sheet_protection(protect, None);
-        toast(&toasts, if protect { "Sheet protected" } else { "Sheet unprotected" });
-        grid.queue_draw();
-    });
-    app.add_action(&act);
+    crate::protection_ui::install(app, ctl, grid, &refresh);
 }

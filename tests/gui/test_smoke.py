@@ -5444,6 +5444,81 @@ class TablesSheetStructureSmoke(TablesCellEntryMixin, BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "tables crashed during filter undo/redo")
 
 
+class TablesProtectionSettingsSmoke(TablesCellEntryMixin, BaseGUITestCase):
+    """TBL-005: the Sheet Protection dialog protects the sheet as one undo
+    step and Cancel changes nothing; a protected hidden formula shows its
+    value on the grid but leaves the formula bar empty, committing that
+    empty bar changes nothing, and unprotecting brings the formula back."""
+
+    app_name = "tables"
+    AID = "org.tunaos.tables"
+
+    def setUp(self):
+        self.isolate_snapshot(prefix="tables-protection-settings-")
+        super().setUp()
+        import subprocess
+        subprocess.run(["gapplication", "action", self.AID, "new-document"])
+        self._wait_for_a_new_document()
+
+    _act = TablesSheetStructureSmoke._act
+    _cells = TablesSheetStructureSmoke._cells
+    _wait_cells = TablesSheetStructureSmoke._wait_cells
+    _select = TablesSheetStructureSmoke._select
+    _formula = TablesSheetStructureSmoke._formula
+
+    def _fx(self):
+        # dogtail's .text asks for characters 0..-1, which GTK 4's text
+        # interface answers with nothing; ask for the count it reports.
+        text = self.app.child(name="Formula input", roleName="text").queryText()
+        return text.getText(0, text.characterCount)
+
+    def _sheet(self):
+        return self._cells()[1]["sheet"]
+
+    def _dialog(self, button):
+        # GTK 4's check buttons offer no AT-SPI action; the dialog opens
+        # with "Protect this sheet" ticked, so Apply protects.
+        self._act("protection-settings")
+        self.wait_for_node(name="Sheet Protection")
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.roleName == "check box" and n.name == "Protect this sheet" and n.showing,
+                                       retry=False, requireResult=False),
+            bool, description="the dialog's protect check box")
+        self.wait_for_node(name=button, roleName="push button").do_action(0)
+        self.wait_until(
+            lambda: self.app.findChild(lambda n: n.name == "Protect this sheet" and n.showing,
+                                       retry=False, requireResult=False),
+            lambda n: n is None, description="the protection dialog to close")
+
+    def test_settings_dialog_protects_and_hides_formulas(self):
+        from dogtail import rawinput
+        self._formula("A1", "=6*7", 0, 0)
+        self._select("A1")
+        self._act("toggle-formula-hidden")
+        self.wait_until(lambda: self._sheet()["active_cell"]["formula_hidden"], bool,
+                        description="A1's formula to be marked hidden")
+
+        self._dialog("Cancel")
+        self.assertFalse(self._sheet()["protected"], "Cancel protected the sheet")
+        self._dialog("Apply")
+        sheet = self.wait_until(self._sheet, lambda s: s["protected"], description="Apply to protect the sheet")
+        self.assertTrue(sheet["permissions"]["selectLockedCells"], sheet["permissions"])
+        self.assertFalse(sheet["permissions"]["sort"], sheet["permissions"])
+
+        self._select("A1")
+        self.wait_until(self._grid, lambda text: "cell A1: 42" in text, description="A1's value on the grid")
+        self.assertEqual(self._fx(), "", "the formula bar showed a hidden formula")
+        rawinput.keyCombo("Return")
+        self.assertEqual(self._cells()[0][(0, 0)], ("42", "6*7"), "committing the empty bar changed A1")
+
+        self._act("undo")
+        self.wait_until(lambda: self._sheet()["protected"], lambda p: not p,
+                        description="one undo to remove the protection")
+        self._select("A1")
+        self.wait_until(self._fx, lambda text: text == "=6*7", description="the formula back in the bar")
+        self.assertIsNone(self.process.poll(), "tables crashed in the protection settings journey")
+
+
 class TablesNamedRangeSmoke(BaseGUITestCase):
     """Named ranges (#113): Define Name captures the current selection;
     typing that name into the name box (instead of a cell reference)

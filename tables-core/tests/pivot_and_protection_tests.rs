@@ -344,3 +344,73 @@ fn inactive_cell_protection_survives_until_a_sheet_is_protected() {
     assert!(!back[0].cell_protections[3][1].locked);
     assert!(back[0].cell_protections[3][1].hidden_formula);
 }
+
+/// Every `<sheetProtection>` permission, alone and on protected and
+/// unprotected sheets, is written with its own attribute — read back here
+/// independently of the importer, against ECMA-376's defaults — and reopens
+/// identically (TBL-005 step 3).
+#[test]
+fn tbl005_every_permission_round_trips_on_protected_and_unprotected_sheets() {
+    use tables_core::io::{load_workbook, save_sheets_to_xlsx_bytes};
+    use tables_core::sheet::{SheetModel, SheetProtection};
+    // (attribute, ECMA-376 default "disallowed", model field)
+    type Field = fn(&mut SheetProtection) -> &mut bool;
+    let permissions: [(&str, bool, Field); 15] = [
+        ("objects", false, |p| &mut p.allow_edit_objects),
+        ("scenarios", false, |p| &mut p.allow_edit_scenarios),
+        ("formatCells", true, |p| &mut p.allow_format_cells),
+        ("formatColumns", true, |p| &mut p.allow_format_columns),
+        ("formatRows", true, |p| &mut p.allow_format_rows),
+        ("insertColumns", true, |p| &mut p.allow_insert_columns),
+        ("insertRows", true, |p| &mut p.allow_insert_rows),
+        ("insertHyperlinks", true, |p| &mut p.allow_insert_hyperlinks),
+        ("deleteColumns", true, |p| &mut p.allow_delete_columns),
+        ("deleteRows", true, |p| &mut p.allow_delete_rows),
+        ("selectLockedCells", false, |p| &mut p.allow_select_locked),
+        ("sort", true, |p| &mut p.allow_sort),
+        ("autoFilter", true, |p| &mut p.allow_autofilter),
+        ("pivotTables", true, |p| &mut p.allow_pivot_tables),
+        ("selectUnlockedCells", false, |p| &mut p.allow_select_unlocked),
+    ];
+    let attribute = |tag: &str, name: &str| -> Option<String> {
+        let prefix = format!(" {name}=\"");
+        tag.split(&prefix).nth(1).map(|s| s.split('"').next().unwrap().to_string())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("permissions.xlsx");
+    for protected in [true, false] {
+        // One sheet per permission flipped from the model default, plus a
+        // later sheet left at the defaults.
+        let mut sheets: Vec<SheetModel> = permissions.iter().enumerate().map(|(i, (_, _, field))| {
+            let mut sheet = SheetModel::new(&format!("P{i}"), 1, 1, i as u32);
+            sheet.data[0][0] = "value".into();
+            sheet.protection.protected = protected;
+            let flipped = !*field(&mut sheet.protection);
+            *field(&mut sheet.protection) = flipped;
+            sheet
+        }).collect();
+        sheets.push(SheetModel::new("Defaults", 1, 1, 99));
+        sheets.last_mut().unwrap().protection.protected = protected;
+        let bytes = save_sheets_to_xlsx_bytes(&sheets, None).unwrap();
+        for (i, sheet) in sheets.iter().enumerate() {
+            let xml = xlsx_part(&bytes, &format!("xl/worksheets/sheet{}.xml", i + 1));
+            let Some(tag) = xml.split("<sheetProtection").nth(1).map(|t| t.split("/>").next().unwrap().to_string()) else {
+                assert!(!protected && sheet.protection == SheetProtection::default(), "sheet {i}: no element written: {xml}");
+                continue;
+            };
+            assert_eq!(xml.matches("<sheetProtection").count(), 1, "sheet {i}");
+            assert_eq!(attribute(&tag, "sheet").as_deref() == Some("1"), protected, "sheet {i}: {tag}");
+            for (name, disallowed_by_default, field) in &permissions {
+                let mut model = sheet.protection.clone();
+                let allowed = *field(&mut model);
+                let disallowed = attribute(&tag, name).map_or(*disallowed_by_default, |v| v == "1" || v == "true");
+                assert_eq!(disallowed, !allowed, "protected={protected} sheet {i}: {name} in {tag}");
+            }
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let (_, back) = load_workbook(path.to_str().unwrap()).unwrap();
+        for (sheet, reopened) in sheets.iter().zip(&back) {
+            assert_eq!(reopened.protection, sheet.protection, "protected={protected}: {}", sheet.name);
+        }
+    }
+}

@@ -1033,20 +1033,38 @@ impl Default for CellProtection {
     }
 }
 
-/// Sheet protection specification model.
+/// Sheet protection: whether the sheet is protected and what a protected
+/// sheet still allows. One `allow_*` per OOXML `<sheetProtection>`
+/// permission (`io/sheet_protection.rs` maps each to its attribute, whose
+/// value means the inverse: *disallowed*). Protection is a restriction on
+/// this app's editing commands, never encryption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "collab", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "collab", serde(default))]
 pub struct SheetProtection {
     pub protected: bool,
     pub password_hash: Option<String>,
     pub allow_select_locked: bool,
     pub allow_select_unlocked: bool,
     pub allow_format_cells: bool,
+    pub allow_format_columns: bool,
+    pub allow_format_rows: bool,
+    pub allow_insert_columns: bool,
     pub allow_insert_rows: bool,
+    pub allow_insert_hyperlinks: bool,
+    pub allow_delete_columns: bool,
     pub allow_delete_rows: bool,
+    pub allow_sort: bool,
+    pub allow_autofilter: bool,
+    pub allow_pivot_tables: bool,
+    /// Charts and other drawing objects.
+    pub allow_edit_objects: bool,
+    pub allow_edit_scenarios: bool,
 }
 
 impl Default for SheetProtection {
+    /// What protecting a sheet allows unless the user says otherwise:
+    /// Excel's and Calc's defaults — selecting cells, nothing else.
     fn default() -> Self {
         Self {
             protected: false,
@@ -1054,8 +1072,18 @@ impl Default for SheetProtection {
             allow_select_locked: true,
             allow_select_unlocked: true,
             allow_format_cells: false,
+            allow_format_columns: false,
+            allow_format_rows: false,
+            allow_insert_columns: false,
             allow_insert_rows: false,
+            allow_insert_hyperlinks: false,
+            allow_delete_columns: false,
             allow_delete_rows: false,
+            allow_sort: false,
+            allow_autofilter: false,
+            allow_pivot_tables: false,
+            allow_edit_objects: false,
+            allow_edit_scenarios: false,
         }
     }
 }

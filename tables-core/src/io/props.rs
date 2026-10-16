@@ -598,18 +598,8 @@ pub fn read_sheet_props_from_xlsx(
             }
         }
 
-        if let Some(tag) = xml.split("<sheetProtection").nth(1) {
-            let tag = tag.split('>').next().unwrap_or("").trim_end_matches('/');
-            // OOXML's operation flags mean "disallow", not "allow".
-            props.protection = crate::sheet::SheetProtection {
-                protected: xml_bool_attr(tag, "sheet"),
-                password_hash: None,
-                allow_select_locked: !xml_bool_attr(tag, "selectLockedCells"),
-                allow_select_unlocked: !xml_bool_attr(tag, "selectUnlockedCells"),
-                allow_format_cells: matches!(xml_attr(tag, "formatCells"), Some("0" | "false")),
-                allow_insert_rows: matches!(xml_attr(tag, "insertRows"), Some("0" | "false")),
-                allow_delete_rows: matches!(xml_attr(tag, "deleteRows"), Some("0" | "false")),
-            };
+        if let Some(tag) = super::sheet_protection::tags(&xml).next() {
+            props.protection = super::sheet_protection::parse(&super::sheet_protection::attributes(tag));
         }
 
         if let Some(block) = xml.split("<mergeCells").nth(1) {
@@ -944,6 +934,37 @@ fn split_elements<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
     out
 }
 
+/// A `<table:table>`'s protection: `table:protected`, and the permissions of
+/// its `table:table-protection` (ODF 1.3 §9.1.2: the two selections) or
+/// Calc's `loext:table-protection` (also row/column insert and delete).
+/// Absent permissions keep the model's — Calc's — defaults. Calc's password
+/// digest (`table:protection-key`) is reported by the loss scan.
+fn odf_sheet_protection(head: &str, body: &str) -> crate::sheet::SheetProtection {
+    let mut protection = crate::sheet::SheetProtection {
+        protected: xml_bool_attr(head, "table:protected"),
+        ..crate::sheet::SheetProtection::default()
+    };
+    let Some(start) = body.find(":table-protection") else { return protection };
+    let tag = body[start..].split('>').next().unwrap_or("");
+    let attrs = super::sheet_protection::attributes(tag);
+    let fields: [(&str, &mut bool); 6] = [
+        ("select-protected-cells", &mut protection.allow_select_locked),
+        ("select-unprotected-cells", &mut protection.allow_select_unlocked),
+        ("insert-columns", &mut protection.allow_insert_columns),
+        ("insert-rows", &mut protection.allow_insert_rows),
+        ("delete-columns", &mut protection.allow_delete_columns),
+        ("delete-rows", &mut protection.allow_delete_rows),
+    ];
+    for (name, field) in fields {
+        match attrs.get(name) {
+            Some(&"true") => *field = true,
+            Some(&"false") => *field = false,
+            _ => {}
+        }
+    }
+    protection
+}
+
 /// An ODF length in px at 96dpi. ODF writes an absolute unit on every
 /// length, and Calc picks whichever suits the locale, so all four have to
 /// be understood rather than the one that happened to appear in a fixture.
@@ -1065,6 +1086,7 @@ pub fn read_sheet_props_from_ods(
         let Some(name) = xml_attr(head, "table:name") else { continue };
         let body = table.split("</table:table>").next().unwrap_or("");
         let mut props = SheetXlsxProps { default_font: default_font.clone(), ..SheetXlsxProps::default() };
+        props.protection = odf_sheet_protection(head, body);
         let mut col_cell_style: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
 
         // Columns: each element covers `number-columns-repeated` of them.

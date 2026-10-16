@@ -17,6 +17,10 @@ pub use crate::sections::{DocSection, ParagraphRange};
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStyle {
     pub bold: bool,
+    /// Drawn regular where the paragraph's look is bold (a heading, the
+    /// Title): ODF's `fo:font-weight="normal"`, OOXML's `<w:b w:val="0"/>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub regular: bool,
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,

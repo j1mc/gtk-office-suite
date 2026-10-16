@@ -102,6 +102,9 @@ fn workbook() -> (TablesEngine, Vec<SheetModel>) {
     s.protection.allow_format_cells = true;
     s.protection.allow_insert_rows = true;
     s.protection.allow_delete_rows = true;
+    s.protection.allow_sort = true;
+    s.protection.allow_format_columns = true;
+    s.protection.allow_edit_objects = true;
     s.protection.password_hash = Some("secret".into());
     s.cell_protections[1][1].locked = false;
     s.cell_protections[5][1].hidden_formula = true;
@@ -217,6 +220,10 @@ const BUDGET: &[(&str, Budget, Check)] = &[
     ("permission format cells", Kept, |_, s| s[0].protection.allow_format_cells),
     ("permission insert rows", Kept, |_, s| s[0].protection.allow_insert_rows),
     ("permission delete rows", Kept, |_, s| s[0].protection.allow_delete_rows),
+    ("permission sort", Kept, |_, s| s[0].protection.allow_sort),
+    ("permission format columns", Kept, |_, s| s[0].protection.allow_format_columns),
+    ("permission edit objects", Kept, |_, s| s[0].protection.allow_edit_objects),
+    ("permissions left disallowed", Kept, |_, s| !s[0].protection.allow_autofilter && !s[0].protection.allow_insert_columns && !s[1].protection.allow_edit_objects),
     ("unlocked cells", Kept, |_, s| !s[0].cell_protections[1][1].locked),
     ("hidden formulas", Kept, |_, s| s[0].cell_protections[5][1].hidden_formula && s[0].cell_protections[5][1].locked),
     ("protection-only blank cells", Kept, |_, s| !s[0].cell_protections[10][5].locked && s[0].data[10][5].is_empty()),

@@ -183,6 +183,8 @@ impl PangoShaper {
             let st = &run.style;
             if st.bold {
                 add(pango::AttrInt::new_weight(pango::Weight::Bold).into());
+            } else if st.regular {
+                add(pango::AttrInt::new_weight(pango::Weight::Normal).into());
             }
             if st.italic {
                 add(pango::AttrInt::new_style(pango::Style::Italic).into());

@@ -13,6 +13,7 @@
 // - `xlsx_styles.rs` — the cell styles (format, font, fill, alignment) styles.xml declares
 // - `ods_styles.rs` — the same, from an ods content.xml's automatic cell styles
 // - `ods_numfmt.rs` — ods data styles (number formats) and ODF date values
+// - `sheet_protection.rs` — OOXML `<sheetProtection>` permissions in model terms
 
 mod charts;
 mod condrules;
@@ -26,6 +27,7 @@ mod ods_styles;
 mod xlsx_styles;
 mod props;
 mod save;
+pub(crate) mod sheet_protection;
 
 pub use charts::{read_charts_detailed, read_charts_from_xlsx, ChartReadIssue};
 pub use format::{is_writable_format, xlsx_save_as_name, FORMATS};

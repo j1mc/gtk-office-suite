@@ -30,6 +30,67 @@ impl WorkbookController {
         });
     }
 
+    /// Replace the active sheet's protection — whether it is protected and
+    /// every permission — as one undo step. False when nothing changes.
+    /// Changing protection is itself always authorized: unprotecting is an
+    /// explicit operation (TBL-005), and undo restores the previous setting.
+    pub fn set_protection(&mut self, protection: crate::sheet::SheetProtection) -> bool {
+        let (sheet_id, before) = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            (sheet.sheet_id, sheet.protection.clone())
+        };
+        if before == protection {
+            return false;
+        }
+        let description = match (before.protected, protection.protected) {
+            (false, true) => "Protect Sheet",
+            (true, false) => "Unprotect Sheet",
+            _ => "Sheet Protection Settings",
+        };
+        self.apply_ops(description, vec![Op::SetProp { sheet: sheet_id, prop: SheetProp::Protection(protection) }])
+    }
+
+    /// The active cell's lock and hidden-formula flags.
+    pub fn active_cell_protection(&self) -> crate::sheet::CellProtection {
+        let state = self.state.borrow();
+        let sheet = state.sheet();
+        sheet.cell_protections.get(sheet.selected_row).and_then(|r| r.get(sheet.selected_col)).cloned().unwrap_or_default()
+    }
+
+    /// Set the selected cells' `locked` and/or `hidden_formula` flags as one
+    /// undo step. A protected sheet refuses it as a whole: locks change only
+    /// while the sheet is unprotected. False when nothing changed.
+    pub fn set_selection_cell_protection(&mut self, locked: Option<bool>, hidden_formula: Option<bool>) -> bool {
+        let ops = {
+            let state = self.state.borrow();
+            let sheet = state.sheet();
+            let (top, left, bottom, right) = sheet.selection_block();
+            let mut ops = Vec::new();
+            for row in top..=bottom.min(sheet.rows.saturating_sub(1)) {
+                for col in left..=right.min(sheet.cols.saturating_sub(1)) {
+                    let mut protection = sheet.cell_protections[row][col].clone();
+                    protection.locked = locked.unwrap_or(protection.locked);
+                    protection.hidden_formula = hidden_formula.unwrap_or(protection.hidden_formula);
+                    if protection != sheet.cell_protections[row][col] {
+                        ops.push(Op::SetLocked { sheet: sheet.sheet_id, row, col, protection });
+                    }
+                }
+            }
+            ops
+        };
+        if ops.is_empty() {
+            return false;
+        }
+        let description = match (locked, hidden_formula) {
+            (Some(true), _) => "Lock Cells",
+            (Some(false), _) => "Unlock Cells",
+            (None, Some(true)) => "Hide Formulas",
+            (None, Some(false)) | (None, None) => "Show Formulas",
+        };
+        self.apply_ops(description, ops)
+    }
+
     /// The reference a name for `sel` stands for, on the active sheet.
     fn name_formula(&self, sel: (usize, usize, usize, usize)) -> String {
         let (top, left, bottom, right) = sel;

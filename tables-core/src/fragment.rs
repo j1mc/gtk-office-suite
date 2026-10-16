@@ -10,7 +10,10 @@ use crate::sheet::SheetModel;
 /// (its formula, or the text it was typed as from the engine) plus the
 /// formula flag. The projection (`sheet.data`) is never copied as content:
 /// pasting a displayed result back would flatten formulas — and spill
-/// results — into constants.
+/// results — into constants. The exception is an input protection
+/// withholds (TBL-005: a hidden formula on a protected sheet, or a cell
+/// that cannot be selected): it copies as its shown value only, so no
+/// clipboard format carries the formula.
 pub fn copy_range(
     sheet: &SheetModel,
     engine: &TablesEngine,
@@ -20,6 +23,10 @@ pub fn copy_range(
     for r in r0..=r1.min(sheet.rows.saturating_sub(1)) {
         let mut row = Vec::new();
         for c in c0..=c1.min(sheet.cols.saturating_sub(1)) {
+            if sheet.formula_hidden(r, c) || !sheet.may_select(r, c) {
+                row.push(GridCell { value: sheet.cell(r, c).to_string(), formula: None, num_format: None });
+                continue;
+            }
             let formula = engine.formula(r, c);
             let value = match &formula {
                 Some(_) => sheet.cell(r, c).to_string(),
