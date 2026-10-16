@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """pixel_diff.py — compare our pages with LibreOffice's pixel by pixel.
 
-Usage: pixel_diff.py OUT_DIR [--app letters] [--tier A] [--tol 64] [--overlay]
+Usage: pixel_diff.py OUT_DIR [--app APP]... [--tier A] [--tol 64] [--overlay]
+                     [--scoreboard FILE [--title T] [--previous JSON] [--limit N]]
 
 For every fixture under OUT_DIR/<app>/<name>/ with LibreOffice pages
 (lo-N.png) and ours (<tier>-N.png), each page is compared at LibreOffice's
@@ -130,20 +131,24 @@ def compare(lo_path, ours_path, tol, overlay_path=None):
     return result
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("out")
-    ap.add_argument("--app", default="letters")
-    ap.add_argument("--tier", default="A")
-    ap.add_argument("--tol", type=int, default=64)
-    ap.add_argument("--overlay", action="store_true")
-    a = ap.parse_args(argv)
+def score(pages, pages_ours):
+    """A document's pixel miss: ink_miss_1px averaged over its pages, a
+    page either side has and the other lacks counting as a full miss. 0.0
+    is LibreOffice's pages to the pixel, 1.0 nothing in common."""
+    total = sum(p["ink_miss_1px"] for p in pages.values())
+    extra = max(0, pages_ours - len(pages))
+    n = len(pages) + extra
+    return (total + extra) / n if n else 1.0
 
+
+def measure(out, app, tier, tol, overlay):
+    """{"<app>/<fixture>": entry} for every fixture of `app` LibreOffice
+    rendered. A fixture we failed to capture scores 1.0."""
     report = {}
-    for d in sorted(glob.glob(os.path.join(a.out, a.app, "*"))):
+    for d in sorted(glob.glob(os.path.join(out, app, "*"))):
         lo_pages = {page_no(p): p for p in glob.glob(os.path.join(d, "lo-[0-9]*.png"))}
-        ours = {page_no(p): p for p in glob.glob(os.path.join(d, f"{a.tier}-[0-9]*.png"))}
-        if not lo_pages or not ours:
+        ours = {page_no(p): p for p in glob.glob(os.path.join(d, f"{tier}-[0-9]*.png"))}
+        if not lo_pages:
             continue
         pages = {}
         for n in sorted(lo_pages):
@@ -151,25 +156,89 @@ def main(argv=None):
                 pages[n] = {"ink_mismatch": 1.0, "ink_miss_1px": 1.0, "band_miss": 1.0,
                             "page_mismatch": None, "missing": True}
                 continue
-            overlay = os.path.join(d, f"pixel-{n}.png") if a.overlay else None
-            pages[n] = compare(lo_pages[n], ours[n], a.tol, overlay)
-        extra = sorted(set(ours) - set(lo_pages))
-        worst = max(p["ink_miss_1px"] for p in pages.values())
-        report[f"{a.app}/{os.path.basename(d)}"] = {
-            "worst": worst,
+            path = os.path.join(d, f"pixel-{n}.png") if overlay else None
+            pages[n] = compare(lo_pages[n], ours[n], tol, path)
+        report[f"{app}/{os.path.basename(d)}"] = {
+            "score": score(pages, len(ours)),
+            "band": float(np.mean([p["band_miss"] for p in pages.values()])),
+            "worst": max(p["ink_miss_1px"] for p in pages.values()),
             "worst_strict": max(p["ink_mismatch"] for p in pages.values()),
             "worst_band": max(p["band_miss"] for p in pages.values()),
+            "first_page": pages[min(pages)]["ink_miss_1px"],
             "pages_lo": len(lo_pages),
             "pages_ours": len(ours),
-            "extra_pages": extra,
+            "extra_pages": sorted(set(ours) - set(lo_pages)),
             "pages": pages,
         }
+    return report
 
-    with open(os.path.join(a.out, f"pixel-{a.app}-{a.tier}.json"), "w") as f:
-        json.dump(report, f, indent=1, sort_keys=True)
-    for name, r in sorted(report.items(), key=lambda kv: -kv[1]["worst"]):
+
+def scoreboard(report, title, previous=None, limit=None):
+    """The report as a Markdown table, worst document first: the work queue.
+    `previous` ({fixture: score}) adds each score's change since."""
+    rows = sorted(report.items(), key=lambda kv: (-kv[1]["score"], kv[0]))
+    n = len(rows)
+    identical = sum(1 for _, r in rows if r["score"] < 0.005)
+    mean = float(np.mean([r["score"] for _, r in rows])) if rows else 0.0
+    out = [
+        f"### {title}",
+        "",
+        f"{n} documents; mean pixel miss **{mean:.3f}**; {identical} match LibreOffice to the pixel (< 0.005). "
+        "Worst first: fix from the top.",
+        "",
+        "Pixel miss: ink in one render with no ink within 1 px in the other, over all ink, per page, "
+        "averaged over the pages (a missing or extra page counts 1.0). Within lines: the same with each "
+        "line band free to slide 40 px, so it shows what differs inside lines, however far an earlier "
+        "miss pushed them; the gap between the two is vertical drift.",
+        "",
+        "| # | Document | Pixel miss |" + (" Change |" if previous is not None else "") + " Within lines | Page 1 | Pages (ours/LO) |",
+        "|---:|---|---:|" + ("---:|" if previous is not None else "") + "---:|---:|---|",
+    ]
+    for i, (name, r) in enumerate(rows[:limit] if limit else rows, 1):
+        change = ""
+        if previous is not None:
+            was = previous.get(name)
+            change = " new |" if was is None else f" {r['score'] - was:+.3f} |" if abs(r["score"] - was) >= 0.005 else " = |"
+        pages = f"{r['pages_ours']}/{r['pages_lo']}" + ("" if r["pages_ours"] == r["pages_lo"] else " ⚠")
+        out.append(f"| {i} | `{name}` | {r['score']:.3f} |{change} {r['band']:.3f} | {r['first_page']:.3f} | {pages} |")
+    if limit and n > limit:
+        out.append(f"| | … {n - limit} more, all below {rows[limit - 1][1]['score']:.3f} | | | | |")
+    return "\n".join(out) + "\n"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("out")
+    ap.add_argument("--app", action="append", help="app to measure (repeatable); default: every app in OUT")
+    ap.add_argument("--tier", default="A")
+    ap.add_argument("--tol", type=int, default=64)
+    ap.add_argument("--overlay", action="store_true")
+    ap.add_argument("--scoreboard", metavar="FILE", help="write the ranked Markdown scoreboard here")
+    ap.add_argument("--title", default="Pixel scoreboard")
+    ap.add_argument("--previous", metavar="JSON", help="an earlier pixel-scores.json: adds a change column")
+    ap.add_argument("--limit", type=int, help="scoreboard rows (default: all)")
+    a = ap.parse_args(argv)
+
+    apps = a.app or sorted(d for d in os.listdir(a.out) if os.path.isdir(os.path.join(a.out, d)) and d in ("letters", "tables", "decks"))
+    report = {}
+    for app in apps:
+        part = measure(a.out, app, a.tier, a.tol, a.overlay)
+        report.update(part)
+        with open(os.path.join(a.out, f"pixel-{app}-{a.tier}.json"), "w") as f:
+            json.dump(part, f, indent=1, sort_keys=True)
+    # The scores alone, the shape --previous reads back.
+    with open(os.path.join(a.out, "pixel-scores.json"), "w") as f:
+        json.dump({k: round(v["score"], 4) for k, v in report.items()}, f, indent=1, sort_keys=True)
+    if a.scoreboard:
+        previous = None
+        if a.previous and os.path.exists(a.previous):
+            with open(a.previous) as f:
+                previous = json.load(f)
+        with open(a.scoreboard, "w") as f:
+            f.write(scoreboard(report, a.title, previous, a.limit))
+    for name, r in sorted(report.items(), key=lambda kv: -kv[1]["score"]):
         pc = "" if r["pages_lo"] == r["pages_ours"] else f"  pages {r['pages_ours']}/{r['pages_lo']}"
-        print(f"{name:52} 1px {r['worst']:.3f}  band {r['worst_band']:.3f}  strict {r['worst_strict']:.3f}{pc}")
+        print(f"{name:52} miss {r['score']:.3f}  band {r['band']:.3f}  p1 {r['first_page']:.3f}{pc}")
     return 0
 
 

@@ -511,8 +511,59 @@ fn page_breaks_and_named_styles_survive() {
     let rt = round_trip(&d);
     assert_eq!(rt.paragraphs[0].style.named_style.as_deref(), Some("Title"));
     assert_eq!(rt.paragraphs[1].style.named_style.as_deref(), Some("Subtitle"));
+    // Letters' own Title comes back with Letters' look, not a file's.
+    assert!(!rt.paragraphs[0].style.own_look && !rt.paragraphs[1].style.own_look);
     assert!(rt.paragraphs[2].style.page_break_before, "page break lost");
     assert!(!rt.paragraphs[0].style.page_break_before);
+}
+
+/// A file's own Title and Subtitle styles are its look: their runs carry
+/// the style's size, colour and letter spacing (python-docx's template:
+/// 26pt plain, 12pt italic spaced 0.75pt), and layout adds none of
+/// Letters' built-in bold, scaled look on top (render-lab
+/// `letters/named-styles`).
+#[test]
+fn a_files_own_title_and_subtitle_styles_are_its_look() {
+    let mut d = Document::from_plain_text("Quarterly Report\nThird quarter\nbody");
+    d.paragraphs[0].style.named_style = Some("Title".into());
+    d.paragraphs[1].style.named_style = Some("Subtitle".into());
+    let rt = doctor_parts(&d, |parts| {
+        let st = parts.get_mut("word/styles.xml").unwrap();
+        for id in ["Title", "Subtitle"] {
+            if let Some(a) = st.find(&format!("<w:style w:type=\"paragraph\" w:styleId=\"{id}\"")) {
+                let b = st[a..].find("</w:style>").unwrap() + a + "</w:style>".len();
+                st.replace_range(a..b, "");
+            }
+        }
+        *st = st.replace(
+            "</w:styles>",
+            "<w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/>\
+             <w:rPr><w:color w:val=\"17365D\"/><w:spacing w:val=\"5\"/><w:sz w:val=\"52\"/></w:rPr></w:style>\
+             <w:style w:type=\"paragraph\" w:styleId=\"Subtitle\"><w:name w:val=\"Subtitle\"/><w:basedOn w:val=\"Normal\"/>\
+             <w:rPr><w:i/><w:color w:val=\"4F81BD\"/><w:spacing w:val=\"15\"/></w:rPr></w:style></w:styles>",
+        );
+    });
+    let (title, sub) = (&rt.paragraphs[0], &rt.paragraphs[1]);
+    assert_eq!(title.style.named_style.as_deref(), Some("Title"));
+    assert!(title.style.own_look && sub.style.own_look, "the file defines both styles");
+    assert!(!rt.paragraphs[2].style.own_look);
+    assert_eq!(title.runs[0].style.font_size_hp, Some(52));
+    assert!(!title.runs[0].style.bold);
+    assert_eq!(title.runs[0].style.letter_spacing_tw, Some(5));
+    assert_eq!(sub.runs[0].style.letter_spacing_tw, Some(15));
+    assert!(sub.runs[0].style.italic);
+    // Laid out, neither is scaled: the Subtitle stays at body size.
+    let tree = letters_core::layout::layout(&rt, &Default::default(), &mut letters_core::layout::MonoShaper);
+    let heights: Vec<f64> = tree.pages[0]
+        .lines()
+        .filter_map(|l| match l {
+            letters_core::layout::Item::Line { height_pt, .. } => Some(*height_pt),
+            _ => None,
+        })
+        .collect();
+    assert!((heights[1] - heights[2]).abs() < 1e-9, "{heights:?}");
+    // Letter spacing survives a save.
+    assert_eq!(round_trip(&rt).paragraphs[1].runs[0].style.letter_spacing_tw, Some(15));
 }
 
 #[test]

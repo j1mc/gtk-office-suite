@@ -88,5 +88,18 @@ python3 "$LAB/lo_render.py" "$OUT/fixtures" "$OUT" "${APP_ARGS[@]}" || echo "(so
 echo "== capture"
 python3 "$LAB/capture.py" "$OUT/fixtures" "$OUT" "${APP_ARGS[@]}" "${TIER_ARGS[@]}"
 echo "== compare"
-python3 "$LAB/compare.py" "$OUT/fixtures" "$OUT" "${APP_ARGS[@]}" --baseline "$BASELINE" "${UPDATE_ARGS[@]}"
+status=0
+python3 "$LAB/compare.py" "$OUT/fixtures" "$OUT" "${APP_ARGS[@]}" --baseline "$BASELINE" "${UPDATE_ARGS[@]}" || status=$?
+# The pixel scoreboard (pixel_diff.py): every document ranked by how far
+# our pixels are from LibreOffice's, worst first, with each page's overlay
+# beside it. Scored whatever the ratchet said; $OUT/pixel-previous.json,
+# when the caller put main's scores there, adds a change column.
+echo "== pixels"
+PREVIOUS=()
+[ -s "$OUT/pixel-previous.json" ] && PREVIOUS=(--previous "$OUT/pixel-previous.json")
+python3 "$LAB/pixel_diff.py" "$OUT" "${APP_ARGS[@]}" --overlay "${PREVIOUS[@]}" \
+    --scoreboard "$OUT/pixel-scoreboard.md" \
+    --title "Pixel scoreboard: ${APP_ARGS[1]:-all apps}${REAL:+ real documents}" >/dev/null \
+    || echo "(pixel scoring failed; see above)"
 echo "report: $OUT/report.html"
+exit "$status"

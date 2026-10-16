@@ -54,6 +54,14 @@ pub fn slide_page_size_pt() -> (f64, f64) {
     )
 }
 
+/// The slides a show or an export shows, in order: all but the hidden
+/// ones, as PowerPoint and Impress do. A deck whose every slide is hidden
+/// shows them all rather than nothing.
+pub fn shown_slides(slides: &[Slide]) -> Vec<usize> {
+    let shown: Vec<usize> = (0..slides.len()).filter(|&i| !slides[i].hidden).collect();
+    if shown.is_empty() { (0..slides.len()).collect() } else { shown }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slide {
     pub title: String,
@@ -93,6 +101,12 @@ pub struct Slide {
     /// [`crate::layouts::Layout::id`]; `None` for none. View indices into
     /// `MasterSlide::layouts` are derived from this at the point of use.
     pub layout_id: Option<u64>,
+    /// Skipped when the deck is shown or exported, as PowerPoint's and
+    /// Impress's "Hide Slide" does (pptx `p:sld show="0"`, ODF
+    /// `presentation:visibility="hidden"`); it stays in the deck to be
+    /// edited. Older recovery payloads without it read as shown.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl Slide {
@@ -407,7 +421,7 @@ impl Deck {
             layouts: Vec::new(),
         };
         Self {
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: "Slide 1".into(),
                 background: "#ffffff".into(),
                 background_picture: None,
