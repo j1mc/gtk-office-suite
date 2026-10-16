@@ -268,8 +268,8 @@
     "B": "amber"
   },
   "tables/real-dpas-return-2025-to-2026-data-template-for-refer": {
-    "A": "red",
-    "B": "red"
+    "A": "amber",
+    "B": "amber"
   },
   "tables/real-draft-schedule-4-complaint-log": {
     "A": "amber",
