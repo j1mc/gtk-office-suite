@@ -833,7 +833,7 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
         let size = opts.font_size_pt;
         lines.push(LineBox { start: 0, end: 0, x_pt: 0.0, width_pt: 0.0, ascent_pt: size * 0.9, descent_pt: size * 0.25, objects: Vec::new() });
     }
-    Shaped { lines, box_x, box_w, marker_x: box_x - lists::HANGING_PT.min(box_x) }
+    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x) }
 }
 
 /// Place a shaped paragraph in the flow, splitting it across columns and

@@ -627,7 +627,7 @@ fn inline_image_survives_lo_docx_pass() {
     // Structural: the media part survived the LO rewrite.
     let f = std::fs::File::open(&rewritten).unwrap();
     let z = zip::ZipArchive::new(f).unwrap();
-    let has_media = z.file_names().any(|n| n.starts_with("word/media/"));
+    let has_media = z.file_names().any(|n| n.unwrap().starts_with("word/media/"));
     assert!(has_media, "embedded image lost through LO");
     // And our reader sees an image run.
     let rt = docx::read(rewritten.to_str().unwrap()).expect("read");
@@ -1587,7 +1587,7 @@ fn we_read_a_picture_writer_places_in_an_odt() {
     let op = dir.path().join("pic.odt");
     assert!(op.exists(), "soffice did not convert the flat odt");
     let zip = zip::ZipArchive::new(std::fs::File::open(&op).unwrap()).unwrap();
-    assert!(zip.file_names().any(|n| n.starts_with("Pictures/")), "Writer stored no picture");
+    assert!(zip.file_names().any(|n| n.unwrap().starts_with("Pictures/")), "Writer stored no picture");
     let rt = letters_core::odt::read(op.to_str().unwrap()).expect("read Writer's odt");
     let text = norm(&rt.to_plain_text());
     assert!(text.contains("before the picture") && text.contains("after the picture"), "{text:?}");
@@ -2255,4 +2255,45 @@ fn multi_section_geometry_survives_writer_both_ways() {
 
     let Some(rt) = through_lo_to_docx(&d, "sections") else { return };
     check(&rt, "odt → Writer → docx");
+}
+
+/// Our docx rewritten by Writer as docx, into a directory of its own (it
+/// will not convert a file onto itself), read back.
+fn writer_rewrites_docx(bin: &str, d: &Document, stem: &str) -> Document {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("in").join(format!("{stem}.docx"));
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    docx::write(d, &src).expect("write docx");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let st = std::process::Command::new(bin)
+        .arg("--headless")
+        .arg(format!("-env:UserInstallation=file://{}", dir.path().join("p").display()))
+        .args(["--convert-to", "docx:MS Word 2007 XML", "--outdir"])
+        .arg(&out_dir)
+        .arg(&src)
+        .output()
+        .expect("soffice");
+    assert!(st.status.success());
+    let rewritten = out_dir.join(format!("{stem}.docx"));
+    assert_ne!(std::fs::read(&rewritten).unwrap(), std::fs::read(&src).unwrap(), "Writer did not rewrite the docx");
+    docx::read(rewritten.to_str().unwrap()).expect("read Writer's docx")
+}
+
+/// A numbered paragraph's marker hangs as far as the file says through a
+/// Writer rewrite: the audit-committee minutes' "1.1" items hang their
+/// number 0.5in before the text, not Letters' own 18pt.
+#[test]
+fn a_list_markers_hanging_survives_writer() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("Linda Farrant opened the meeting\nMembers accepted the minutes");
+    for p in &mut d.paragraphs {
+        p.style.list = letters_core::ListKind::Numbered;
+        p.style.list_hanging_pt = Some(36.0);
+    }
+    let rt = writer_rewrites_docx(bin, &d, "hanging");
+    for p in &rt.paragraphs {
+        let h = p.style.list_hanging_pt.expect("the hanging comes back");
+        assert!((h - 36.0).abs() < 0.5, "hanging {h}");
+    }
 }
