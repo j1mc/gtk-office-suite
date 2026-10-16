@@ -358,8 +358,20 @@ impl Shaper for PangoShaper {
         let mut lines = line_boxes(&layout, hang_pt(req));
         // A line is as tall as the font's ascent, descent *and* line gap,
         // as LibreOffice and Word space lines (Liberation Serif 12pt:
-        // 13.8pt); Pango's logical extents leave the gap out.
-        if let Some(desc) = layout.font_description() {
+        // 13.8pt); Pango's logical extents leave the gap out. The gap is
+        // the text's own font's: a paragraph of 14pt Arial in a Calibri
+        // document has Arial's (render-lab `real-salary-template`).
+        if let Some(mut desc) = layout.font_description() {
+            // A blank paragraph's is its empty run's, as its height is.
+            let text = req.runs.iter().find(|r| !r.text.is_empty() && !super::is_object(r));
+            if let Some(run) = text.or_else(|| req.runs.iter().find(|r| !super::is_object(r))) {
+                if let Some(f) = &run.style.font_family {
+                    desc.set_family(f);
+                }
+                if let Some(hp) = run.style.font_size_hp {
+                    desc.set_size(to_units(f64::from(hp) / 2.0));
+                }
+            }
             let m = self.context.metrics(Some(&desc), None);
             let gap = to_pt(m.height() - m.ascent() - m.descent()).max(0.0);
             for l in &mut lines {
@@ -979,6 +991,8 @@ impl Typeset {
             let _ = cr.save();
             cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
             match edge.style {
+                // An invisible edge only keeps its gap.
+                BorderStyle::None => {}
                 BorderStyle::Single => {
                     cr.set_line_width(lw);
                     cr.move_to(x0, y0);
@@ -1125,7 +1139,7 @@ impl Typeset {
                     let _ = cr.stroke();
                     let _ = cr.restore();
                 }
-                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, .. } => {
+                Item::Cell { x_pt, y_pt, width_pt, height_pt, fill, ruled, .. } => {
                     // The cell's shading first, under its rule and text.
                     if let Some((r, g, b)) = fill.as_deref().and_then(parse_hex) {
                         let _ = cr.save();
@@ -1147,6 +1161,9 @@ impl Typeset {
                         let half = (dw.round().max(1.0) % 2.0) / 2.0;
                         cr.device_to_user(dx.round() + half, dy.round() + half).unwrap_or((x, y))
                     };
+                    if !*ruled {
+                        continue;
+                    }
                     let (x0, y0) = snap(*x_pt, *y_pt);
                     let (x1, y1) = snap(*x_pt + *width_pt, *y_pt + *height_pt);
                     let _ = cr.save();
@@ -1495,6 +1512,27 @@ mod tests {
         let start = t.caret(TextPos { para: 0, offset: 0 }).expect("caret at the start");
         let end = t.caret(TextPos { para: 0, offset: 7 }).expect("caret at the end");
         assert!(end.x_pt > start.x_pt + 10.0, "seven CJK characters take room: {} -> {}", start.x_pt, end.x_pt);
+    }
+
+    /// A line's gap is its text's own font's: 14pt Liberation Sans in a
+    /// document whose body font is 11pt Carlito stands as tall
+    /// as it does in a Liberation Sans 14pt document (Writer measures the
+    /// line by the text's font; `real-salary-template`'s Arial lines were
+    /// a line gap short each).
+    #[test]
+    fn a_lines_gap_is_its_texts_own_fonts() {
+        let height = |d: Document, o: LayoutOptions| -> f64 {
+            let t = Typeset::new(d, o);
+            t.tree().pages[0].items.iter().find_map(|i| match i { Item::Line { height_pt, .. } => Some(*height_pt), _ => None }).unwrap()
+        };
+        let mut styled = doc(1, "");
+        styled.paragraphs[0].runs = vec![Run {
+            text: "Arial text".into(),
+            style: crate::model::RunStyle { font_family: Some("Liberation Sans".into()), font_size_hp: Some(28), ..Default::default() },
+        }];
+        let in_carlito = height(styled, LayoutOptions { font_family: "Carlito".into(), font_size_pt: 11.0, ..Default::default() });
+        let native = height(doc(1, "Arial text"), LayoutOptions { font_family: "Liberation Sans".into(), font_size_pt: 14.0, ..Default::default() });
+        assert!((in_carlito - native).abs() < 0.05, "{in_carlito} vs {native}");
     }
 
     /// A blank paragraph is as tall as its own empty run's font (an

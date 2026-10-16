@@ -603,6 +603,33 @@ fn a_page_break_in_a_table_cell_is_dropped() {
     assert!(!cell.style.page_break_before);
 }
 
+/// A border edge Word leaves off (`w:val="none"`) but gives a gap pads
+/// the paragraph above and below, as Writer does; the side edges do not
+/// set the text in. The questionnaire's Normal style puts 31pt of such
+/// padding on every paragraph that does not clear it.
+#[test]
+fn an_invisible_border_keeps_its_gap_above_and_below() {
+    let d = Document::from_plain_text("before\n\nafter");
+    let rt = doctor_parts(&d, |parts| {
+        let edges: String = ["top", "left", "bottom", "right"]
+            .iter()
+            .map(|s| format!("<w:{s} w:val=\"none\" w:sz=\"96\" w:space=\"31\" w:color=\"FFFFFF\" w:frame=\"1\"/>"))
+            .collect();
+        let st = parts.get_mut("word/styles.xml").unwrap();
+        let name = "<w:name w:val=\"Normal\"/>";
+        assert!(st.contains(name));
+        *st = st.replacen(name, &format!("{name}<w:pPr><w:pBdr>{edges}</w:pBdr></w:pPr>"), 1);
+    });
+    // The blank line between the two takes the Normal style's edges.
+    let b = &rt.paragraphs[1].style.borders;
+    let top = b.top.as_ref().expect("the top edge's gap is kept");
+    assert_eq!((top.style, top.space_pt), (BorderStyle::None, 31.0));
+    assert_eq!(b.bottom.as_ref().map(|e| e.style), Some(BorderStyle::None));
+    assert!(b.left.is_none() && b.right.is_none(), "{b:?}");
+    // It survives a save.
+    assert_eq!(round_trip(&rt).paragraphs[1].style.borders, *b);
+}
+
 #[test]
 fn header_footer_survive() {
     let mut d = Document::from_plain_text("body text");
@@ -1770,6 +1797,44 @@ fn table_column_widths_survive() {
 /// A cell's empty paragraphs are lines of the cell: a form's answer box
 /// is a cell holding a label and a run of empty lines, and drawing only
 /// the label shrank every box to one line (the questionnaire, #1211).
+/// A table that declares no visible border, itself, through its style or
+/// on a cell, is Word's "Normal Table": drawn with no rules (a form's grey
+/// answer box in render-lab `real-questionnaire-2`). One with a style
+/// that rules it ("Table Grid") is ruled. Each keeps its look on a save.
+#[test]
+fn a_table_without_borders_is_drawn_without_rules() {
+    let mut d = Document::from_plain_text("after");
+    d.insert_table_at(0, 1, 1);
+    assert!(round_trip(&d).table_unruled.is_empty(), "a table made here is ruled");
+    let strip = |parts: &mut std::collections::BTreeMap<String, String>, style: Option<&str>| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        while let Some(a) = body.find("<w:tblBorders>") {
+            let b = body[a..].find("</w:tblBorders>").unwrap() + a + "</w:tblBorders>".len();
+            body.replace_range(a..b, "");
+        }
+        while let Some(a) = body.find("<w:tblStyle ") {
+            let b = body[a..].find("/>").unwrap() + a + 2;
+            body.replace_range(a..b, "");
+        }
+        if let Some(id) = style {
+            *body = body.replacen("<w:tblPr>", &format!("<w:tblPr><w:tblStyle w:val=\"{id}\"/>"), 1);
+            let st = parts.get_mut("word/styles.xml").unwrap();
+            *st = st.replace(
+                "</w:styles>",
+                &format!(
+                    "<w:style w:type=\"table\" w:styleId=\"Base{id}\"><w:tblPr><w:tblBorders><w:insideH w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPr></w:style>\
+                     <w:style w:type=\"table\" w:styleId=\"{id}\"><w:basedOn w:val=\"Base{id}\"/></w:style></w:styles>"
+                ),
+            );
+        }
+    };
+    let plain = doctor_parts(&d, |parts| strip(parts, None));
+    assert_eq!(plain.table_unruled.len(), 1, "no border anywhere: unruled");
+    assert_eq!(round_trip(&plain).table_unruled.len(), 1, "and written without rules");
+    let styled = doctor_parts(&d, |parts| strip(parts, Some("MyGrid")));
+    assert!(styled.table_unruled.is_empty(), "ruled through its style's base");
+}
+
 #[test]
 fn a_cells_empty_lines_survive() {
     let mut d = Document::from_plain_text("after");
