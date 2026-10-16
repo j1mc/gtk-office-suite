@@ -1242,17 +1242,11 @@ fn styles_xml(doc: &Document) -> String {
         let suffix = if k == 0 { String::new() } else { format!("{k}_") };
         if header {
             let (pics, style) = if m.header.1 { (frames(&doc.header_pictures, &format!("hfr{suffix}")), header_style.as_str()) } else { (String::new(), "") };
-            hf.push_str(&format!(
-                "<style:header><text:p{style}>{pics}{}</text:p></style:header>",
-                page_fields(&esc(m.header.0.unwrap_or("")))
-            ));
+            hf.push_str(&format!("<style:header>{}</style:header>", hf_paragraphs(m.header.0.unwrap_or(""), style, &pics)));
         }
         if footer {
             let (pics, style) = if m.footer.1 { (frames(&doc.footer_pictures, &format!("ffr{suffix}")), footer_style.as_str()) } else { (String::new(), "") };
-            hf.push_str(&format!(
-                "<style:footer><text:p{style}>{pics}{}</text:p></style:footer>",
-                page_fields(&esc(m.footer.0.unwrap_or("")))
-            ));
+            hf.push_str(&format!("<style:footer>{}</style:footer>", hf_paragraphs(m.footer.0.unwrap_or(""), style, &pics)));
         }
         hf.push_str("</style:master-page>");
     }
@@ -1876,6 +1870,49 @@ fn continue_numbering(paragraphs: &mut [Paragraph], top_lists: &[(usize, usize, 
 /// The master page LibreOffice gives the first page: the one the first
 /// paragraph or table's style names (`style:master-page-name`), else
 /// "Standard", else the first one declared.
+/// A header's or footer's text as its paragraphs, one a line, each in
+/// `style`; the pictures' frames sit in the first.
+fn hf_paragraphs(text: &str, style: &str, pics: &str) -> String {
+    text.split('\n')
+        .enumerate()
+        .map(|(k, line)| format!("<text:p{style}>{}{}</text:p>", if k == 0 { pics } else { "" }, page_fields(&esc(line))))
+        .collect()
+}
+
+/// Text of a header or footer added to its line; a later cell of a table
+/// row (`gap`) follows the line's text after a space.
+fn append_hf(target: &mut Option<String>, txt: &str, gap: bool) {
+    let t = target.get_or_insert_with(String::new);
+    if gap && !t.is_empty() && !t.ends_with('\n') {
+        t.push(' ');
+    }
+    t.push_str(txt);
+}
+
+/// Whether a header's or footer's text so far holds nothing to show.
+fn blank(text: &Option<String>) -> bool {
+    text.as_deref().is_none_or(|t| t.trim().is_empty())
+}
+
+/// A paragraph of a header or footer starts a line of its text: of the
+/// master page being read, and of the document's own when it is the
+/// first page's (`header` or `footer`). Its first paragraph starts it.
+fn start_hf_line(master: Option<&mut MasterReading>, doc: &mut Document, any_header: bool, header: bool, footer: bool) {
+    let line = |t: &mut Option<String>| match t {
+        Some(s) => s.push('\n'),
+        None => *t = Some(String::new()),
+    };
+    if let Some(m) = master {
+        line(if any_header { &mut m.header } else { &mut m.footer });
+    }
+    if header {
+        line(&mut doc.header);
+    }
+    if footer {
+        line(&mut doc.footer);
+    }
+}
+
 fn first_master_page(content: &str, styles: &str) -> Option<String> {
     let mut named: std::collections::HashMap<String, String> = Default::default();
     let mut masters: Vec<String> = Vec::new();
@@ -3241,6 +3278,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         // Inside a text box of the header or footer: its own paragraphs'
         // styles are not the part's.
         let mut hf_box_depth = 0usize;
+        // In a table row of a header or footer: whether a paragraph of the
+        // row has started its line yet. A row's cells read as one line, as
+        // they sit side by side; a later cell's text follows a space.
+        let mut hf_row: Option<bool> = None;
+        let mut hf_cell_gap = false;
         let para_alignment = |name: &str| -> Alignment {
             let mut cur = Some(name.to_string());
             for _ in 0..8 {
@@ -3321,6 +3363,15 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         master_pages.insert(n, MasterReading { layout: attr_val(&e, "style:page-layout-name"), ..Default::default() });
                     }
                 }
+                // A blank paragraph of a header or footer is a line of its
+                // own, as Writer gives it one.
+                Ok(Event::Empty(e)) if (in_any_header || in_any_footer) && hf_box_depth == 0 && matches!(e.name().as_ref(), "text:p" | "text:h") => {
+                    if hf_row.is_none_or(|started| !started) {
+                        hf_row = hf_row.map(|_| true);
+                        let master = cur_master.as_ref().and_then(|n| master_pages.get_mut(n));
+                        start_hf_line(master, &mut doc, in_any_header, in_header, in_footer);
+                    }
+                }
                 Ok(Event::Empty(e)) if e.name().as_ref() == "style:master-page" => {
                     let name = attr_val(&e, "style:name");
                     if name == master {
@@ -3385,7 +3436,21 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         in_footer = in_master;
                         in_any_footer = true;
                     }
-                    "text:p" | "text:h" if (in_header || in_footer) && hf_box_depth == 0 => hf_para_style = attr_val(&e, "text:style-name"),
+                    "text:p" | "text:h" if in_any_header || in_any_footer => {
+                        if (in_header || in_footer) && hf_box_depth == 0 {
+                            hf_para_style = attr_val(&e, "text:style-name");
+                        }
+                        if hf_box_depth == 0 {
+                            let new_line = hf_row.is_none_or(|started| !started);
+                            hf_row = hf_row.map(|_| true);
+                            hf_cell_gap = !new_line;
+                            if new_line {
+                                let master = cur_master.as_ref().and_then(|n| master_pages.get_mut(n));
+                                start_hf_line(master, &mut doc, in_any_header, in_header, in_footer);
+                            }
+                        }
+                    }
+                    "table:table-row" if in_any_header || in_any_footer => hf_row = Some(false),
                     "draw:text-box" if in_header || in_footer => hf_box_depth += 1,
                     "svg:title" | "svg:desc" => in_alt = true,
                     "text:page-number" | "text:page-count" if in_any_header || in_any_footer => {
@@ -3397,7 +3462,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         if in_header || in_footer {
                             let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
                             let (target, alignment) = if in_header { (&mut doc.header, &mut doc.header_alignment) } else { (&mut doc.footer, &mut doc.footer_alignment) };
-                            if target.is_none() {
+                            if blank(target) {
                                 *alignment = align;
                             }
                             target.get_or_insert_with(String::new).push_str(placeholder);
@@ -3414,6 +3479,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 },
                 Ok(Event::End(e)) => match e.name().as_ref() {
                     "draw:text-box" => hf_box_depth = hf_box_depth.saturating_sub(1),
+                    "table:table-row" => hf_row = None,
                     "style:header" => {
                         in_header = false;
                         in_any_header = false;
@@ -3434,26 +3500,30 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Text(_)) if in_field => {}
                 Ok(Event::Text(t)) => {
                     let txt = unescape_text(&t);
+                    let gap = hf_cell_gap && !txt.trim().is_empty();
+                    if gap {
+                        hf_cell_gap = false;
+                    }
                     if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| !txt.trim().is_empty()) {
                         if in_any_header {
-                            m.header.get_or_insert_with(String::new).push_str(&txt);
+                            append_hf(&mut m.header, &txt, gap);
                         }
                         if in_any_footer {
-                            m.footer.get_or_insert_with(String::new).push_str(&txt);
+                            append_hf(&mut m.footer, &txt, gap);
                         }
                     }
                     let align = hf_para_style.as_deref().map_or(Alignment::Left, para_alignment);
                     if in_header && !txt.trim().is_empty() {
-                        if doc.header.is_none() {
+                        if blank(&doc.header) {
                             doc.header_alignment = align;
                         }
-                        doc.header.get_or_insert_with(String::new).push_str(&txt);
+                        append_hf(&mut doc.header, &txt, gap);
                     }
                     if in_footer && !txt.trim().is_empty() {
-                        if doc.footer.is_none() {
+                        if blank(&doc.footer) {
                             doc.footer_alignment = align;
                         }
-                        doc.footer.get_or_insert_with(String::new).push_str(&txt);
+                        append_hf(&mut doc.footer, &txt, gap);
                     }
                 }
                 Ok(Event::GeneralRef(_)) if in_field || in_alt => {}
@@ -3477,6 +3547,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Eof) => break,
                 Err(_) => break,
                 _ => {}
+            }
+        }
+        // A header or footer of blank paragraphs only shows nothing.
+        for t in [&mut doc.header, &mut doc.footer].into_iter().chain(master_pages.values_mut().flat_map(|m| [&mut m.header, &mut m.footer])) {
+            if blank(t) {
+                *t = None;
             }
         }
         // The first page's layout; without a master page naming one that
@@ -4429,6 +4505,30 @@ mod tests {
             assert_eq!(d.footer.as_deref(), Some("OFFICIAL"));
             assert!((d.page.unwrap().margin_left_pt - left).abs() < 1e-6, "{first:?}: {:?}", d.page);
         }
+    }
+
+    /// A header's paragraphs are its lines, the blank ones too, and a
+    /// table row's cells one line: the explanatory note's header is a blank
+    /// line, a row whose last cell says "FINANCE BILL", and a blank line,
+    /// three lines tall in Writer. Read as one line, the body sat a third
+    /// of an inch high on every page. The export writes the lines back.
+    #[test]
+    fn a_headers_paragraphs_are_its_lines() {
+        let styles = "<office:document-styles><office:automatic-styles>\
+             <style:style style:name=\"R\" style:family=\"paragraph\"><style:paragraph-properties fo:text-align=\"end\"/></style:style>\
+             </office:automatic-styles><office:master-styles><style:master-page style:name=\"MP0\"><style:header><text:p/>\
+             <table:table><table:table-row><table:table-cell><text:p/></table:table-cell><table:table-cell><text:p>FINANCE</text:p></table:table-cell>\
+             <table:table-cell><text:p text:style-name=\"R\">BILL</text:p></table:table-cell></table:table-row></table:table><text:p/></style:header>\
+             <style:footer><text:p/></style:footer></style:master-page></office:master-styles></office:document-styles>";
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert_eq!(d.header.as_deref(), Some("\nFINANCE BILL\n"));
+        assert_eq!(d.footer, None, "a footer of a blank paragraph shows nothing");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.odt");
+        let path = path.to_str().unwrap();
+        write(&d, path).unwrap();
+        assert_eq!(read(path).unwrap().header.as_deref(), Some("\nFINANCE BILL\n"));
     }
 
     /// A span named by a style of styles.xml takes its look, with what its
