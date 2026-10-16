@@ -180,7 +180,12 @@ pub(crate) fn patch_package(bytes: Vec<u8>, sheets: &[SheetModel]) -> Result<Vec
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let mut patched = 0;
     for i in 0..archive.len() {
-        let name = archive.by_index_raw(i).map_err(|e| format!("Protection: {e}"))?.name().to_string();
+        let name = archive
+            .by_index_raw(i)
+            .map_err(|e| format!("Protection: {e}"))?
+            .name()
+            .map_err(|e| format!("Protection: {e}"))?
+            .into_owned();
         let Some(replacement) = patches.get(&name) else {
             let raw = archive.by_index_raw(i).map_err(|e| format!("Protection: {e}"))?;
             out.raw_copy_file(raw).map_err(|e| format!("Protection: {e}"))?;
