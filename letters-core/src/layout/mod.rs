@@ -833,7 +833,7 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
         let size = opts.font_size_pt;
         lines.push(LineBox { start: 0, end: 0, x_pt: 0.0, width_pt: 0.0, ascent_pt: size * 0.9, descent_pt: size * 0.25, objects: Vec::new() });
     }
-    Shaped { lines, box_x, box_w, marker_x: box_x - lists::HANGING_PT.min(box_x) }
+    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x) }
 }
 
 /// Place a shaped paragraph in the flow, splitting it across columns and
@@ -1123,6 +1123,10 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let cells: Vec<(usize, crate::model::TableCell)> =
         range.clone().filter_map(|i| doc.paragraphs[i].style.table_cell.map(|c| (i, c))).collect();
     let Some(&(_, first)) = cells.first() else { return };
+    // A table that starts a page (a page break the file put before it).
+    if doc.paragraphs[range.start].style.page_break_before && !flow.page_is_empty() {
+        flow.new_page();
+    }
     let cols = cells.iter().map(|(_, c)| c.col).max().unwrap_or(0) + 1;
     let rows = cells.iter().map(|(_, c)| c.row).max().unwrap_or(0) + 1;
     let table_w = flow.column_width();

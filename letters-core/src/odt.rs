@@ -1458,6 +1458,8 @@ struct AutoParaStyle {
     /// Whether the style itself sets its space before, space after and
     /// line height; what it leaves unset comes from its parent style.
     sets: [bool; 3],
+    /// Whether it sets its left, right and first-line indents.
+    sets_indent: [bool; 3],
 }
 
 /// Note the merged cell `e` opens at the current cell of `table` (id,
@@ -1842,6 +1844,7 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                     attr_val(&e, "fo:margin-bottom").is_some() || attr_val(&e, "fo:space-after").is_some(),
                                     attr_val(&e, "fo:line-height").is_some(),
                                 ],
+                                sets_indent: ["fo:margin-left", "fo:margin-right", "fo:text-indent"].map(|a| attr_val(&e, a).is_some()),
                             });
                         }
                     }
@@ -2303,6 +2306,28 @@ fn inherited_spacing(name: &str, auto: &AutoStyles, named: &AutoStyles) -> (Opti
         }
     }
     (before, after, line)
+}
+
+/// The left, right and first-line indents paragraph style `name` has:
+/// its own where it sets them, else the nearest style up its parent chain
+/// that does ("Table Paragraph"'s small left indent in every cell of the
+/// vessel declaration). None where no style in the chain sets one.
+fn inherited_indents(name: &str, auto: &AutoStyles, named: &AutoStyles) -> [Option<f64>; 3] {
+    let mut out = [None; 3];
+    let mut cur = Some(name.to_string());
+    for _ in 0..16 {
+        let Some(n) = cur else { break };
+        if let Some(st) = auto.para.get(&n).or_else(|| named.para.get(&n)) {
+            let own = [st.left_indent_pt, st.right_indent_pt, st.first_line_indent_pt];
+            for k in 0..3 {
+                if st.sets_indent[k] && out[k].is_none() {
+                    out[k] = Some(own[k]);
+                }
+            }
+        }
+        cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
+    }
+    out
 }
 
 /// What paragraph style `name` inherits from its parent chain for the
@@ -2998,6 +3023,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                     }
                     let (kind, label) = item_list(&list_style_names, &item_styles, list_kind, list_level);
+                    // The indents a parent style gives (a list item's
+                    // come from its list style, a quote's from its look).
+                    if let Some(name) = attr_val(&e, "text:style-name").filter(|_| kind == ListKind::None && !style.block_quote) {
+                        let [left, right, first] = inherited_indents(&name, &auto, &named);
+                        style.left_indent_pt = left.unwrap_or(style.left_indent_pt);
+                        style.right_indent_pt = right.unwrap_or(style.right_indent_pt);
+                        style.first_line_indent_pt = first.unwrap_or(style.first_line_indent_pt);
+                    }
                     style.list = kind;
                     style.list_level = list_level.saturating_sub(1);
                     style.list_start = pending_start.take();
@@ -4746,6 +4779,26 @@ mod tests {
         let d = read_package(content, styles);
         assert_eq!(d.paragraphs[0].runs[0].style.color.as_deref(), Some("000000"));
         assert_ne!(d.paragraphs[1].runs[0].style.color.as_deref(), Some("000000"), "Heading 1 itself is not undone");
+    }
+
+    /// A paragraph takes the indents its parent style sets and its own
+    /// style leaves alone: the vessel declaration's cells are "Table
+    /// Paragraph"s, 0.0395in in from the cell's edge, whose automatic
+    /// styles only change the size. A list item keeps its list's indent.
+    #[test]
+    fn a_paragraph_takes_its_parent_styles_indents() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"TableParagraph\" style:family=\"paragraph\"><style:paragraph-properties fo:margin-left=\"0.5in\" fo:text-indent=\"0.25in\"/></style:style>\
+             </office:styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P1\" style:family=\"paragraph\" style:parent-style-name=\"TableParagraph\"><style:text-properties fo:font-size=\"11pt\"/></style:style>\
+             <style:style style:name=\"P2\" style:family=\"paragraph\" style:parent-style-name=\"TableParagraph\"><style:paragraph-properties fo:margin-left=\"0in\"/></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:p text:style-name=\"P1\">inherits</text:p><text:p text:style-name=\"P2\">own</text:p><text:p>plain</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        let indents: Vec<(f64, f64)> = d.paragraphs.iter().map(|p| (p.style.left_indent_pt, p.style.first_line_indent_pt)).collect();
+        assert_eq!(indents, [(36.0, 18.0), (0.0, 18.0), (0.0, 0.0)]);
     }
 
     /// A header's paragraphs are its lines, the blank ones too, and a

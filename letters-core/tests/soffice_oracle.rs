@@ -2282,3 +2282,44 @@ fn a_regular_run_in_a_heading_survives_writer_both_ways() {
     let Some(rt) = through_lo_to_docx(&d, "regular") else { return };
     close(&rt, "odt → Writer → docx");
 }
+
+/// Our docx rewritten by Writer as docx, into a directory of its own (it
+/// will not convert a file onto itself), read back.
+fn writer_rewrites_docx(bin: &str, d: &Document, stem: &str) -> Document {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("in").join(format!("{stem}.docx"));
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    docx::write(d, &src).expect("write docx");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let st = std::process::Command::new(bin)
+        .arg("--headless")
+        .arg(format!("-env:UserInstallation=file://{}", dir.path().join("p").display()))
+        .args(["--convert-to", "docx:MS Word 2007 XML", "--outdir"])
+        .arg(&out_dir)
+        .arg(&src)
+        .output()
+        .expect("soffice");
+    assert!(st.status.success());
+    let rewritten = out_dir.join(format!("{stem}.docx"));
+    assert_ne!(std::fs::read(&rewritten).unwrap(), std::fs::read(&src).unwrap(), "Writer did not rewrite the docx");
+    docx::read(rewritten.to_str().unwrap()).expect("read Writer's docx")
+}
+
+/// A numbered paragraph's marker hangs as far as the file says through a
+/// Writer rewrite: the audit-committee minutes' "1.1" items hang their
+/// number 0.5in before the text, not Letters' own 18pt.
+#[test]
+fn a_list_markers_hanging_survives_writer() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("Linda Farrant opened the meeting\nMembers accepted the minutes");
+    for p in &mut d.paragraphs {
+        p.style.list = letters_core::ListKind::Numbered;
+        p.style.list_hanging_pt = Some(36.0);
+    }
+    let rt = writer_rewrites_docx(bin, &d, "hanging");
+    for p in &rt.paragraphs {
+        let h = p.style.list_hanging_pt.expect("the hanging comes back");
+        assert!((h - 36.0).abs() < 0.5, "hanging {h}");
+    }
+}
