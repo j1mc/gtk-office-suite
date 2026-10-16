@@ -44,6 +44,11 @@ pub struct RunStyle {
     pub color: Option<String>,
     /// Superscript/subscript position.
     pub vert_align: Option<VertAlign>,
+    /// Extra space after each character, in twentieths of a point
+    /// (OOXML's `w:rPr/w:spacing`, ODF's `fo:letter-spacing`); negative
+    /// condenses. None = normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing_tw: Option<i32>,
     /// Footnote reference: index into `Document::footnotes`. The run's
     /// text is the visible marker (usually empty; renderers number it).
     #[serde(default)]
@@ -400,6 +405,11 @@ pub struct ParaStyle {
     /// Named document style (e.g. "Title", "Subtitle"); orthogonal to
     /// heading levels.
     pub named_style: Option<String>,
+    /// The file defines `named_style` itself and its runs carry that
+    /// look (an imported Title's 26pt plain accent text), so layout adds
+    /// none of the built-in one (`layout::Look`) on top.
+    #[serde(default)]
+    pub own_look: bool,
     /// Table membership: this paragraph lives in the given cell. The
     /// document stays a flat paragraph list (offset invariants intact);
     /// consecutive paragraphs sharing a `table` id form one table, and
@@ -446,7 +456,7 @@ pub struct TableCell {
 
 impl Default for ParaStyle {
     fn default() -> Self {
-        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, line_height: None, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, table_cell: None, keep_with_next: false, keep_lines: false, widow_control: None, shading: None, borders: ParaBorders::default(), toc: None }
+        Self { heading: None, alignment: Alignment::Left, list: ListKind::None, list_level: 0, list_start: None, list_label: None, line_spacing: 1.0, line_height: None, space_before_pt: 0.0, space_after_pt: 0.0, left_indent_pt: 0.0, right_indent_pt: 0.0, first_line_indent_pt: 0.0, tab_stops_pt: Vec::new(), code_block: None, block_quote: false, html_block: false, page_break_before: false, named_style: None, own_look: false, table_cell: None, keep_with_next: false, keep_lines: false, widow_control: None, shading: None, borders: ParaBorders::default(), toc: None }
     }
 }
 

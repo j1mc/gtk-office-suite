@@ -2163,6 +2163,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             if let Some(f) = &run.style.font_family { r = r.font(f); }
             if let Some(hp) = run.style.font_size_hp { r = r.size(hp as f64 / 2.0); }
             if let Some(c) = &run.style.color { r = r.color(c); }
+            if let Some(tw) = run.style.letter_spacing_tw { r = r.character_spacing(rdocx::Length::pt(f64::from(tw) / 20.0)); }
             match run.style.vert_align {
                 Some(crate::model::VertAlign::Superscript) => { r = r.superscript(); }
                 Some(crate::model::VertAlign::Subscript) => { r = r.subscript(); }
@@ -2810,6 +2811,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         Some(id @ ("Title" | "Subtitle")) => Some(id.to_string()),
         _ => None,
     };
+    let own_look = named_style.as_deref().is_some_and(style_defined);
     // Either spelling counts: the paragraph property, or a run-level
     // break before this paragraph's own text.
     let page_break_before = p.is_page_break_before() || run_page_break(p).leading;
@@ -2958,6 +2960,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 font_family: family,
                 font_size_hp: size_hp,
                 color,
+                letter_spacing_tw: r.character_spacing().or(eff.spacing).map(|t| t.0).filter(|&t| t != 0),
                 vert_align: match r.vert_align() {
                     Some("superscript") => Some(crate::model::VertAlign::Superscript),
                     Some("subscript") => Some(crate::model::VertAlign::Subscript),
@@ -2976,7 +2979,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         style: ParaStyle {
             heading, alignment, list, code_block, block_quote,
             list_level, list_start,
-            named_style, page_break_before, keep_with_next, keep_lines, widow_control,
+            named_style, own_look, page_break_before, keep_with_next, keep_lines, widow_control,
             line_height: para_line_height(
                 p.line_spacing_multiple(),
                 p.line_spacing(),
@@ -3235,8 +3238,6 @@ thread_local! {
     static STYLE_FONTS: std::cell::RefCell<StyleFonts> = std::cell::RefCell::new(StyleFonts::default());
 }
 
-/// The font family paragraph style `id` (or the default paragraph style)
-/// gives its text, resolved through `w:basedOn` and docDefaults.
 /// Whether table style `id`, or one it is based on, has a visible rule.
 fn table_style_ruled(id: &str) -> bool {
     STYLE_FONTS.with(|sf| {
@@ -3253,6 +3254,13 @@ fn table_style_ruled(id: &str) -> bool {
     })
 }
 
+/// Whether the file's styles part defines style `id`.
+fn style_defined(id: &str) -> bool {
+    STYLE_FONTS.with(|sf| sf.borrow().styles.contains_key(id))
+}
+
+/// The font family paragraph style `id` (or the default paragraph style)
+/// gives its text, resolved through `w:basedOn` and docDefaults.
 fn style_family(id: Option<&str>) -> Option<String> {
     STYLE_FONTS.with(|sf| {
         let sf = sf.borrow();

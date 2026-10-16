@@ -1543,6 +1543,10 @@ fn list_style_kinds(xml: &str) -> std::collections::HashMap<String, Vec<ListKind
     out
 }
 
+/// The key `style:default-style` (paragraph family) is kept under among
+/// the named styles: the root every paragraph style's chain ends at.
+const DEFAULT_PARA: &str = "\u{0}default-paragraph";
+
 fn parse_auto_styles(xml: &str) -> AutoStyles {
     let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
@@ -1552,6 +1556,10 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 match e.name().as_ref() {
+                    "style:default-style" => {
+                        cur_family = attr_val(&e, "style:family").unwrap_or_default();
+                        cur_name = (cur_family == "paragraph").then(|| DEFAULT_PARA.to_string());
+                    }
                     "style:style" => {
                         cur_name = attr_val(&e, "style:name");
                         cur_family = attr_val(&e, "style:family").unwrap_or_default();
@@ -2172,6 +2180,18 @@ fn inherited_spacing(name: &str, auto: &AutoStyles, named: &AutoStyles) -> (Opti
         }
         cur = auto.para_parent.get(&n).or_else(|| named.para_parent.get(&n)).cloned();
     }
+    // Every chain ends at the document's default paragraph style.
+    if let Some(st) = named.para.get(DEFAULT_PARA) {
+        if st.sets[0] && before.is_none() {
+            before = Some(st.space_before_pt);
+        }
+        if st.sets[1] && after.is_none() {
+            after = Some(st.space_after_pt);
+        }
+        if st.sets[2] && line.is_none() {
+            line = Some(st.line_spacing);
+        }
+    }
     (before, after, line)
 }
 
@@ -2485,8 +2505,23 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     let mut open_text_sections: Vec<Option<(String, usize)>> = Vec::new();
     let mut text_sections: Vec<(String, usize, usize)> = Vec::new();
 
+    // The close of a self-closing paragraph read as an open one.
+    let mut pending_end: Option<quick_xml::events::BytesEnd<'static>> = None;
     loop {
-        let event = reader.read_event();
+        let event = match pending_end.take() {
+            Some(end) => Ok(Event::End(end)),
+            None => reader.read_event(),
+        };
+        // A self-closing body paragraph (Writer's blank line) is an empty
+        // one opened and closed, so it gets its style (size, spacing) like
+        // any other, not a bare default.
+        let event = match event {
+            Ok(Event::Empty(e)) if in_body && note.is_none() && annotation.is_none() && matches!(e.name().as_ref(), "text:p" | "text:h") => {
+                pending_end = Some(e.to_end().into_owned());
+                Ok(Event::Start(e))
+            }
+            other => other,
+        };
         if let Some((c, _, field, paras)) = annotation.as_mut() {
             let field_now = *field;
             let mut text = |t: &str| match field_now {
@@ -2758,6 +2793,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             .and_then(|v| v.parse::<u8>().ok())
                             .unwrap_or(1);
                         style.heading = Some(lvl.clamp(1, 6));
+                    }
+                    // A paragraph naming no style has the default style's
+                    // spacing.
+                    if attr_val(&e, "text:style-name").is_none() {
+                        let (before, after, line) = inherited_spacing(DEFAULT_PARA, &auto, &named);
+                        style.space_before_pt = before.unwrap_or(style.space_before_pt);
+                        style.space_after_pt = after.unwrap_or(style.space_after_pt);
+                        style.line_spacing = line.unwrap_or(style.line_spacing);
                     }
                     if let Some(name) = attr_val(&e, "text:style-name") {
                         if let Some(auto_para) = auto.para.get(&name) {
@@ -3077,11 +3120,20 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 // carries the reference.
                 "text:p" if note.is_some() => {}
                 "text:p" | "text:h" => {
+                    // A blank paragraph keeps its style's text look in an
+                    // empty run: its line is as tall as that font, as in
+                    // Writer (a 14pt blank line, not the body size).
+                    let blank_look = span_stack.last().filter(|_| paragraph_bases > 0).cloned();
                     if paragraph_bases > 0 {
                         paragraph_bases -= 1;
                         span_stack.pop();
                     }
                     if let Some(mut p) = para.take() {
+                        if p.runs.is_empty() && p.style.table_cell.is_none() {
+                            if let Some(look) = blank_look.filter(|l| l.font_size_hp.is_some() || l.font_family.is_some()) {
+                                p.runs.push(Run { text: String::new(), style: look });
+                            }
+                        }
                         // An entry's link goes to its heading, not a page.
                         if p.style.toc.is_some() {
                             for r in &mut p.runs {
@@ -3963,6 +4015,38 @@ mod tests {
     /// font is the default style's, named by its font face. All four were
     /// lost: a Calibri agenda opened in the serif fallback with a plain
     /// title and tight table rows.
+    /// Writer's default paragraph style is the root of every style chain
+    /// (a Word-made .odt keeps its space after and line height there),
+    /// and a self-closing paragraph is a blank line with its style's
+    /// spacing and font size, not a bare default (render-lab
+    /// `real-salary-template`: its letter lost all paragraph spacing).
+    #[test]
+    fn the_default_style_roots_spacing_and_blank_lines_keep_their_style() {
+        let content = "<office:document-content><office:automatic-styles>\
+            <style:style style:name=\"P1\" style:parent-style-name=\"Normal\" style:family=\"paragraph\">\
+              <style:text-properties style:font-name=\"Arial\" fo:font-size=\"14pt\"/></style:style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:p text:style-name=\"P1\">Header</text:p>\
+            <text:p text:style-name=\"P1\"/>\
+            <text:p>unstyled</text:p>\
+            </office:text></office:body></office:document-content>";
+        let styles = "<office:document-styles><office:font-face-decls>\
+            <style:font-face style:name=\"Arial\" svg:font-family=\"Arial\"/></office:font-face-decls><office:styles>\
+            <style:default-style style:family=\"paragraph\"><style:paragraph-properties fo:margin-bottom=\"0.1111in\" fo:line-height=\"107%\"/>\
+              <style:text-properties fo:font-size=\"11pt\"/></style:default-style>\
+            <style:style style:name=\"Normal\" style:family=\"paragraph\"><style:text-properties fo:hyphenate=\"false\"/></style:style>\
+            </office:styles></office:document-styles>";
+        let d = read_package(content, styles);
+        assert_eq!(d.paragraphs.len(), 3);
+        for p in &d.paragraphs {
+            assert!((p.style.space_after_pt - 8.0).abs() < 0.01, "{:?}", p.style.space_after_pt);
+            assert!((p.style.line_spacing - 1.07).abs() < 1e-4, "{:?}", p.style.line_spacing);
+        }
+        let blank = &d.paragraphs[1];
+        assert_eq!(blank.text(), "");
+        assert_eq!(blank.runs.first().map(|r| r.style.font_size_hp), Some(Some(28)), "the blank line is 14pt");
+    }
+
     #[test]
     fn paragraph_and_default_styles_are_inherited() {
         let content = "<office:document-content><office:automatic-styles>\
