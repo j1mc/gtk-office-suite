@@ -1470,9 +1470,20 @@ fn row_heights(table: &rdocx::TableRef<'_>) -> Option<Vec<Option<crate::model::R
     heights.iter().any(Option::is_some).then_some(heights)
 }
 
-/// A table's column widths in points: its first row's cell widths, when
-/// every cell gives one in absolute units.
+/// A table's column widths in points: its grid's, else its first row's
+/// cell widths, when every cell gives one in absolute units.
 fn column_widths(table: &rdocx::TableRef<'_>) -> Option<Vec<f64>> {
+    // The table's grid (`w:tblGrid`), as Writer lays it out: the first
+    // row may be one cell across every column.
+    let grid: Vec<f64> = table.grid_widths().iter().map(|w| w.to_pt()).collect();
+    let spanned = (0..table.row_count())
+        .filter_map(|r| table.row(r))
+        .map(|row| (0..row.cell_count()).filter_map(|c| row.cell(c)).map(|c| c.grid_span().unwrap_or(1).max(1) as usize).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    if grid.len() == spanned && grid.iter().all(|x| *x > 0.0) {
+        return Some(grid);
+    }
     let row = table.row(0)?;
     let widths: Option<Vec<f64>> = (0..row.cell_count()).map(|c| row.cell(c)?.width().map(|w| w.to_pt())).collect();
     widths.filter(|w| !w.is_empty() && w.iter().all(|x| *x > 0.0))
@@ -3401,6 +3412,34 @@ mod tests {
 
     fn para(text: &str) -> String {
         format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+    }
+
+    /// A table's columns are its grid's (`w:tblGrid`), as Writer lays them
+    /// out: the crime supervisor form's table opens with a title row of
+    /// one cell across all five columns. Read from that row, the table had
+    /// one width for five columns and was drawn with equal columns, its
+    /// 1cm number column as wide as the rest. A grid that does not match
+    /// the cells falls back to the first row's widths.
+    #[test]
+    fn a_tables_columns_are_its_grids() {
+        let dir = tempfile::tempdir().unwrap();
+        let cell = |w: u32, span: u32, text: &str| {
+            let span = if span > 1 { format!("<w:gridSpan w:val=\"{span}\"/>") } else { String::new() };
+            format!("<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr>{}</w:tc>", para(text))
+        };
+        let table = |grid: &[u32]| {
+            let grid: String = grid.iter().map(|w| format!("<w:gridCol w:w=\"{w}\"/>")).collect();
+            format!(
+                "<w:tbl><w:tblGrid>{grid}</w:tblGrid><w:tr>{}</w:tr><w:tr>{}{}{}</w:tr></w:tbl>{}",
+                cell(6000, 3, "title"), cell(500, 1, "a"), cell(3000, 1, "b"), cell(2500, 1, "c"), para("after")
+            )
+        };
+        let widths = |grid: &[u32], name| {
+            let doc = super::read(docx_with_body(dir.path(), &table(grid), name).to_str().unwrap()).unwrap();
+            doc.table_columns.get(&0).cloned()
+        };
+        assert_eq!(widths(&[567, 3000, 2500], "grid.docx"), Some(vec![28.35, 150.0, 125.0]));
+        assert_eq!(widths(&[6000], "short.docx"), Some(vec![300.0]), "a grid of the wrong count gives way to the first row");
     }
 
     /// A table nested in a cell keeps its text, in its outer cell, in
