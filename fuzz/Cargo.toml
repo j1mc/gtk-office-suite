@@ -78,11 +78,3 @@ doc = false
 bench = false
 
 [workspace]
-
-# The root workspace's patches do not reach this separate workspace, so each
-# one is mirrored here (tests/test_patched_dependencies.py keeps the two in
-# step). Without the oxml-layout one the nightly fuzz build resolved the
-# unpatched crate and failed with E0004 on `fontdb::Source::SharedFile`
-# (#883, #936). See docs/DEPENDENCIES.md.
-[patch.crates-io]
-oxml-layout = { git = "https://github.com/tuna-os/rdocx", rev = "87a8bf2eab4d5df90755432944c3e5203d43c4f8" }

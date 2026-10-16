@@ -981,7 +981,7 @@ fn with_part(package: &[u8], name: &str, f: impl Fn(&str) -> String) -> Result<V
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut part = zin.by_index(i).map_err(|e| e.to_string())?;
-        let part_name = part.name().to_string();
+        let part_name = part.name().map_err(|e| e.to_string())?.into_owned();
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut part, &mut data).map_err(|e| e.to_string())?;
         if part_name == name {
@@ -1279,6 +1279,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
     let table_unruled: std::collections::BTreeSet<u32> = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
+    let table_valign = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_valign(t)?))).collect();
     let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
 
     let mut read = Document {
@@ -1301,6 +1302,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_padding,
         table_unruled,
         table_open_edges,
+        table_valign,
         sections: Vec::new(),
         next_section_id: 0,
     };
@@ -1445,10 +1447,38 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
     (!fills.is_empty()).then_some(fills)
 }
 
+/// The cells set lower than the top (`w:vAlign`), at their grid columns.
+fn cell_valign(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellVAlign>> {
+    let mut cells = Vec::new();
+    for ri in 0..table.row_count() {
+        let Some(row) = table.row(ri) else { continue };
+        let mut col = 0u32;
+        for ci in 0..row.cell_count() {
+            let Some(cell) = row.cell(ci) else { continue };
+            let at = col;
+            col += cell.grid_span().unwrap_or(1).max(1);
+            let align = match cell.vertical_alignment() {
+                Some(rdocx::VerticalAlignment::Center) => crate::model::VAlign::Center,
+                Some(rdocx::VerticalAlignment::Bottom) => crate::model::VAlign::Bottom,
+                _ => continue,
+            };
+            cells.push(crate::model::CellVAlign { row: ri as u32, col: at, align });
+        }
+    }
+    (!cells.is_empty()).then_some(cells)
+}
+
 /// The cells whose own borders (`w:tcBorders`) leave a side without a
-/// rule (`w:val="nil"` or `"none"`), at their grid columns.
+/// rule (`w:val="nil"` or `"none"`), at their grid columns. In a table
+/// that rules nothing itself (no `w:tblBorders`, no ruled style), a side
+/// a cell's borders leave out is bare too: Writer writes only the sides a
+/// cell has.
 fn cell_open_edges(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellEdges>> {
     use rdocx::CellBorderEdge as C;
+    use rdocx::TableBorderEdge as E;
+    let visible = |b: Option<rdocx::TableBorderRef<'_>>| b.is_some_and(|b| !matches!(b.style(), "none" | "nil"));
+    let table_rules = [E::Top, E::Bottom, E::Left, E::Right, E::InsideHorizontal, E::InsideVertical].into_iter().any(|e| visible(table.border(e)))
+        || table.style_id().is_some_and(table_style_ruled);
     let mut edges = Vec::new();
     for ri in 0..table.row_count() {
         let Some(row) = table.row(ri) else { continue };
@@ -1457,7 +1487,11 @@ fn cell_open_edges(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::Cell
             let Some(cell) = row.cell(ci) else { continue };
             let at = col;
             col += cell.grid_span().unwrap_or(1).max(1);
-            let open = |e: C| cell.border(e).is_some_and(|b| matches!(b.style(), "none" | "nil"));
+            let own = cell.has_borders();
+            let open = |e: C| match cell.border(e) {
+                Some(b) => matches!(b.style(), "none" | "nil"),
+                None => own && !table_rules,
+            };
             let open = crate::model::OpenEdges { top: open(C::Top), bottom: open(C::Bottom), left: open(C::Left), right: open(C::Right) };
             if open.any() {
                 edges.push(crate::model::CellEdges { row: ri as u32, col: at, open });
@@ -1673,7 +1707,7 @@ fn with_sections(package: &[u8], sections: &[crate::model::DocSection]) -> Resul
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut part = zin.by_index(i).map_err(|e| e.to_string())?;
-        let name = part.name().to_string();
+        let name = part.name().map_err(|e| e.to_string())?.into_owned();
         let data = match name.as_str() {
             DOCUMENT => xml.as_bytes().to_vec(),
             RELS => rels.as_bytes().to_vec(),
@@ -1880,6 +1914,14 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                     cell.set_shading(&fill.color);
                 }
             }
+            for v in doc.table_valign.get(&tc0.table).into_iter().flatten() {
+                if let Some(mut cell) = tbl.cell(v.row as usize, v.col as usize) {
+                    cell.set_vertical_alignment(match v.align {
+                        crate::model::VAlign::Center => rdocx::VerticalAlignment::Center,
+                        crate::model::VAlign::Bottom => rdocx::VerticalAlignment::Bottom,
+                    });
+                }
+            }
             // A cell's open sides, over the table's grid.
             for e in doc.table_open_edges.get(&tc0.table).into_iter().flatten().filter(|_| !doc.table_unruled.contains(&tc0.table)) {
                 use rdocx::CellBorderEdge as C;
@@ -1905,13 +1947,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             for p in group {
                 let tc = p.style.table_cell.expect("grouped by table_cell");
                 if let Some(mut cell) = tbl.cell(tc.row as usize, tc.col as usize) {
-                    // A new cell already holds an empty paragraph: replace
-                    // it, or every cell opens with a blank line in Writer
-                    // and Word (our reader skipped empty cell paragraphs,
-                    // which hid it; #1296).
-                    if filled.insert((tc.row, tc.col)) {
-                        cell.remove_first_empty_paragraph();
-                    }
+                    filled.insert((tc.row, tc.col));
                     let mut cp = cell.add_paragraph("");
                     // A cell paragraph's typography, which the reader maps
                     // the same way it maps a body paragraph's: without
@@ -1975,6 +2011,16 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         if run.style.highlight { r = r.highlight("yellow"); }
                         if run.style.code { r = r.style("SourceText"); }
                     }
+                }
+            }
+            // A new cell already holds an empty paragraph: drop it once the
+            // cell has its own, or every cell opens with a blank line in
+            // Writer and Word (our reader skipped empty cell paragraphs,
+            // which hid it; #1296). rdocx 0.16 keeps a cell's last
+            // paragraph, so this has to come after the cell is filled.
+            for (row, col) in filled {
+                if let Some(mut cell) = tbl.cell(row as usize, col as usize) {
+                    cell.remove_first_empty_paragraph();
                 }
             }
             // Merged cells: the first spans its columns (`w:gridSpan`) and
@@ -2449,7 +2495,7 @@ fn with_letters_styles(package: &[u8], base: &crate::model::BaseFont, heading_st
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zin.len() {
         let mut f = zin.by_index(i).map_err(|e| e.to_string())?;
-        let name = f.name().to_string();
+        let name = f.name().map_err(|e| e.to_string())?.into_owned();
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut data).map_err(|e| e.to_string())?;
         if name == "word/styles.xml" {
@@ -2490,8 +2536,13 @@ fn patch_styles_xml(xml: &str, defaults: &str, headings: &str) -> String {
     } else if let Some(at) = xml.find("<w:style ") {
         xml.insert_str(at, defaults);
     }
-    for n in 1..=6 {
-        let id = format!("w:styleId=\"Heading{n}\"");
+    // rdocx's template (0.15 on) defines Word's look for these. Letters
+    // writes its own headings and quote below, and leaves Title and
+    // Subtitle undefined so a Letters Title reopens with Letters' look
+    // rather than as a file's own (`own_look`, #1599).
+    let replaced = (1..=6).map(|n| format!("Heading{n}")).chain(["Title", "Subtitle", "Quote"].map(String::from));
+    for style_id in replaced {
+        let id = format!("w:styleId=\"{style_id}\"");
         while let Some(at) = xml.find(&id) {
             let Some(start) = xml[..at].rfind("<w:style ") else { break };
             let Some(len) = xml[start..].find("</w:style>") else { break };
@@ -3510,7 +3561,7 @@ mod tests {
         let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
         for i in 0..source.len() {
             let mut entry = source.by_index(i).unwrap();
-            let entry_name = entry.name().to_string();
+            let entry_name = entry.name().unwrap().into_owned();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             if entry_name == "word/document.xml" {

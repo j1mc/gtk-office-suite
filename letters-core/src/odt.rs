@@ -767,16 +767,31 @@ fn content_xml(doc: &Document) -> String {
                             }
                         }
                     }
-                    // A cell with sides left open names each side itself.
-                    for (n, e) in doc.table_open_edges.get(&c.table).into_iter().flatten().filter(|_| ruled).enumerate() {
+                    // A cell with sides left open, or set lower than the
+                    // top, has a style of its own naming each side and
+                    // where its content sits.
+                    let open_at = |row: u32, col: u32| doc.table_open_edges.get(&c.table).into_iter().flatten().find(|e| (e.row, e.col) == (row, col)).map(|e| e.open);
+                    let valign_at = |row: u32, col: u32| doc.table_valign.get(&c.table).into_iter().flatten().find(|v| (v.row, v.col) == (row, col)).map(|v| v.align);
+                    let mut own: Vec<(u32, u32)> = doc.table_open_edges.get(&c.table).into_iter().flatten().filter(|_| ruled).map(|e| (e.row, e.col))
+                        .chain(doc.table_valign.get(&c.table).into_iter().flatten().map(|v| (v.row, v.col)))
+                        .collect();
+                    own.sort_unstable();
+                    own.dedup();
+                    for (n, (row, col)) in own.into_iter().enumerate() {
                         let name = format!("Table{tables_written}.E{n}");
-                        let side = |open: bool| if open { "none" } else { "0.5pt solid #000000" };
-                        let fill = doc.table_fills.get(&c.table).into_iter().flatten().find(|f| (f.row, f.col) == (e.row, e.col)).map_or(String::new(), |f| format!(" fo:background-color=\"#{}\"", esc(&f.color)));
+                        let open = open_at(row, col).unwrap_or_default();
+                        let side = |open: bool| if open || !ruled { "none" } else { "0.5pt solid #000000" };
+                        let fill = doc.table_fills.get(&c.table).into_iter().flatten().find(|f| (f.row, f.col) == (row, col)).map_or(String::new(), |f| format!(" fo:background-color=\"#{}\"", esc(&f.color)));
+                        let valign = match valign_at(row, col) {
+                            Some(crate::model::VAlign::Center) => " style:vertical-align=\"middle\"",
+                            Some(crate::model::VAlign::Bottom) => " style:vertical-align=\"bottom\"",
+                            None => "",
+                        };
                         auto.push_str(&format!(
-                            "<style:style style:name=\"{name}\" style:family=\"table-cell\"><style:table-cell-properties{fill}{pad_only} fo:border-top=\"{}\" fo:border-bottom=\"{}\" fo:border-left=\"{}\" fo:border-right=\"{}\"/></style:style>",
-                            side(e.open.top), side(e.open.bottom), side(e.open.left), side(e.open.right)
+                            "<style:style style:name=\"{name}\" style:family=\"table-cell\"><style:table-cell-properties{fill}{pad_only}{valign} fo:border-top=\"{}\" fo:border-bottom=\"{}\" fo:border-left=\"{}\" fo:border-right=\"{}\"/></style:style>",
+                            side(open.top), side(open.bottom), side(open.left), side(open.right)
                         ));
-                        cell_styles.insert((e.row, e.col), format!(" table:style-name=\"{name}\""));
+                        cell_styles.insert((row, col), format!(" table:style-name=\"{name}\""));
                     }
                     let spans = doc.table_spans.get(&c.table).cloned().unwrap_or_default();
                     let mut t = OpenTable { id: c.table, rows, cols, row: 0, col: 0, filled: false, row_styles, cell_styles, spans };
@@ -1427,6 +1442,8 @@ struct AutoStyles {
     cell_ruled: std::collections::HashSet<String>,
     /// A ruled table-cell style's sides without a border.
     cell_open: std::collections::HashMap<String, crate::model::OpenEdges>,
+    /// A table-cell style's content set lower than the top.
+    cell_valign: std::collections::HashMap<String, crate::model::VAlign>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
     /// A table-cell style's padding, when it gives one.
@@ -1598,7 +1615,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1659,6 +1676,14 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 out.cell_open.insert(name.clone(), open);
                             }
                             out.cell_ruled.insert(name);
+                        }
+                        let valign = match attr_val(&e, "style:vertical-align").as_deref() {
+                            Some("middle") => Some(crate::model::VAlign::Center),
+                            Some("bottom") => Some(crate::model::VAlign::Bottom),
+                            _ => None,
+                        };
+                        if let (Some(name), Some(v)) = (cur_name.clone(), valign) {
+                            out.cell_valign.insert(name, v);
                         }
                         let fill = attr_val(&e, "fo:background-color").map(|c| c.trim_start_matches('#').to_uppercase());
                         if let (Some(name), Some(color)) = (cur_name.clone(), fill.filter(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_hexdigit()))) {
@@ -2513,7 +2538,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -2633,6 +2658,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     let note_open = |edges: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellEdges>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
         if let Some(open) = attr_val(e, "table:style-name").and_then(|n| auto.cell_open.get(&n).or_else(|| named.cell_open.get(&n)).copied()) {
             edges.entry(t.0).or_default().push(crate::model::CellEdges { row: t.1.max(0) as u32, col: t.2.max(0) as u32, open });
+        }
+    };
+    let mut valigns: std::collections::BTreeMap<u32, Vec<crate::model::CellVAlign>> = Default::default();
+    let note_valign = |cells: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellVAlign>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
+        if let Some(align) = attr_val(e, "table:style-name").and_then(|n| auto.cell_valign.get(&n).or_else(|| named.cell_valign.get(&n)).copied()) {
+            cells.entry(t.0).or_default().push(crate::model::CellVAlign { row: t.1.max(0) as u32, col: t.2.max(0) as u32, align });
         }
     };
     let cell_of = |t: &Option<(u32, i64, i64, usize, bool)>| {
@@ -2865,6 +2896,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         note_fill(&mut cell_fills, t, &e);
                         note_rule(&mut ruled_tables, t, &e);
                         note_open(&mut open_edges, t, &e);
+                        note_valign(&mut valigns, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3175,6 +3207,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         note_fill(&mut cell_fills, t, &e);
                         note_rule(&mut ruled_tables, t, &e);
                         note_open(&mut open_edges, t, &e);
+                        note_valign(&mut valigns, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3759,6 +3792,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_padding = cell_padding;
     doc.table_unruled = doc.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| c.table)).filter(|t| !ruled_tables.contains(t)).collect();
     doc.table_open_edges = open_edges;
+    doc.table_valign = valigns;
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
     // an explicit page-wide count still wins; a document of several
@@ -3871,7 +3905,7 @@ mod tests {
         write(&d, &out).unwrap();
 
         let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
-        let members: Vec<String> = zip.file_names().filter(|n| n.starts_with("Pictures/")).map(str::to_string).collect();
+        let members: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).filter(|n| n.starts_with("Pictures/")).collect();
         assert_eq!(members.len(), 1, "one picture used three times is stored once: {members:?}");
         let mut manifest = String::new();
         std::io::Read::read_to_string(&mut zip.by_name("META-INF/manifest.xml").unwrap(), &mut manifest).unwrap();
@@ -4164,6 +4198,27 @@ mod tests {
         assert_eq!(rt.table_fills.values().flatten().count(), 1, "the bare cell keeps its shading");
     }
 
+    /// A cell set lower than the top (`style:vertical-align`) keeps it,
+    /// through a save too: the vessel declaration's labels sit in the
+    /// middle of their rows.
+    #[test]
+    fn a_cells_vertical_alignment_survives() {
+        use crate::model::{CellVAlign, VAlign};
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"M\" style:family=\"table-cell\"><style:table-cell-properties fo:border=\"0.5pt solid #000000\" style:vertical-align=\"middle\"/></style:style>\
+             <style:style style:name=\"B\" style:family=\"table-cell\"><style:table-cell-properties fo:border=\"0.5pt solid #000000\" style:vertical-align=\"bottom\"/></style:style>\
+             <style:style style:name=\"T\" style:family=\"table-cell\"><style:table-cell-properties fo:border=\"0.5pt solid #000000\" style:vertical-align=\"top\"/></style:style>\
+             </office:automatic-styles><office:body><office:text><table:table><table:table-row>\
+             <table:table-cell table:style-name=\"M\"><text:p>a</text:p></table:table-cell><table:table-cell table:style-name=\"B\"><text:p>b</text:p></table:table-cell><table:table-cell table:style-name=\"T\"><text:p>c</text:p></table:table-cell>\
+             </table:table-row></table:table><text:p/></office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let want = vec![CellVAlign { row: 0, col: 0, align: VAlign::Center }, CellVAlign { row: 0, col: 1, align: VAlign::Bottom }];
+        assert_eq!(d.table_valign.values().collect::<Vec<_>>(), [&want]);
+        let rt = round_trip(&d);
+        assert_eq!(rt.table_valign.values().collect::<Vec<_>>(), [&want]);
+        assert!(rt.table_unruled.is_empty(), "the cells keep their rules");
+    }
+
     /// A table's cell padding survives a save and reopen, in every cell's
     /// style, a shaded cell's included.
     #[test]
@@ -4367,7 +4422,7 @@ mod tests {
         let mut out = zip::ZipWriter::new(std::fs::File::create(&theirs).unwrap());
         for i in 0..zin.len() {
             let mut f = zin.by_index(i).unwrap();
-            let name = f.name().to_string();
+            let name = f.name().unwrap().into_owned();
             let mut data = String::new();
             std::io::Read::read_to_string(&mut f, &mut data).unwrap();
             if name == "content.xml" {

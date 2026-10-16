@@ -627,7 +627,7 @@ fn inline_image_survives_lo_docx_pass() {
     // Structural: the media part survived the LO rewrite.
     let f = std::fs::File::open(&rewritten).unwrap();
     let z = zip::ZipArchive::new(f).unwrap();
-    let has_media = z.file_names().any(|n| n.starts_with("word/media/"));
+    let has_media = z.file_names().any(|n| n.unwrap().starts_with("word/media/"));
     assert!(has_media, "embedded image lost through LO");
     // And our reader sees an image run.
     let rt = docx::read(rewritten.to_str().unwrap()).expect("read");
@@ -1587,7 +1587,7 @@ fn we_read_a_picture_writer_places_in_an_odt() {
     let op = dir.path().join("pic.odt");
     assert!(op.exists(), "soffice did not convert the flat odt");
     let zip = zip::ZipArchive::new(std::fs::File::open(&op).unwrap()).unwrap();
-    assert!(zip.file_names().any(|n| n.starts_with("Pictures/")), "Writer stored no picture");
+    assert!(zip.file_names().any(|n| n.unwrap().starts_with("Pictures/")), "Writer stored no picture");
     let rt = letters_core::odt::read(op.to_str().unwrap()).expect("read Writer's odt");
     let text = norm(&rt.to_plain_text());
     assert!(text.contains("before the picture") && text.contains("after the picture"), "{text:?}");
@@ -2280,6 +2280,42 @@ fn a_regular_run_in_a_heading_survives_writer_both_ways() {
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
 
     let Some(rt) = through_lo_to_docx(&d, "regular") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
+/// A table cell's bare sides and its place in the row through Writer,
+/// both ways: the expression-of-interest form's two-cell header band, and
+/// the vessel declaration's labels set in the middle of their rows.
+#[test]
+fn table_cell_edges_and_valign_survive_writer_both_ways() {
+    use letters_core::{CellEdges, CellVAlign, OpenEdges, VAlign};
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("after the table");
+    let table = d.insert_table_at(0, 2, 2);
+    for p in d.paragraphs.iter_mut().filter(|p| p.style.table_cell.is_some()) {
+        p.runs = vec![Run::plain("cell")];
+    }
+    let edges = vec![
+        CellEdges { row: 0, col: 0, open: OpenEdges { right: true, ..Default::default() } },
+        CellEdges { row: 0, col: 1, open: OpenEdges { left: true, ..Default::default() } },
+    ];
+    let valign = vec![CellVAlign { row: 1, col: 0, align: VAlign::Center }, CellVAlign { row: 1, col: 1, align: VAlign::Bottom }];
+    d.table_open_edges.insert(table, edges.clone());
+    d.table_valign.insert(table, valign.clone());
+    let close = |got: &Document, how: &str| {
+        assert_eq!(got.table_open_edges.values().collect::<Vec<_>>(), [&edges], "{how}");
+        assert_eq!(got.table_valign.values().collect::<Vec<_>>(), [&valign], "{how}");
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("cells.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("cells.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+
+    let Some(rt) = through_lo_to_docx(&d, "cells") else { return };
     close(&rt, "odt → Writer → docx");
 }
 
