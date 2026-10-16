@@ -192,6 +192,9 @@ impl PangoShaper {
             if st.font_size_hp.is_some() {
                 add(pango::AttrSize::new(to_units(run_size)).into());
             }
+            if let Some(tw) = st.letter_spacing_tw {
+                add(pango::AttrInt::new_letter_spacing(to_units(f64::from(tw) / 20.0)).into());
+            }
             if let Some((r, g, b)) = st.color.as_deref().and_then(parse_hex) {
                 add(pango::AttrColor::new_foreground(r, g, b).into());
             } else if st.link.is_some() {

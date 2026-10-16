@@ -786,7 +786,8 @@ pub fn paragraph_request<'a>(p: &'a Paragraph, box_w: f64, opts: &'a LayoutOptio
         runs: &p.runs,
         heading: st.heading,
         code: st.code_block.is_some(),
-        look: paragraph_look(st),
+        // A file's own Title is drawn as its runs say, not ours.
+        look: if st.own_look { Look::Body } else { paragraph_look(st) },
         alignment: st.alignment,
         width_pt: box_w,
         // A list item's first line starts at its text indent; the marker
