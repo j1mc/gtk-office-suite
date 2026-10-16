@@ -51,7 +51,7 @@ pub struct DecksWindow {
 impl DecksWindow {
     pub fn new(app: &adw::Application) -> Self {
         let controller = Rc::new(DecksController::new(
-            vec![Slide {
+            vec![Slide { hidden: false,
                 title: "Slide 1".into(),
                 background: "#ffffff".into(),
                 background_picture: None,
@@ -124,9 +124,11 @@ impl DecksWindow {
         canvas.set_focusable(true);
         canvas.set_focus_on_click(true);
         if std::env::var_os("GTK_OFFICE_TEST_MODE").is_some() {
-            // Render lab Tier A (docs/RENDER-PARITY-ROADMAP.md): every
-            // slide as the canvas draws it, 1280 px wide (13.33 in at 96
-            // DPI, the size LibreOffice's reference PNGs come out at).
+            // Render lab Tier A (docs/RENDER-PARITY-ROADMAP.md): every shown
+            // slide as the canvas draws it, 1280 px wide (13.33 in at 96 DPI,
+            // the size LibreOffice's reference PNGs come out at). A hidden
+            // slide gets no page, as LibreOffice prints none, so pages are
+            // numbered consecutively and line up with its reference.
             let ctl = controller.clone();
             let dump_canvas = canvas.clone();
             let act = gio::SimpleAction::new("test-render-dump", None);
@@ -141,8 +143,8 @@ impl DecksWindow {
                 }
                 let slides = ctl.slides.borrow();
                 let masters = ctl.masters.borrow();
-                for i in 0..slides.len() {
-                    let path = suite_common::render_dump::page_path(&dir, i);
+                for (page, i) in decks_core::engine::shown_slides(&slides).into_iter().enumerate() {
+                    let path = suite_common::render_dump::page_path(&dir, page);
                     if let Err(e) = crate::canvas::render_slide_png(&slides, &masters, i, 1280, &path) {
                         eprintln!("render-dump: slide {}: {e}", i + 1);
                     }
@@ -772,7 +774,7 @@ impl DecksWindow {
             let masters = masters.clone();
             add_btn.connect_clicked(move |_| {
                 let idx = ss.borrow().len();
-                let new_slide = Slide {
+                let new_slide = Slide { hidden: false,
                     title: format!("Slide {}", idx + 1),
                     background: "#ffffff".into(),
                     background_picture: None,
@@ -1112,7 +1114,7 @@ impl DecksWindow {
                 cs.set_visible_child_name("editor");
                 {
                     let mut slides = ss.borrow_mut();
-                    *slides = vec![Slide {
+                    *slides = vec![Slide { hidden: false,
                         title: "Slide 1".into(),
                         background: "#ffffff".into(),
                         background_picture: None,

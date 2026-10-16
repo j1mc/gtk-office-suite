@@ -1565,6 +1565,11 @@ pub fn write_pptx_bytes(deck: &Deck) -> Result<Vec<u8>, String> {
             sld.push_attribute(("xmlns:a", "http://schemas.openxmlformats.org/drawingml/2006/main"));
             sld.push_attribute(("xmlns:r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships"));
             sld.push_attribute(("xmlns:p", "http://schemas.openxmlformats.org/presentationml/2006/main"));
+            // PowerPoint's "Hide Slide"; a shown slide writes nothing, so a
+            // deck with none hidden is written as before.
+            if slide.hidden {
+                sld.push_attribute(("show", "0"));
+            }
             writer.write_event(Event::Start(sld)).map_err(|e| e.to_string())?;
 
             // The slide's name, which is what `Slide::title` is. The master
@@ -1839,7 +1844,7 @@ mod emu_rounding_tests {
     /// One slide holding a single text box at (`at`, `at`).
     fn deck_with_box(text: &str, at: f64, w: f64, h: f64) -> Deck {
         Deck {
-            slides: vec![Slide {
+            slides: vec![Slide { hidden: false,
                 title: String::new(),
                 background: String::new(),
                 background_picture: None,

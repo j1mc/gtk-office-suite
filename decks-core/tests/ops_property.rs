@@ -48,7 +48,7 @@ fn rect(x: f64) -> SlideObject {
 }
 
 fn slide(title: &str, xs: &[f64]) -> Slide {
-    Slide {
+    Slide { hidden: false,
         title: title.into(),
         background: "#ffffff".into(),
         background_picture: None,
