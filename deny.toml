@@ -47,4 +47,9 @@ ignore = [
     { id = "RUSTSEC-2026-0255", reason = "sized-chunks panic-safety (unsound); via im/loro, collab feature only, not shipped — resolve before collab ships (#1043); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained; via im/loro, collab feature only, not shipped (#1043); review by 2027-01-01" },
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill unmaintained; reached only with the collab feature's dependencies enabled (--all-features), not in shipped builds (#1043); review by 2027-01-01" },
+    # zip: upstream yanked every 8.x from 8.5.0 on after 9.0 shipped, and
+    # calamine 0.36.1 and rust_xlsxwriter 0.99.1 (both latest) still require
+    # ^8.5, so Cargo.lock cannot leave 8.6.0. No advisory names it; remove
+    # once those crates move to zip 9 (renovate #1537).
+    { crate = "zip@8.6.0", reason = "yanked with no non-yanked 8.x left; calamine/rust_xlsxwriter latest still need ^8.5 — move to zip 9 with #1537; review by 2027-01-01" },
 ]
