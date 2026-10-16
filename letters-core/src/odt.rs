@@ -152,6 +152,7 @@ fn para_style_props(st: &ParaStyle) -> String {
     }
     let border = |e: &ParaBorder| {
         let style = match e.style {
+            BorderStyle::None => "none",
             BorderStyle::Single => "solid",
             BorderStyle::Dashed => "dashed",
             BorderStyle::Dotted => "dotted",
@@ -737,6 +738,9 @@ fn content_xml(doc: &Document) -> String {
                             p.top_pt, p.bottom_pt, p.left_pt, p.right_pt
                         )
                     });
+                    // A ruled table (any made here) rules every cell, as
+                    // Writer draws a cell only with a border of its own.
+                    let padding = if doc.table_unruled.contains(&c.table) { padding } else { format!("{padding} fo:border=\"0.5pt solid #000000\"") };
                     let mut fill_styles: std::collections::HashMap<String, String> = Default::default();
                     let mut cell_styles: std::collections::HashMap<(u32, u32), String> = doc.table_fills.get(&c.table).into_iter().flatten().map(|f| {
                         let n = fill_styles.len();
@@ -1404,6 +1408,8 @@ struct AutoStyles {
     row: std::collections::HashMap<String, crate::model::RowHeight>,
     /// A table-cell style's background colour, six hex digits.
     cell_fill: std::collections::HashMap<String, String>,
+    /// Table-cell styles with a visible border on any side.
+    cell_ruled: std::collections::HashSet<String>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
     /// A table-cell style's padding, when it gives one.
@@ -1532,12 +1538,48 @@ fn list_style_kinds(xml: &str) -> std::collections::HashMap<String, Vec<ListKind
     out
 }
 
+/// Each `text:list-style` in `xml`: where each level puts its text, in
+/// points from the paragraph's indent (`fo:margin-left` of its
+/// label-alignment properties, Word's 0.5in for a first level), by level,
+/// 0-based. None where a level declares no position.
+fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option<f64>>> {
+    let mut out: std::collections::HashMap<String, Vec<Option<f64>>> = Default::default();
+    let mut reader = Reader::from_str(xml);
+    let mut current: Option<String> = None;
+    let mut level: Option<usize> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                "text:list-style" => current = attr_val(&e, "style:name"),
+                "text:list-level-style-number" | "text:list-level-style-bullet" | "text:list-level-style-image" => {
+                    level = attr_val(&e, "text:level").and_then(|l| l.parse::<usize>().ok()).filter(|l| (1..=10).contains(l));
+                }
+                "style:list-level-label-alignment" => {
+                    let (Some(style), Some(l)) = (current.as_ref(), level) else { continue };
+                    if let Some(margin) = attr_val(&e, "fo:margin-left").and_then(|v| parse_length_pt(&v)) {
+                        let levels = out.entry(style.clone()).or_default();
+                        if levels.len() < l {
+                            levels.resize(l, None);
+                        }
+                        levels[l - 1] = Some(margin);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(e)) if e.name().as_ref() == "text:list-style" => current = None,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The key `style:default-style` (paragraph family) is kept under among
 /// the named styles: the root every paragraph style's chain ends at.
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1582,6 +1624,13 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                         if let (Some(name), true) = (cur_name.clone(), sides.iter().any(Option::is_some)) {
                             let [top_pt, bottom_pt, left_pt, right_pt] = sides.map(|v| v.unwrap_or(0.0));
                             out.cell_padding.insert(name, crate::model::CellPadding { top_pt, bottom_pt, left_pt, right_pt });
+                        }
+                        let ruled = ["fo:border", "fo:border-top", "fo:border-bottom", "fo:border-left", "fo:border-right"]
+                            .iter()
+                            .filter_map(|a| attr_val(&e, a))
+                            .any(|v| !v.trim().eq_ignore_ascii_case("none") && parse_length_pt(v.split_whitespace().next().unwrap_or("")).is_none_or(|w| w > 0.0));
+                        if let (Some(name), true) = (cur_name.clone(), ruled) {
+                            out.cell_ruled.insert(name);
                         }
                         let fill = attr_val(&e, "fo:background-color").map(|c| c.trim_start_matches('#').to_uppercase());
                         if let (Some(name), Some(color)) = (cur_name.clone(), fill.filter(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_hexdigit()))) {
@@ -1635,6 +1684,13 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             }
                             if let Some(c) = attr_val(&e, "fo:color") {
                                 st.color = Some(c.trim_start_matches('#').to_lowercase());
+                            } else if attr_val(&e, "style:use-window-font-color").as_deref() == Some("true") {
+                                // The automatic (window) colour undoes a
+                                // parent's: the W1 notes' headings are
+                                // black over Heading 1's blue, as
+                                // LibreOffice draws them. Black, as the
+                                // DOCX reader takes "auto" in a heading.
+                                st.color = Some("000000".into());
                             }
                             if let Some(fam) = attr_val(&e, "fo:font-family") {
                                 let f = fam.to_lowercase();
@@ -1839,7 +1895,7 @@ fn parse_para_border(v: &str) -> Option<ParaBorder> {
     if color.len() != 6 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    Some(ParaBorder { style, color, width_pt })
+    Some(ParaBorder { style, color, width_pt, space_pt: 0.0 })
 }
 
 /// A list that continues the numbering of the one before it with its
@@ -2380,6 +2436,8 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     list_styles.extend(list_style_kinds(&content));
     let mut list_labels = list_style_labels(&styles);
     list_labels.extend(list_style_labels(&content));
+    let mut list_indents = list_style_indents(&styles);
+    list_indents.extend(list_style_indents(&content));
     // The label of a numbered item at `level` (1-based) of the list style
     // `name`.
     let label_of = |name: Option<&String>, level: u8| -> Option<ListLabel> {
@@ -2401,7 +2459,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -2504,6 +2562,13 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     // A shaded cell's fill, at the cell just counted.
     // Each table's cell padding: its first cell's.
     let mut cell_padding: std::collections::BTreeMap<u32, crate::model::CellPadding> = Default::default();
+    // The tables with a ruled cell: Writer rules a cell only by its style.
+    let mut ruled_tables: std::collections::HashSet<u32> = Default::default();
+    let note_rule = |ruled: &mut std::collections::HashSet<u32>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
+        if attr_val(e, "table:style-name").is_some_and(|n| auto.cell_ruled.contains(&n) || named.cell_ruled.contains(&n)) {
+            ruled.insert(t.0);
+        }
+    };
     let note_fill = |fills: &mut std::collections::BTreeMap<u32, Vec<crate::model::CellFill>>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
         if let Some(color) = attr_val(e, "table:style-name").and_then(|n| auto.cell_fill.get(&n).cloned()) {
             fills.entry(t.0).or_default().push(crate::model::CellFill { row: t.1.max(0) as u32, col: t.2.max(0) as u32, color });
@@ -2738,6 +2803,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         t.4 = false;
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
+                        note_rule(&mut ruled_tables, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -2900,6 +2966,22 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     style.list_level = list_level.saturating_sub(1);
                     style.list_start = pending_start.take();
                     style.list_label = label;
+                    // Where the list style puts the item's text, unless the
+                    // paragraph places it itself: the model's indent is
+                    // that less the list indent the layout adds (as for a
+                    // Word list, `docx::list_indent_from_declared`). A
+                    // Word-made .odt's 0.5in level is drawn at 0.5in.
+                    if kind != ListKind::None && style.left_indent_pt == 0.0 {
+                        let own = item_styles.get(usize::from(list_level.max(1) - 1)).cloned().flatten();
+                        let name = own.as_ref().or_else(|| list_style_names.last().and_then(Option::as_ref));
+                        let declared = name.and_then(|n| list_indents.get(n)).and_then(|l| l.get(usize::from(list_level.max(1) - 1)).copied().flatten());
+                        if let Some(declared) = declared {
+                            style.left_indent_pt = (declared - crate::lists::text_indent_pt(style.list_level)).max(0.0);
+                            if style.first_line_indent_pt < 0.0 {
+                                style.first_line_indent_pt = 0.0;
+                            }
+                        }
+                    }
                     if in_toc && !in_index_title {
                         let name = attr_val(&e, "text:style-name").unwrap_or_default();
                         let base = auto.para_parent.get(&name).cloned().unwrap_or(name);
@@ -3022,6 +3104,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         t.2 += 1;
                         note_span(&mut cell_spans, &e, t);
                         note_fill(&mut cell_fills, t, &e);
+                        note_rule(&mut ruled_tables, t, &e);
                         if (t.1, t.2) == (0, 0) {
                             if let Some(pad) = attr_val(&e, "table:style-name").and_then(|n| auto.cell_padding.get(&n).copied()) {
                                 cell_padding.insert(t.0, pad);
@@ -3601,6 +3684,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_spans = cell_spans;
     doc.table_fills = cell_fills;
     doc.table_padding = cell_padding;
+    doc.table_unruled = doc.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| c.table)).filter(|t| !ruled_tables.contains(t)).collect();
     // A column count LibreOffice recorded on a section instead of on the
     // page layout. Only consulted when the page layout said nothing, so
     // an explicit page-wide count still wins; a document of several
@@ -4041,6 +4125,18 @@ mod tests {
         assert_eq!(rt.paragraphs, d.paragraphs);
     }
 
+    /// A table Letters made is written with ruled cells, as Writer draws
+    /// a cell's rule only from its style, and reads back ruled; one read
+    /// as unruled is written and read back without rules.
+    #[test]
+    fn table_rules_survive_both_ways() {
+        let mut d = Document::from_plain_text("after");
+        let table = d.insert_table_at(0, 1, 2);
+        assert!(round_trip(&d).table_unruled.is_empty());
+        d.table_unruled.insert(table);
+        assert_eq!(round_trip(&d).table_unruled.len(), 1);
+    }
+
     /// An .odt made of these `content.xml` and `styles.xml`, read.
     fn read_package(content: &str, styles: &str) -> Document {
         let dir = tempfile::tempdir().unwrap();
@@ -4063,6 +4159,36 @@ mod tests {
     /// font is the default style's, named by its font face. All four were
     /// lost: a Calibri agenda opened in the serif fallback with a plain
     /// title and tight table rows.
+    /// A list style's label-alignment position is where its items' text
+    /// goes: a Word-made .odt's first level (margin 0.5in, label 0.25in
+    /// back) is drawn with its text at 0.5in and its number at 0.25in, as
+    /// Writer draws it, not at the built-in 18pt (render-lab
+    /// `real-explanatory-note`, `real-salary-template`).
+    #[test]
+    fn list_items_sit_where_their_list_style_puts_them() {
+        let content = "<office:document-content><office:automatic-styles>\
+            <text:list-style style:name=\"L1\"><text:list-level-style-number text:level=\"1\" style:num-suffix=\".\" style:num-format=\"1\">\
+              <style:list-level-properties text:list-level-position-and-space-mode=\"label-alignment\">\
+              <style:list-level-label-alignment text:label-followed-by=\"listtab\" fo:margin-left=\"0.5in\" fo:text-indent=\"-0.25in\"/>\
+              </style:list-level-properties></text:list-level-style-number></text:list-style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:list text:style-name=\"L1\"><text:list-item><text:p>one</text:p></text:list-item></text:list>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let item = &d.paragraphs[0];
+        assert_eq!(item.style.list, ListKind::Numbered);
+        let text_x = crate::layout::paragraph_box_x(item);
+        assert!((text_x - 36.0).abs() < 0.01, "text at 0.5in: {text_x}");
+        // A list Letters wrote reads back at its own indent.
+        let mut d = Document::from_plain_text("a\nb");
+        d.paragraphs[0].style.list = ListKind::Bullet;
+        d.paragraphs[1].style.list = ListKind::Bullet;
+        d.paragraphs[1].style.list_level = 1;
+        let rt = round_trip(&d);
+        assert_eq!(rt.paragraphs[0].style.left_indent_pt, 0.0);
+        assert_eq!(rt.paragraphs[1].style.left_indent_pt, 0.0);
+    }
+
     /// Writer's default paragraph style is the root of every style chain
     /// (a Word-made .odt keeps its space after and line height there),
     /// and a self-closing paragraph is a blank line with its style's
@@ -4531,6 +4657,23 @@ mod tests {
         write(&d, path).unwrap();
         let back: String = read(path).unwrap().paragraphs[0].runs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(back, "HM Revenue\nBX9 1GL");
+    }
+
+    /// The automatic font colour undoes a parent style's: a heading whose
+    /// style says `use-window-font-color` over a blue Heading 1 is black.
+    #[test]
+    fn the_window_font_colour_undoes_a_parents() {
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Heading1\" style:family=\"paragraph\"><style:text-properties fo:color=\"#0F4761\"/></style:style>\
+             </office:styles></office:document-styles>";
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"P1\" style:family=\"paragraph\" style:parent-style-name=\"Heading1\"><style:text-properties style:use-window-font-color=\"true\"/></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:h text:style-name=\"P1\" text:outline-level=\"1\">Notes</text:h><text:h text:style-name=\"Heading1\" text:outline-level=\"1\">Blue</text:h>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, styles);
+        assert_eq!(d.paragraphs[0].runs[0].style.color.as_deref(), Some("000000"));
+        assert_ne!(d.paragraphs[1].runs[0].style.color.as_deref(), Some("000000"), "Heading 1 itself is not undone");
     }
 
     /// A header's paragraphs are its lines, the blank ones too, and a

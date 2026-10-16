@@ -267,12 +267,24 @@ pub enum LineHeight {
 }
 
 /// One side of a paragraph's border (OOXML `w:pBdr`, ODF `fo:border-*`):
-/// its look, its colour as RRGGBB hex, and its width in points.
+/// its look, its colour as RRGGBB hex, its width in points, and the gap
+/// between it and the text (`w:space`, ODF `fo:padding-*`) in points.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParaBorder {
     pub style: BorderStyle,
     pub color: String,
     pub width_pt: f64,
+    #[serde(default)]
+    pub space_pt: f64,
+}
+
+impl ParaBorder {
+    /// How far this side stands off the text: its gap plus its width.
+    pub fn inset_pt(&self) -> f64 {
+        // An invisible edge has no width, whatever size it names.
+        let width = if self.style == BorderStyle::None { 0.0 } else { self.width_pt.max(0.0) };
+        self.space_pt.max(0.0) + width
+    }
 }
 
 /// A paragraph border's look. Only the looks both formats name the same
@@ -280,6 +292,11 @@ pub struct ParaBorder {
 /// save dialog reports (`crate::loss`), never a silent restyle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BorderStyle {
+    /// No line, but the edge keeps its gap: Word's `w:val="none"` with a
+    /// `w:space`, which Writer still pads a paragraph's top and bottom
+    /// with (render-lab `real-questionnaire`: 31pt above and below the
+    /// blank line between its tables).
+    None,
     Single,
     Dashed,
     Dotted,
@@ -607,6 +624,11 @@ pub struct Document {
     /// `fo:padding`). A table not listed has Word's default.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_padding: std::collections::BTreeMap<u32, CellPadding>,
+    /// Tables drawn without rules, by table id: a file's table that
+    /// declares no visible border (Word's "Normal Table", a form's grey
+    /// answer box). A table not listed (any made here) is ruled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub table_unruled: std::collections::BTreeSet<u32>,
     /// The document's sections when its parts have different pages,
     /// headers or footers (`crate::sections`, LET-005S); empty for a
     /// document of one section, whose page is `page`.
@@ -761,6 +783,7 @@ impl Document {
             table_spans: Default::default(),
             table_fills: Default::default(),
             table_padding: Default::default(),
+            table_unruled: Default::default(),
             sections: Vec::new(),
             next_section_id: 0,
         }
@@ -1034,6 +1057,7 @@ impl Document {
         self.table_spans.remove(&table);
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
+        self.table_unruled.remove(&table);
         if rows == 0 || cols == 0 {
             return table;
         }
@@ -1492,7 +1516,7 @@ mod structured_editing_tests {
         style.line_height = Some(LineHeight::Minimum(18.0));
         style.shading = Some("D9D9D9".to_string());
         style.borders = ParaBorders {
-            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75 }),
+            bottom: Some(ParaBorder { style: BorderStyle::Single, color: "000000".to_string(), width_pt: 0.75, space_pt: 0.0 }),
             ..ParaBorders::default()
         };
         style.tab_stops_pt = vec![TabStop { pos_pt: 72.0, align: TabAlign::Right, leader: TabLeader::Dot }];

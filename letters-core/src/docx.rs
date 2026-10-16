@@ -48,6 +48,7 @@ struct RawBorder {
     style: BorderStyle,
     color: String,
     width_pt: f64,
+    space_pt: f64,
 }
 
 /// Per body paragraph: strict-spelled indents and tab-stop positions.
@@ -400,15 +401,19 @@ fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
     let mut val = None;
     let mut sz = None;
     let mut color = None;
+    let mut space = None;
     for a in e.attributes().with_checks(false).flatten() {
         match a.key.as_ref() {
             "w:val" => val = Some(a.value.trim().to_ascii_lowercase()),
             "w:sz" => sz = a.value.trim().parse::<f64>().ok(),
+            // Points (not eighths), 0..=31.
+            "w:space" => space = a.value.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
             "w:color" => color = Some(a.value.trim().to_ascii_uppercase()),
             _ => {}
         }
     }
     let style = match val.as_deref().unwrap_or("single") {
+        "none" if space.is_some_and(|s| s > 0.0) => BorderStyle::None,
         "nil" | "none" => return None,
         "single" | "thick" => BorderStyle::Single,
         "double" => BorderStyle::Double,
@@ -423,7 +428,7 @@ fn raw_border(e: &quick_xml::events::BytesStart<'_>) -> Option<RawBorder> {
         Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_string(),
         _ => "000000".to_string(),
     };
-    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0 })
+    Some(RawBorder { style, color, width_pt: sz.unwrap_or(4.0) / 8.0, space_pt: space.unwrap_or(0.0).clamp(0.0, 31.0) })
 }
 
 /// Lay the scanned properties over what rdocx read. Transitional wins
@@ -458,21 +463,33 @@ fn para_borders(raw: Option<&RawPara>, styled: &rdocx_oxml::properties::CT_PPr) 
     let Some(raw) = raw else { return base };
     let [top, left, bottom, right] = &raw.borders;
     let pick = |direct: &Option<Option<RawBorder>>, fallback: Option<ParaBorder>| {
-        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt })).unwrap_or(fallback)
+        direct.as_ref().map(|b| b.as_ref().map(|b| ParaBorder { style: b.style, color: b.color.clone(), width_pt: b.width_pt, space_pt: b.space_pt })).unwrap_or(fallback)
     };
-    ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) }
+    padding_only_above_and_below(ParaBorders { top: pick(top, base.top), left: pick(left, base.left), bottom: pick(bottom, base.bottom), right: pick(right, base.right) })
+}
+
+/// An invisible edge's gap pads a paragraph above and below only: Writer
+/// sets no text in from an invisible side edge (measured: a `none` edge
+/// with `w:space="31"` on every side moves the text down 31pt, not in).
+fn padding_only_above_and_below(mut b: ParaBorders) -> ParaBorders {
+    for side in [&mut b.left, &mut b.right] {
+        if side.as_ref().is_some_and(|e| e.style == BorderStyle::None) {
+            *side = None;
+        }
+    }
+    b
 }
 
 /// A style chain's `w:pBdr` edges as modelled borders.
 fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
     let edge = |b: Option<&rdocx_oxml::borders::CT_BorderEdge>| b.and_then(styled_edge_border);
     match &styled.borders {
-        Some(b) => ParaBorders {
+        Some(b) => padding_only_above_and_below(ParaBorders {
             top: edge(b.top.as_ref()),
             left: edge(b.left.as_ref()),
             bottom: edge(b.bottom.as_ref()),
             right: edge(b.right.as_ref()),
-        },
+        }),
         None => ParaBorders::default(),
     }
 }
@@ -482,6 +499,7 @@ fn styled_borders(styled: &rdocx_oxml::properties::CT_PPr) -> ParaBorders {
 fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBorder> {
     use rdocx_oxml::shared::ST_Border;
     let style = match e.val {
+        ST_Border::None if e.space.is_some_and(|s| s > 0) => BorderStyle::None,
         ST_Border::None => return None,
         ST_Border::Single | ST_Border::Thick => BorderStyle::Single,
         ST_Border::Double => BorderStyle::Double,
@@ -493,7 +511,12 @@ fn styled_edge_border(e: &rdocx_oxml::borders::CT_BorderEdge) -> Option<ParaBord
         Some(c) if c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()) => c.to_uppercase(),
         _ => "000000".to_string(),
     };
-    Some(ParaBorder { style, color, width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0) })
+    Some(ParaBorder {
+        style,
+        color,
+        width_pt: e.sz.map_or(0.5, |s| f64::from(s) / 8.0),
+        space_pt: e.space.map_or(0.0, |s| f64::from(s.min(31))),
+    })
 }
 
 /// A paragraph's fixed or minimum line height: the direct `w:spacing`
@@ -831,7 +854,16 @@ fn para_post_pass(xml: &str, specs: &[ParaPost]) -> String {
         let self_closed = out.ends_with("/>");
         let Some(spec) = specs.get(n) else { n += 1; continue };
         n += 1;
-        if !spec.nontrivial() || self_closed {
+        if !spec.nontrivial() {
+            continue;
+        }
+        // A blank paragraph is written self-closed: open it for its
+        // borders (a blank line's padding is all it shows).
+        if self_closed {
+            if let Some(borders) = spec.borders.as_ref() {
+                out.truncate(out.len() - 2);
+                out.push_str(&format!("><w:pPr>{}</w:pPr></w:p>", pbdr_xml(borders)));
+            }
             continue;
         }
         // The paragraph's extent: to its closing tag. A `w:p` never
@@ -897,18 +929,20 @@ fn find_ppr(xml: &str) -> Option<usize> {
 }
 
 /// A paragraph's per-side borders as a `w:pBdr` element. Widths are
-/// eighths of a point; the content gap is a point, as Word writes it.
+/// eighths of a point, the content gap whole points.
 fn pbdr_xml(borders: &ParaBorders) -> String {
     let edge = |name: &str, e: &ParaBorder| {
         let val = match e.style {
+            BorderStyle::None => "none",
             BorderStyle::Single => "single",
             BorderStyle::Dashed => "dashed",
             BorderStyle::Dotted => "dotted",
             BorderStyle::Double => "double",
         };
         format!(
-            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"1\" w:color=\"{}\"/>",
+            "<w:{name} w:val=\"{val}\" w:sz=\"{}\" w:space=\"{}\" w:color=\"{}\"/>",
             (e.width_pt * 8.0).round().clamp(1.0, 96.0) as u32,
+            e.space_pt.round().clamp(0.0, 31.0) as u32,
             e.color
         )
     };
@@ -1224,6 +1258,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_rows = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, row_heights(t)?))).collect();
     let table_fills = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_fills(t)?))).collect();
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
+    let table_unruled = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
 
     let mut read = Document {
         paragraphs,
@@ -1243,6 +1278,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_spans,
         table_fills,
         table_padding,
+        table_unruled,
         sections: Vec::new(),
         next_section_id: 0,
     };
@@ -1385,6 +1421,26 @@ fn cell_fills(table: &rdocx::TableRef<'_>) -> Option<Vec<crate::model::CellFill>
         }
     }
     (!fills.is_empty()).then_some(fills)
+}
+
+/// Whether a table draws any rule: a visible edge of its own borders
+/// (`w:tblBorders`), its table style's (up the `w:basedOn` chain, as
+/// "Table Grid" gives one), or any of its cells' (`w:tcBorders`). Word's
+/// "Normal Table" declares none, and Word and Writer draw such a table
+/// with no rules at all.
+fn table_ruled(table: &rdocx::TableRef<'_>) -> bool {
+    use rdocx::TableBorderEdge as E;
+    let visible = |b: Option<rdocx::TableBorderRef<'_>>| b.is_some_and(|b| !matches!(b.style(), "none" | "nil"));
+    if [E::Top, E::Bottom, E::Left, E::Right, E::InsideHorizontal, E::InsideVertical].into_iter().any(|e| visible(table.border(e))) {
+        return true;
+    }
+    if table.style_id().is_some_and(table_style_ruled) {
+        return true;
+    }
+    use rdocx::CellBorderEdge as C;
+    (0..table.row_count()).filter_map(|r| table.row(r)).any(|row| {
+        (0..row.cell_count()).filter_map(|c| row.cell(c)).any(|cell| [C::Top, C::Bottom, C::Left, C::Right].into_iter().any(|e| visible(cell.border(e))))
+    })
 }
 
 /// A table's cell padding, when it is not Word's default: its cell margins
@@ -1749,6 +1805,14 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             }
             if let Some(pad) = doc.table_padding.get(&tc0.table) {
                 tbl.set_cell_margins(rdocx::Length::pt(pad.top_pt), rdocx::Length::pt(pad.right_pt), rdocx::Length::pt(pad.bottom_pt), rdocx::Length::pt(pad.left_pt));
+            }
+            // A table is written with the rules it is drawn with: a 0.5pt
+            // grid (rdocx writes none, and Word and Writer drew a Letters
+            // table bare), or none for one the file drew without.
+            if doc.table_unruled.contains(&tc0.table) {
+                tbl.set_borders(rdocx::BorderStyle::None, 0, "auto");
+            } else {
+                tbl.set_borders(rdocx::BorderStyle::Single, 4, "000000");
             }
             for fill in doc.table_fills.get(&tc0.table).into_iter().flatten() {
                 if let Some(mut cell) = tbl.cell(fill.row as usize, fill.col as usize) {
@@ -3097,6 +3161,8 @@ enum FontRef {
 struct StyleFonts {
     /// style id -> (basedOn, its own run font)
     styles: std::collections::HashMap<String, (Option<String>, Option<FontRef>)>,
+    /// Table styles whose own `w:tblBorders` has a visible edge.
+    ruled_table_styles: std::collections::HashSet<String>,
     default_para: Option<String>,
     doc_default: Option<FontRef>,
 }
@@ -3115,6 +3181,7 @@ fn style_fonts(path: &str) -> StyleFonts {
         // Where we are: inside a style (its id), inside docDefaults'
         // rPrDefault, and inside a pPr (whose rPr is the paragraph mark's).
         let (mut style, mut in_defaults, mut in_ppr) = (None::<String>, false, false);
+        let mut in_tbl_borders = false;
         loop {
             let ev = reader.read_event()?;
             let (e, empty) = match &ev {
@@ -3126,6 +3193,7 @@ fn style_fonts(path: &str) -> StyleFonts {
                         "w:style" => style = None,
                         "w:rPrDefault" => in_defaults = false,
                         "w:pPr" => in_ppr = false,
+                        "w:tblBorders" => in_tbl_borders = false,
                         _ => {}
                     }
                     continue;
@@ -3144,6 +3212,14 @@ fn style_fonts(path: &str) -> StyleFonts {
                 }
                 "w:rPrDefault" if !empty => in_defaults = true,
                 "w:pPr" if !empty => in_ppr = true,
+                "w:tblBorders" if !empty => in_tbl_borders = true,
+                "w:top" | "w:left" | "w:bottom" | "w:right" | "w:start" | "w:end" | "w:insideH" | "w:insideV" if in_tbl_borders => {
+                    if let (Some(id), Some(val)) = (&style, attr(&e, "w:val")) {
+                        if !matches!(val.as_str(), "none" | "nil") {
+                            out.ruled_table_styles.insert(id.clone());
+                        }
+                    }
+                }
                 "w:basedOn" => {
                     if let Some(id) = &style {
                         out.styles.entry(id.clone()).or_default().0 = attr(&e, "w:val");
@@ -3196,13 +3272,29 @@ thread_local! {
     static STYLE_FONTS: std::cell::RefCell<StyleFonts> = std::cell::RefCell::new(StyleFonts::default());
 }
 
-/// The font family paragraph style `id` (or the default paragraph style)
-/// gives its text, resolved through `w:basedOn` and docDefaults.
+/// Whether table style `id`, or one it is based on, has a visible rule.
+fn table_style_ruled(id: &str) -> bool {
+    STYLE_FONTS.with(|sf| {
+        let sf = sf.borrow();
+        let mut cur = Some(id.to_string());
+        for _ in 0..32 {
+            let Some(c) = cur else { return false };
+            if sf.ruled_table_styles.contains(&c) {
+                return true;
+            }
+            cur = sf.styles.get(&c).and_then(|(based_on, _)| based_on.clone());
+        }
+        false
+    })
+}
+
 /// Whether the file's styles part defines style `id`.
 fn style_defined(id: &str) -> bool {
     STYLE_FONTS.with(|sf| sf.borrow().styles.contains_key(id))
 }
 
+/// The font family paragraph style `id` (or the default paragraph style)
+/// gives its text, resolved through `w:basedOn` and docDefaults.
 fn style_family(id: Option<&str>) -> Option<String> {
     STYLE_FONTS.with(|sf| {
         let sf = sf.borrow();

@@ -132,7 +132,7 @@
     "B": "amber"
   },
   "letters/real-consultation-questions-downloadable-alternative": {
-    "A": "amber",
+    "A": "green",
     "B": "green"
   },
   "letters/real-crime-supervisor-declaration-form": {
@@ -189,19 +189,19 @@
   },
   "letters/real-questionnaire": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-questionnaire-2": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-road-safety-open-data-severity-adjustment-guidan": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-salary-template": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-sma-positive-result-call-checklist": {
     "A": "amber",

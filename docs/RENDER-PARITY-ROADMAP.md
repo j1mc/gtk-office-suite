@@ -204,6 +204,13 @@ images show our rendering matches LibreOffice's and the metric is what
 disagrees. Recorded here with the measurement, so nobody "fixes" them by
 loosening a budget:
 
+- **`letters/font-sizes`** (2026-10-16, #1606). Pixel comparison
+  (`pixel_diff.py`): within each line our ink matches LibreOffice's to the
+  pixel (band miss 0.000), and the page as a whole to 0.041 (the 40pt line
+  sits 2px high; the 8–28pt lines 0–1px). Tesseract reads the 8pt label
+  as "spt text" in LibreOffice's render and "bpetext" in ours, and "40pt"
+  as "aopt" against "a4opt", so 4 of 5 words match and the mismatched
+  word's displacement is 13.9pt. SSIM is 0.997.
 - **`letters/table`** (2026-09-25, re-measured 2026-09-26). Cell text sits
   within 0.2 pt of LibreOffice's; Tesseract misreads one cell label in ours
   ("R1C1" as "rici", unhinted glyphs at 12 px) and so 8 of 9 cell words
@@ -557,6 +564,7 @@ Tier A and B, and the tiers agree on every fixture. The other three are
 amber in both tiers and accepted as metric artifacts, each recorded under
 "Known metric artifacts" with its measurement:
 
+- `letters/font-sizes`: OCR misreads the 8pt and 40pt labels differently on each side; the pixels match within 1px.
 - `letters/table`: OCR misreads one 12 px cell label.
 - `tables/number-formats`: "###" is a non-word to OCR.
 - `tables/wrap-text`: SSIM on a one-word line-break difference against the

@@ -125,8 +125,8 @@
     "C": "green"
   },
   "letters/font-sizes": {
-    "A": "green",
-    "B": "green",
+    "A": "amber",
+    "B": "amber",
     "C": "green"
   },
   "letters/footnote-continued": {
