@@ -1689,7 +1689,7 @@ fn with_sections(package: &[u8], sections: &[crate::model::DocSection]) -> Resul
                 Some(text) => {
                     let file = format!("lettersSection{kind}{k}.xml");
                     let id = format!("rIdLettersSection{kind}{k}");
-                    let (xml, _) = crate::docx_anchors::header_footer_part(is_header, text, &[], Alignment::Left, &[]);
+                    let (xml, _) = crate::docx_anchors::header_footer_part(is_header, text, &[], Alignment::Left, &[], 0.0);
                     parts.push((format!("word/{file}"), crate::docx_fields::fields(&xml)));
                     new_rels.push_str(&format!("<Relationship Id=\"{id}\" Type=\"{rel_type}\" Target=\"{file}\"/>"));
                     new_types.push_str(&format!("<Override PartName=\"/word/{file}\" ContentType=\"{content_type}\"/>"));
@@ -2381,7 +2381,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         if text.is_none() && pictures.is_empty() {
             continue;
         }
-        let (xml, images) = crate::docx_anchors::header_footer_part(is_header, text.as_deref().unwrap_or(""), pictures, alignment, lines);
+        let (xml, images) = crate::docx_anchors::header_footer_part(is_header, text.as_deref().unwrap_or(""), pictures, alignment, lines, doc.page.unwrap_or_default().width_pt);
         let images: Vec<(&str, &[u8], &str)> = images.iter().map(|(r, b, n)| (r.as_str(), b.as_slice(), n.as_str())).collect();
         if is_header {
             out.set_raw_header_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);

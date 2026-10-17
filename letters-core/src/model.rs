@@ -213,6 +213,21 @@ pub struct HfLine {
     pub look: RunStyle,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tab_stops: Vec<TabStop>,
+    /// A line that floats out of the header's or footer's flow, as a text
+    /// box anchored to the page does (a classification label such as
+    /// "OFFICIAL" at the page's top): it takes no room there, and sits
+    /// across the page by its alignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub float: Option<HfFloat>,
+}
+
+/// Where a floating header or footer line's text is: its distance from
+/// the page's top edge (to the text's top) or bottom edge (to its foot),
+/// in points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum HfFloat {
+    Top(f64),
+    Bottom(f64),
 }
 
 /// Where the text after a tab stop sits relative to the stop.

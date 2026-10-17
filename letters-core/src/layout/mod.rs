@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::lists;
-use crate::model::{Document, HfLine, ListKind, PageGeometry, Paragraph, Run};
+use crate::model::{Document, HfFloat, HfLine, ListKind, PageGeometry, Paragraph, Run};
 
 #[cfg(feature = "render")]
 pub mod pango;
@@ -253,7 +253,7 @@ pub enum Item {
         /// of the line of its text it is on (`Document::header_lines`),
         /// which a renderer draws it with.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        story_line: Option<crate::model::HfLine>,
+        story_line: Option<Box<crate::model::HfLine>>,
     },
     /// A list item's marker ("•", "3."), in the item's first-line font.
     Marker { para: usize, text: String, x_pt: f64, baseline_pt: f64 },
@@ -1834,7 +1834,8 @@ impl<'o> Flow<'o> {
             ] {
                 let row_h = picture_row_height(pictures, width);
                 let text_h = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
-                    header_footer_lines(&page_field_text(t, page.index + 1, total), alignment, story, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
+                    let text = page_field_text(t, page.index + 1, total);
+                    flow_height(&text, &header_footer_lines(&text, alignment, story, pictures, width, opts, shaper), story)
                 });
                 let top = match source {
                     Source::Header => opts.header_distance_pt,
@@ -1852,8 +1853,26 @@ impl<'o> Flow<'o> {
                     // before it.
                     let story_line = (!story.is_empty()).then(|| {
                         let n = chars[..lb.start.min(chars.len())].iter().filter(|&&c| c == '\n').count();
-                        story.get(n).cloned().unwrap_or(HfLine { alignment, ..Default::default() })
+                        Box::new(story.get(n).cloned().unwrap_or(HfLine { alignment, ..Default::default() }))
                     });
+                    // A floating line is set against the page's edge and
+                    // across the page, out of the flow.
+                    let float = story_line.as_ref().and_then(|l| l.float);
+                    let (x_pt, top_pt) = match float {
+                        None => (left + lb.x_pt, y),
+                        Some(f) => {
+                            let across = match story_line.as_ref().map_or(alignment, |l| l.alignment) {
+                                crate::model::Alignment::Center => page.width_pt / 2.0 - (left + width / 2.0),
+                                crate::model::Alignment::Right => page.width_pt - (left + width),
+                                _ => -left,
+                            };
+                            let top = match f {
+                                HfFloat::Top(d) => d,
+                                HfFloat::Bottom(d) => height - d - lb.natural_height(),
+                            };
+                            (left + lb.x_pt + across, top)
+                        }
+                    };
                     page.items.push(Item::Line {
                         source: source.clone(),
                         line: k,
@@ -1862,13 +1881,15 @@ impl<'o> Flow<'o> {
                         text: chars[lb.start.min(chars.len())..lb.end.min(chars.len())].iter().collect(),
                         box_x_pt: left,
                         box_width_pt: width,
-                        x_pt: left + lb.x_pt,
-                        top_pt: y,
-                        baseline_pt: y + lb.ascent_pt,
+                        x_pt,
+                        top_pt,
+                        baseline_pt: top_pt + lb.ascent_pt,
                         height_pt: lb.natural_height(),
                         story_line,
                     });
-                    y += lb.natural_height();
+                    if float.is_none() {
+                        y += lb.natural_height();
+                    }
                 }
             }
         }
@@ -1925,9 +1946,24 @@ fn picture_row_height(pictures: &[Run], width: f64) -> f64 {
 /// out for page 1.
 fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: crate::model::Alignment, story: &[HfLine], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> f64 {
     let text = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
-        header_footer_lines(&page_field_text(t, 1, 1), alignment, story, pictures, width, opts, shaper).iter().map(LineBox::natural_height).sum()
+        let text = page_field_text(t, 1, 1);
+        flow_height(&text, &header_footer_lines(&text, alignment, story, pictures, width, opts, shaper), story)
     });
     picture_row_height(pictures, width) + text
+}
+
+/// The room a header's or footer's `lines` of `text` take: a floating
+/// line's (`HfLine::float`) none.
+fn flow_height(text: &str, lines: &[LineBox], story: &[HfLine]) -> f64 {
+    let chars: Vec<char> = text.chars().collect();
+    lines
+        .iter()
+        .filter(|lb| {
+            let n = chars[..lb.start.min(chars.len())].iter().filter(|&&c| c == '\n').count();
+            story.get(n).is_none_or(|l| l.float.is_none())
+        })
+        .map(LineBox::natural_height)
+        .sum()
 }
 
 /// The lines of a header's or footer's text under its pictures. The
