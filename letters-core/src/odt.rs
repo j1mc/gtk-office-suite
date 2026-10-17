@@ -695,7 +695,9 @@ fn content_xml(doc: &Document) -> String {
                         Some(widths) => {
                             let total: f64 = widths.iter().sum();
                             auto.push_str(&format!(
-                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties style:width=\"{total:.2}pt\" table:align=\"left\"/></style:style>"
+                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties style:width=\"{total:.2}pt\" table:align=\"{}\"/></style:style>",
+                                // A share of the text's width fills it.
+                                if doc.table_relative.contains(&c.table) { "margins" } else { "left" }
                             ));
                             table_style = format!(" table:style-name=\"Table{tables_written}\"");
                             widths
@@ -1501,6 +1503,9 @@ struct AutoStyles {
     cell_valign: std::collections::HashMap<String, crate::model::VAlign>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
+    /// Table styles that size the table as a share of the text's width
+    /// (`style:rel-width`, or `table:align="margins"`).
+    table_relative: std::collections::HashSet<String>,
     /// A graphic style's padding above and below its text, in points: a
     /// text box's inset.
     graphic_padding: std::collections::HashMap<String, (f64, f64)>,
@@ -1673,7 +1678,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1709,6 +1714,13 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             out.graphic.insert(name.clone(), graphic_placement(&e));
                             let pad = |a: &str| attr_val(&e, a).or_else(|| attr_val(&e, "fo:padding")).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
                             out.graphic_padding.insert(name, (pad("fo:padding-top"), pad("fo:padding-bottom")));
+                        }
+                    }
+                    "style:table-properties" if cur_family == "table" => {
+                        if let Some(name) = cur_name.clone() {
+                            if attr_val(&e, "style:rel-width").is_some() || attr_val(&e, "table:align").as_deref() == Some("margins") {
+                                out.table_relative.insert(name);
+                            }
                         }
                     }
                     "style:table-cell-properties" => {
@@ -2779,7 +2791,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), space_adds: true, page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), space_adds: true, page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3114,6 +3126,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                     table_depth += 1;
                     if table.is_none() {
+                        if attr_val(&e, "table:style-name").is_some_and(|n| auto.table_relative.contains(&n) || named.table_relative.contains(&n)) {
+                            doc.table_relative.insert(tables_read);
+                        }
                         table = Some((tables_read, -1, -1, table_depth, false));
                         tables_read += 1;
                     }
@@ -4324,6 +4339,22 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
         assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+    }
+
+    /// A table sized as a share of the text's width stays so through a
+    /// save and reopen (`table:align="margins"`); one with the file's own
+    /// widths does not become one.
+    #[test]
+    fn a_table_sized_to_the_text_round_trips() {
+        let mut d = Document::from_plain_text("after");
+        let shared = d.insert_table_at(0, 1, 2);
+        d.table_columns.insert(shared, vec![200.0, 300.0]);
+        d.table_relative.insert(shared);
+        let rt = round_trip(&d);
+        let table = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+        assert_eq!(rt.table_relative.iter().copied().collect::<Vec<_>>(), [table]);
+        d.table_relative.clear();
+        assert!(round_trip(&d).table_relative.is_empty());
     }
 
     /// Capitals survive a save and reopen, the text in its own case.

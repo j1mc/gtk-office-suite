@@ -2120,6 +2120,47 @@ fn header_and_footer_lines_survive_writer_both_ways() {
     close(&rt, "odt → Writer → docx");
 }
 
+/// Through Writer both ways, a table sized as a share of the text's width
+/// stays one (the transparency return's 100% table), and a table with its
+/// own widths, wider than the text, keeps them (the crime supervisor
+/// form's, which runs on into the right margin).
+#[test]
+fn a_tables_width_kind_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("between\nafter");
+    let wide = d.insert_table_at(0, 1, 2);
+    d.table_columns.insert(wide, vec![108.0, 374.0]);
+    let at = d.paragraphs.iter().position(|p| p.text() == "between").unwrap();
+    let shared = d.insert_table_at(at + 1, 1, 2);
+    d.table_columns.insert(shared, vec![150.0, 270.0]);
+    d.table_relative.insert(shared);
+    let close = |got: &Document, how: &str| {
+        let ids: Vec<u32> = {
+            let mut seen = Vec::new();
+            for c in got.paragraphs.iter().filter_map(|p| p.style.table_cell) {
+                if !seen.contains(&c.table) {
+                    seen.push(c.table);
+                }
+            }
+            seen
+        };
+        assert_eq!(ids.len(), 2, "{how}: two tables");
+        assert!(!got.table_relative.contains(&ids[0]), "{how}: the wide table keeps its own widths");
+        assert!(got.table_relative.contains(&ids[1]), "{how}: the shared table stays a share of the text");
+        let total: f64 = got.table_columns.get(&ids[0]).map_or(0.0, |w| w.iter().sum());
+        assert!((total - 482.0).abs() < 1.0, "{how}: wider than the text, as the file has it: {total}");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("widths.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("widths.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "widths") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// A classification label floating at the top and foot of the page, out
 /// of the header's and footer's flow, through Writer both ways: the crime
 /// supervisor form's "OFFICIAL" text boxes, 15pt in from the page's edge.
