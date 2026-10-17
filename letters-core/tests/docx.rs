@@ -1975,6 +1975,30 @@ fn floating_header_and_footer_lines_survive() {
     assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
 }
 
+/// An inline picture's room beside it survives a save and reopen: a .docx
+/// says it by leaving `distL`/`distR` out, which Writer takes as its own
+/// 3.19mm a side; a value the file gives takes no room, as Writer and
+/// Word draw it.
+#[test]
+fn an_inline_pictures_room_beside_it_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("p.png");
+    std::fs::write(&png, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0\x90wS\xde\0\0\0\x0cIDATx\x9cc\xf8\xcf\xc0\0\0\x03\x01\x01\0\xc9\xfe\x92\xef\0\0\0\0IEND\xaeB`\x82").unwrap();
+    let mut d = Document::from_plain_text("caption");
+    d.paragraphs[0].runs.push(Run {
+        text: String::new(),
+        style: RunStyle { image: Some(png.to_string_lossy().into()), image_extent_emu: Some((914_400, 914_400)), image_sides_emu: Some((114_840, 114_840)), ..Default::default() },
+    });
+    let sides = |d: &Document| d.paragraphs.iter().flat_map(|p| &p.runs).find(|r| r.style.image.is_some()).and_then(|r| r.style.image_sides_emu);
+    assert_eq!(sides(&round_trip(&d)), Some((114_840, 114_840)));
+    // Given in the file, whatever its value: none.
+    let given = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        *body = body.replacen("<wp:inline", "<wp:inline distL=\"114300\" distR=\"114300\"", 1);
+    });
+    assert_eq!(sides(&given), None);
+}
+
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with
 /// `w:val="none"` over the table's grid).
 #[test]

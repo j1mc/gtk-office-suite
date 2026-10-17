@@ -39,6 +39,11 @@ pub struct RunStyle {
     /// inch, OOXML's unit); None = the image's own size.
     #[serde(default)]
     pub image_extent_emu: Option<(u64, u64)>,
+    /// The room kept beside an inline image, left and right, in EMU: an
+    /// ODF frame's margins, or Writer's own 3.19mm a side for a .docx
+    /// picture that leaves out `distL`/`distR`. None is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sides_emu: Option<(u64, u64)>,
     /// A floating image's place on the page; None = inline in the text.
     /// A floating image takes no room in its line: it is drawn where its
     /// anchor puts it, over the text (Word's "in front of text").
