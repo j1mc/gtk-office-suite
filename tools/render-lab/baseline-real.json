@@ -152,12 +152,12 @@
     "B": "amber"
   },
   "letters/real-explanatory-note": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-explanatory-note-2": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-expression-of-interest-form": {
     "A": "amber",
