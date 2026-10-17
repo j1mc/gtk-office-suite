@@ -414,6 +414,34 @@ fn a_tall_row_splits_across_pages() {
     assert_eq!(b.first().map(String::as_str), Some(format!("line {n}").as_str()), "the next line, not a repeat or a gap");
 }
 
+/// A row kept on one page that does not fit what is left of a page
+/// starts the next, as Writer moves the social housing dictionary's long
+/// rows whole; one not kept so splits there; and one taller than a page
+/// splits all the same.
+#[test]
+fn a_row_kept_whole_starts_the_next_page() {
+    let build = |filler: usize, row_lines: usize| -> (Document, u32) {
+        let mut d = doc_of(filler, "filler");
+        d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] });
+        let table = d.insert_table_at(filler, 1, 1);
+        let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+        let lines: Vec<Paragraph> = (0..row_lines)
+            .map(|n| Paragraph { style: ParaStyle { table_cell: Some(TableCell { table, row: 0, col: 0 }), ..Default::default() }, runs: vec![Run::plain(format!("line {n}"))] })
+            .collect();
+        d.paragraphs.splice(at..=at, lines);
+        (d, table)
+    };
+    let first_cell_page = |d: &Document| lay(d).pages.iter().position(|p| p.items.iter().any(|i| matches!(i, Item::Cell { .. }))).unwrap();
+    // 40 lines of the page's 46 taken, a 10-line row after them.
+    let (mut d, table) = build(40, 10);
+    assert_eq!(first_cell_page(&d), 0, "not kept whole, the row splits at the foot");
+    d.table_whole_rows.entry(table).or_default().insert(0);
+    assert_eq!(first_cell_page(&d), 1, "kept whole, it starts the next page");
+    let (mut d, table) = build(40, 80);
+    d.table_whole_rows.entry(table).or_default().insert(0);
+    assert_eq!(first_cell_page(&d), 0, "taller than a page, it splits all the same");
+}
+
 /// A shaded cell carries its colour to the page (a form's grey header
 /// cells), and the shading moves with its cell when rows and columns are
 /// inserted or deleted.

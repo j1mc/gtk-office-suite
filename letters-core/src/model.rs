@@ -662,6 +662,12 @@ pub struct Document {
     /// answer box). A table not listed (any made here) is ruled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub table_unruled: std::collections::BTreeSet<u32>,
+    /// Each table's rows kept on one page, by table id (Word's
+    /// `w:cantSplit`, ODF's row `fo:keep-together="always"`): a row that
+    /// does not fit what is left of a page starts the next, unless it is
+    /// taller than a page.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_whole_rows: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>>,
     /// Each ruled table's cells that leave a side without a rule, by
     /// table id: a form's header row whose two cells read as one band.
     /// A cell not listed is ruled all round.
@@ -883,6 +889,7 @@ impl Document {
             table_fills: Default::default(),
             table_padding: Default::default(),
             table_unruled: Default::default(),
+            table_whole_rows: Default::default(),
             table_open_edges: Default::default(),
             table_valign: Default::default(),
             sections: Vec::new(),
@@ -1159,6 +1166,7 @@ impl Document {
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
         self.table_unruled.remove(&table);
+        self.table_whole_rows.remove(&table);
         self.table_open_edges.remove(&table);
         self.table_valign.remove(&table);
         if rows == 0 || cols == 0 {

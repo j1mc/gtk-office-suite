@@ -1920,6 +1920,18 @@ fn a_regular_run_in_a_heading_survives() {
     assert!(!rt.paragraphs[0].runs[0].style.bold);
 }
 
+/// A row kept on one page stays so through a save and reopen
+/// (`w:cantSplit`); the others do not become so.
+#[test]
+fn a_row_kept_whole_survives() {
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 3, 1);
+    d.table_whole_rows.entry(table).or_default().insert(1);
+    let rt = round_trip(&d);
+    let id = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+    assert_eq!(rt.table_whole_rows.get(&id).map(|r| r.iter().copied().collect::<Vec<_>>()), Some(vec![1]));
+}
+
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with
 /// `w:val="none"` over the table's grid).
 #[test]
