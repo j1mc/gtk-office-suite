@@ -2466,3 +2466,53 @@ fn a_list_markers_hanging_survives_writer() {
         assert!((h - 36.0).abs() < 0.5, "hanging {h}");
     }
 }
+
+/// The first page's own header and footer, and the spacing of a header's
+/// lines, through Writer both ways: the screening committee form's
+/// letterhead over blank lines with Normal's space after, on its first
+/// page only, and a running title on the others.
+#[test]
+fn the_first_pages_own_header_survives_writer_both_ways() {
+    use letters_core::{HfLine, HfStory};
+    let Some(bin) = require_or_skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0x12, 0x16, 0xf1,
+        0x4d, 0x00, 0x00, 0x00, 0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x3c, 0x21, 0x27, 0xc7,
+        0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc4, 0x00, 0x03, 0x00, 0x13, 0x2e, 0x01, 0x08, 0x6a, 0xc0,
+        0x65, 0x61, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let png_path = dir.path().join("logo.png");
+    std::fs::write(&png_path, png).unwrap();
+    let logo = Run { text: "Committee".into(), style: RunStyle { image: Some(png_path.to_string_lossy().into()), image_extent_emu: Some((1_304_925, 542_925)), ..Default::default() } };
+    let mut d = Document::from_plain_text("body text");
+    d.header = Some("Running title".into());
+    d.footer = Some("{page}".into());
+    let spaced = HfLine { space_after_pt: 12.0, line_height: Some(LineHeight::Exact(10.0)), ..Default::default() };
+    d.first_header = Some(HfStory { text: "Letterhead\n\n".into(), pictures: vec![logo], alignment: Alignment::Center, lines: vec![HfLine { alignment: Alignment::Center, ..spaced.clone() }, spaced.clone(), spaced] });
+    d.first_footer = Some(HfStory { text: "Page {page}".into(), ..Default::default() });
+    let close = |got: &Document, how: &str| {
+        assert_eq!(got.header.as_deref().map(str::trim_end), Some("Running title"), "{how}: running header");
+        let first = got.first_header.as_ref().unwrap_or_else(|| panic!("{how}: no first page header"));
+        assert_eq!(first.text.trim_end(), "Letterhead", "{how}: first page header text");
+        assert_eq!((first.alignment, first.lines.first().map(|l| l.alignment)), (Alignment::Center, Some(Alignment::Center)), "{how}: centred");
+        assert_eq!(first.pictures.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["Committee"], "{how}: its logo");
+        assert!(got.header_pictures.is_empty(), "{how}: the logo is the first page's alone");
+        assert!(first.lines.len() >= 3, "{how}: its blank lines {:?}", first.lines);
+        for l in &first.lines[..3] {
+            assert!((l.space_after_pt - 12.0).abs() < 0.1, "{how}: space after {l:?}");
+            assert!(matches!(l.line_height, Some(LineHeight::Exact(h)) if (h - 10.0).abs() < 0.1), "{how}: exact line {l:?}");
+        }
+        assert_eq!(got.first_footer.as_ref().map(|s| s.text.trim_end()), Some("Page {page}"), "{how}: first page footer");
+    };
+    let docx_path = dir.path().join("first.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    close(&docx::read(docx_path.to_str().unwrap()).expect("read our docx"), "our docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("first.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "first") else { return };
+    close(&rt, "odt → Writer → docx");
+}

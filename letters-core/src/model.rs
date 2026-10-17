@@ -214,6 +214,36 @@ pub struct HfLine {
     /// across the page by its alignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub float: Option<HfFloat>,
+    /// The room above and below the line's paragraph, in points (a
+    /// letterhead's blank lines with Normal's space after).
+    #[serde(default, skip_serializing_if = "is_no_space")]
+    pub space_before_pt: f64,
+    #[serde(default, skip_serializing_if = "is_no_space")]
+    pub space_after_pt: f64,
+    /// How tall the line is, when its paragraph fixes it (exactly or at
+    /// least); None is its text's own height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<LineHeight>,
+}
+
+fn is_no_space(pt: &f64) -> bool {
+    *pt == 0.0
+}
+
+/// A header or footer of its own for a page: its text ("{page}"
+/// substitutes the page number), the pictures above it, how the text is
+/// aligned and each line of it, as `Document::header` and its
+/// companions have them. An empty story is a page without one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HfStory {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pictures: Vec<Run>,
+    #[serde(default, skip_serializing_if = "is_left")]
+    pub alignment: Alignment,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<HfLine>,
 }
 
 /// Where a floating header or footer line's text is: its distance from
@@ -636,6 +666,15 @@ pub struct Document {
     /// over a date at the left).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer_lines: Vec<HfLine>,
+    /// The first page's own header, when it has one (Word's "different
+    /// first page", ODF's `style:header-first`): a title page's letterhead
+    /// over a running header. `None` is the first page with the header the
+    /// others have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_header: Option<HfStory>,
+    /// The first page's own footer, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_footer: Option<HfStory>,
     /// Page size and margins; None = application default (A4).
     pub page: Option<PageGeometry>,
     /// The body font the document's own styles name; runs without a font
@@ -888,6 +927,8 @@ impl Document {
             footer_alignment: Alignment::Left,
             header_lines: Vec::new(),
             footer_lines: Vec::new(),
+            first_header: None,
+            first_footer: None,
             page: None,
             base_font: BaseFont::default(),
             heading_styles: Vec::new(),

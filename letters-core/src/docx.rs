@@ -683,7 +683,15 @@ fn read_on_this_thread(path: &str) -> Result<Document, String> {
             read.footer = footer;
         }
     }
-    let [header_extras, footer_extras] = header_footer_extras(path);
+    let ([header_extras, footer_extras], first) = header_footer_extras(path);
+    // The first page's own header and footer, read whole from their parts.
+    if let Some([header, footer]) = first {
+        let story = |e: Option<PartExtras>| {
+            let e = e.unwrap_or_else(PartExtras::empty);
+            crate::model::HfStory { text: e.text, pictures: e.pictures, alignment: e.alignment, lines: e.lines }
+        };
+        (read.first_header, read.first_footer) = (Some(story(header)), Some(story(footer)));
+    }
     for (extras, text, pictures, alignment, lines) in [
         (header_extras, &mut read.header, &mut read.header_pictures, &mut read.header_alignment, &mut read.header_lines),
         (footer_extras, &mut read.footer, &mut read.footer_pictures, &mut read.footer_alignment, &mut read.footer_lines),
@@ -711,18 +719,30 @@ struct PartExtras {
     lines: Vec<crate::model::HfLine>,
 }
 
+impl PartExtras {
+    fn empty() -> Self {
+        PartExtras { pictures: Vec::new(), alignment: Alignment::Left, text: String::new(), lines: Vec::new() }
+    }
+}
+
+/// The two parts of a page's header and footer, the first page's own
+/// when it has them (`docx_fields::first_page_parts`).
+type FirstParts = Option<[Option<PartExtras>; 2]>;
+
 /// The pictures of the default header and footer (a letterhead's logo),
 /// each kept in the media cache like a body picture (#455), how each
-/// part's text is aligned, and its lines.
-fn header_footer_extras(path: &str) -> [PartExtras; 2] {
-    let empty = || PartExtras { pictures: Vec::new(), alignment: Alignment::Left, text: String::new(), lines: Vec::new() };
-    let none = || [empty(), empty()];
+/// part's text is aligned, and its lines; and the same of the first
+/// page's own, when it has them.
+fn header_footer_extras(path: &str) -> ([PartExtras; 2], FirstParts) {
+    let empty = PartExtras::empty;
+    let none = || ([empty(), empty()], None);
     let Some(mut zip) = std::fs::File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok()) else { return none() };
     let (Some(document), Some(rels)) = (part_text(&mut zip, "word/document.xml"), part_text(&mut zip, "word/_rels/document.xml.rels")) else {
         return none();
     };
     let styles = part_text(&mut zip, "word/styles.xml").unwrap_or_default();
     let (h, f) = crate::docx_fields::default_parts(&document, &rels);
+    let first = crate::docx_fields::first_page_parts(&document, &rels);
     let mut extras = |part: Option<String>| -> PartExtras {
         let Some(part) = part else { return empty() };
         let Some(xml) = part_text(&mut zip, &part) else { return empty() };
@@ -749,7 +769,9 @@ fn header_footer_extras(path: &str) -> [PartExtras; 2] {
         let (text, lines) = crate::docx_fields::story(&xml, &styles);
         PartExtras { pictures, alignment: crate::docx_fields::alignment(&xml, &styles), text, lines }
     };
-    [extras(h), extras(f)]
+    let defaults = [extras(h), extras(f)];
+    let first = first.map(|(h, f)| [h.map(|p| extras(Some(p))), f.map(|p| extras(Some(p)))]);
+    (defaults, first)
 }
 
 /// A zip part's text, if it is there.
@@ -1314,7 +1336,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         header_pictures: Vec::new(),
         footer_pictures: Vec::new(),
         header_alignment: Alignment::Left,
-        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(),
+        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(), first_header: None, first_footer: None,
         page: read_page_geometry(&doc),
         base_font: read_base_font(&doc),
         heading_styles: read_heading_styles(&doc),
@@ -2385,6 +2407,29 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             out.set_raw_header_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);
         } else {
             out.set_raw_footer_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);
+        }
+    }
+    // The first page's own header and footer: Word's "different first
+    // page" gives it both, so the one it does not have of its own is the
+    // others'. A document of several sections keeps its first section's
+    // properties apart (below), and its first page the others' parts.
+    if (doc.first_header.is_some() || doc.first_footer.is_some()) && sections.is_empty() {
+        out.set_different_first_page(true);
+        let page_w = doc.page.unwrap_or_default().width_pt;
+        for (is_header, first, text, pictures, alignment, lines) in [
+            (true, &doc.first_header, &doc.header, &doc.header_pictures, doc.header_alignment, &doc.header_lines),
+            (false, &doc.first_footer, &doc.footer, &doc.footer_pictures, doc.footer_alignment, &doc.footer_lines),
+        ] {
+            let (xml, images) = match first {
+                Some(s) => crate::docx_anchors::header_footer_part(is_header, &s.text, &s.pictures, s.alignment, &s.lines, page_w),
+                None => crate::docx_anchors::header_footer_part(is_header, text.as_deref().unwrap_or(""), pictures, alignment, lines, page_w),
+            };
+            let images: Vec<(&str, &[u8], &str)> = images.iter().map(|(r, b, n)| (r.as_str(), b.as_slice(), n.as_str())).collect();
+            if is_header {
+                out.set_raw_header_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::First);
+            } else {
+                out.set_raw_footer_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::First);
+            }
         }
     }
     if let Some(pg) = &doc.page {

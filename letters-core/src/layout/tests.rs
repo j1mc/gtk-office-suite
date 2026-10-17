@@ -2,7 +2,7 @@
 // line, so an A4 page with 1in margins holds 75 chars × 46 lines.
 
 use super::*;
-use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
+use crate::model::{Alignment, BorderStyle, CellFill, HfStory, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
 
 const LINE: f64 = 15.0;
 const LINES_PER_PAGE: usize = 46;
@@ -573,6 +573,30 @@ fn headers_and_footers_repeat_with_page_numbers() {
         _ => None,
     });
     assert!((footer_top.unwrap() - (841.9 - 36.0)).abs() < 1e-9, "footer bottom sits at the footer distance");
+}
+
+/// The first page's own header (`Document::first_header`, a title page's
+/// letterhead) is drawn on the first page alone, which makes room for it
+/// and its lines' spacing; the pages after have the running header and
+/// the margin it leaves them.
+#[test]
+fn the_first_page_has_its_own_header_and_the_room_it_needs() {
+    let mut d = doc_of(60, "x");
+    d.header = Some("Report".into());
+    let spaced = HfLine { space_after_pt: 12.0, ..Default::default() };
+    d.first_header = Some(HfStory { text: "Letterhead\n\n\n\n\n".into(), lines: vec![spaced; 6], ..Default::default() });
+    let t = lay(&d);
+    let headers = |p: &Page| -> Vec<String> {
+        p.items.iter().filter_map(|i| match i { Item::Line { source: Source::Header, text, .. } => Some(text.clone()), _ => None }).collect()
+    };
+    let first_body = |p: &Page| p.items.iter().find_map(|i| match i { Item::Line { source: Source::Paragraph(_), top_pt, .. } => Some(*top_pt), _ => None }).unwrap();
+    assert_eq!(headers(&t.pages[0]).first().map(String::as_str), Some("Letterhead"));
+    assert!(!headers(&t.pages[0]).contains(&"Report".to_string()), "{:?}", headers(&t.pages[0]));
+    assert_eq!(headers(&t.pages[1]), vec!["Report"]);
+    // Six 15pt lines and the space after the first five, below the
+    // header's distance from the page's top.
+    assert!((first_body(&t.pages[0]) - (36.0 + 6.0 * 15.0 + 5.0 * 12.0)).abs() < 1e-9, "{}", first_body(&t.pages[0]));
+    assert_eq!(first_body(&t.pages[1]), 72.0, "the running header fits the margin");
 }
 
 #[test]
