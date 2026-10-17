@@ -2489,3 +2489,28 @@ fn a_list_markers_hanging_survives_writer() {
         assert!((h - 36.0).abs() < 0.5, "hanging {h}");
     }
 }
+
+/// Paragraph spacing adds up in an ODF document and takes the larger in a
+/// Word one, through Writer both ways: Writer spaces 30pt after and 40pt
+/// before 70pt apart in an odt, whatever its settings, and 40pt in a
+/// docx.
+#[test]
+fn paragraph_spacing_follows_the_format_through_writer() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("First\nSecond");
+    d.paragraphs[0].style.space_after_pt = 30.0;
+    d.paragraphs[1].style.space_before_pt = 40.0;
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("spacing.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    assert!(!docx::read(docx_path.to_str().unwrap()).expect("read our docx").space_adds, "a Word file takes the larger");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("spacing.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    let odt = letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt");
+    assert!(odt.space_adds, "docx → Writer → odt adds up");
+    let (after, before) = (odt.paragraphs[0].style.space_after_pt, odt.paragraphs[1].style.space_before_pt);
+    assert!((after - 30.0).abs() < 0.1 && (before - 40.0).abs() < 0.1, "the spacing itself: {after} {before}");
+    let Some(rt) = through_lo_to_docx(&d, "spacing") else { return };
+    assert!(!rt.space_adds, "odt → Writer → docx takes the larger");
+}

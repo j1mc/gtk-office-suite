@@ -1314,7 +1314,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         header_pictures: Vec::new(),
         footer_pictures: Vec::new(),
         header_alignment: Alignment::Left,
-        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(),
+        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(), space_adds: false,
         page: read_page_geometry(&doc),
         base_font: read_base_font(&doc),
         heading_styles: read_heading_styles(&doc),

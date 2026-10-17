@@ -641,6 +641,12 @@ pub struct Document {
     /// over a date at the left).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer_lines: Vec<HfLine>,
+    /// Whether the space after a paragraph and the space before the next
+    /// add up between them, as Writer spaces every ODF document; otherwise
+    /// the larger of the two applies, as Word does and Writer does for a
+    /// Word file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub space_adds: bool,
     /// Page size and margins; None = application default (A4).
     pub page: Option<PageGeometry>,
     /// The body font the document's own styles name; runs without a font
@@ -701,6 +707,10 @@ pub struct Document {
     /// one deleted and undone is still its own.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub next_section_id: u32,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -893,6 +903,7 @@ impl Document {
             footer_alignment: Alignment::Left,
             header_lines: Vec::new(),
             footer_lines: Vec::new(),
+            space_adds: false,
             page: None,
             base_font: BaseFont::default(),
             heading_styles: Vec::new(),

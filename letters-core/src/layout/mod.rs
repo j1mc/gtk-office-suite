@@ -41,6 +41,10 @@ pub struct LayoutOptions {
     /// The document's heading looks (levels 1–6), if it has its own.
     #[serde(default)]
     pub heading_styles: Vec<crate::model::RunStyle>,
+    /// Whether paragraph spacing adds up between paragraphs
+    /// (`Document::space_adds`) rather than the larger applying.
+    #[serde(default)]
+    pub space_adds: bool,
 }
 
 impl LayoutOptions {
@@ -70,6 +74,7 @@ impl LayoutOptions {
             o.font_size_pt = f64::from(hp) / 2.0;
         }
         o.heading_styles.clone_from(&doc.heading_styles);
+        o.space_adds = doc.space_adds;
         o
     }
 }
@@ -85,6 +90,7 @@ impl Default for LayoutOptions {
             header_distance_pt: 36.0,
             footer_distance_pt: 36.0,
             heading_styles: Vec::new(),
+            space_adds: false,
         }
     }
 }
@@ -658,6 +664,14 @@ fn section_geometry(doc: &Document, k: usize, page: PageGeometry, opts: &LayoutO
     geometry
 }
 
+/// The space between a paragraph with `after` points after it and one
+/// with `before` before it: their sum where the document's spacing adds
+/// up (`Document::space_adds`), else the larger.
+fn between(doc: &Document, after: f64, before: f64) -> f64 {
+    let (after, before) = (after.max(0.0), before.max(0.0));
+    if doc.space_adds { after + before } else { after.max(before) }
+}
+
 /// The width between a page's side margins.
 fn content_width(g: &PageGeometry) -> f64 {
     (g.width_pt - g.margin_left_pt - g.margin_right_pt).max(1.0)
@@ -870,7 +884,7 @@ fn border_group(doc: &Document, i: usize, section_end: usize) -> (bool, Option<f
         .paragraphs
         .get(i + 1)
         .filter(|n| i + 1 < section_end && same(n) && !n.style.page_break_before)
-        .map(|n| p.style.space_after_pt.max(0.0).max(n.style.space_before_pt.max(0.0)));
+        .map(|n| between(doc, p.style.space_after_pt, n.style.space_before_pt));
     (joins_prev, next_gap)
 }
 
@@ -887,7 +901,8 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
     // Between two paragraphs the larger of the space after the first and
     // the space before the second applies, not their sum: LibreOffice
     // draws Word documents that way (render-lab letters/paragraph-spacing:
-    // 10pt after, then 24pt before, is a 24pt gap). Past the first
+    // 10pt after, then 24pt before, is a 24pt gap). Writer's own
+    // documents add the two (`Document::space_adds`). Past the first
     // paragraph neither applies at the top of a page or column: Word and
     // LibreOffice start the text at the margin there, so a heading's
     // space before must not ride a page break onto the next page
@@ -895,7 +910,8 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
     // its space before (render-lab letters/headings).
     let document_top = flow.pages.len() == 1 && flow.column == 0 && flow.column_is_empty();
     if !flow.column_is_empty() || document_top {
-        flow.y += st.space_before_pt.max(0.0).max(std::mem::take(&mut flow.pending_after));
+        let (before, after) = (st.space_before_pt.max(0.0), std::mem::take(&mut flow.pending_after));
+        flow.y += if flow.opts.space_adds { before + after } else { before.max(after) };
     }
     // Everything that must stay together with the first line: the whole
     // paragraph if short, the orphan lines otherwise, plus a heading's
@@ -1357,14 +1373,13 @@ impl Slice {
 /// top and bottom padding.
 fn cell_slices(doc: &Document, paras: &[CellParagraph], pad: &crate::model::CellPadding) -> Vec<Slice> {
     let mut out = vec![Slice::Gap(pad.top_pt)];
-    // Between two paragraphs of a cell the larger of the space after the
-    // first and the space before the second applies, as in the body
-    // (measured in Writer: 4.5pt before and after stand 4.5pt apart in a
-    // cell too, not 9pt).
+    // Between two paragraphs of a cell the space is as in the body
+    // (measured in Writer: in a Word file 4.5pt before and after stand
+    // 4.5pt apart in a cell too, not 9pt).
     let mut after = 0.0;
     for (k, (i, s, _)) in paras.iter().enumerate() {
         let p = &doc.paragraphs[*i];
-        out.push(Slice::Gap(p.style.space_before_pt.max(0.0).max(after)));
+        out.push(Slice::Gap(between(doc, after, p.style.space_before_pt)));
         out.extend(s.lines.iter().enumerate().map(|(l, lb)| Slice::Line(k, l, line_height(p, lb.natural_height()))));
         after = p.style.space_after_pt.max(0.0);
     }

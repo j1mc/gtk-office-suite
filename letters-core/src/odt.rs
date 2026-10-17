@@ -2779,7 +2779,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), space_adds: true, page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -5260,6 +5260,16 @@ mod tests {
         let path = path.to_str().unwrap();
         write(&d, path).unwrap();
         assert_eq!(read(path).unwrap().header.as_deref(), Some("\nFINANCE BILL\n"));
+    }
+
+    /// An ODF document's paragraph spacing adds up between paragraphs, as
+    /// Writer spaces every one (measured: 30pt after and 40pt before stand
+    /// 70pt apart, whatever its settings say); a Word file's does not.
+    #[test]
+    fn an_odf_documents_spacing_adds_up() {
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        assert!(read_package(content, "<office:document-styles/>").space_adds);
+        assert!(round_trip(&Document::from_plain_text("body")).space_adds, "a document saved as ODF is spaced as one");
     }
 
     /// A span named by a style of styles.xml takes its look, with what its
