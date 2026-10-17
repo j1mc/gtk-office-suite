@@ -2194,6 +2194,10 @@ fn block_master(name: &str, auto: &AutoStyles, named: &AutoStyles) -> Option<Str
 #[derive(Default)]
 struct MasterReading {
     layout: Option<String>,
+    /// Whether the master page has a header and a footer shown: only then
+    /// does its page layout's header or footer area take room.
+    has_header: bool,
+    has_footer: bool,
     header: Option<String>,
     footer: Option<String>,
     header_pictures: bool,
@@ -2215,7 +2219,7 @@ fn master_sections(
     switches: &[(usize, String)],
     first: Option<&str>,
     masters: &std::collections::HashMap<String, MasterReading>,
-    layouts: &std::collections::HashMap<String, PageGeometry>,
+    pages: &std::collections::HashMap<String, PageGeometry>,
 ) -> Vec<DocSection> {
     let Some(first) = first else { return Vec::new() };
     let mut starts: Vec<(usize, &str)> = vec![(0, first)];
@@ -2256,7 +2260,7 @@ fn master_sections(
             geometry: if k == 0 {
                 first_page
             } else {
-                masters.get(name).and_then(|m| m.layout.as_ref()).and_then(|l| layouts.get(l)).copied().unwrap_or_default()
+                pages.get(name).copied().unwrap_or_default()
             },
             header: story(k, true),
             footer: story(k, false),
@@ -3559,6 +3563,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut layouts: std::collections::HashMap<String, PageGeometry> = Default::default();
         let mut layout_name = String::new();
         let mut master_layout: Option<String> = None;
+        // Each page layout's header and footer areas, which take room only
+        // on a master page that has a header or footer.
+        let mut hf_areas: std::collections::HashMap<String, (f64, f64)> = Default::default();
         let mut last_layout: Option<String> = None;
         // Inside a page layout's `style:header-style` (true) or
         // `style:footer-style` (false).
@@ -3648,12 +3655,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Empty(e)) | Ok(Event::Start(e)) if hf_style.is_some() && e.name().as_ref() == "style:header-footer-properties" => {
                     let len = |name: &str| attr_val(&e, name).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
                     let height = len("fo:min-height").max(len("svg:height"));
-                    if let Some(page) = layouts.get_mut(&layout_name) {
-                        if hf_style == Some(true) {
-                            page.margin_top_pt += height;
-                        } else {
-                            page.margin_bottom_pt += height;
-                        }
+                    let area = hf_areas.entry(layout_name.clone()).or_insert((0.0, 0.0));
+                    if hf_style == Some(true) {
+                        area.0 += height;
+                    } else {
+                        area.1 += height;
                     }
                 }
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:master-page" => {
@@ -3756,10 +3762,16 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     "style:header" => {
                         in_header = in_master;
                         in_any_header = true;
+                        if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| attr_val(&e, "style:display").as_deref() != Some("false")) {
+                            m.has_header = true;
+                        }
                     }
                     "style:footer" => {
                         in_footer = in_master;
                         in_any_footer = true;
+                        if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| attr_val(&e, "style:display").as_deref() != Some("false")) {
+                            m.has_footer = true;
+                        }
                     }
                     "text:p" | "text:h" if in_any_header || in_any_footer => {
                         if (in_header || in_footer) && hf_box_depth == 0 {
@@ -3913,13 +3925,32 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 *t = None;
             }
         }
+        // A master page's header and footer areas sit between its page
+        // layout's margins and the body: each one it shows adds to its
+        // margin. Its page is that layout so grown.
+        let grown = |layout: &str, m: Option<&MasterReading>| -> Option<PageGeometry> {
+            let mut page = layouts.get(layout).copied()?;
+            let (header, footer) = hf_areas.get(layout).copied().unwrap_or((0.0, 0.0));
+            if m.is_some_and(|m| m.has_header) {
+                page.margin_top_pt += header;
+            }
+            if m.is_some_and(|m| m.has_footer) {
+                page.margin_bottom_pt += footer;
+            }
+            Some(page)
+        };
+        let master_geometry: std::collections::HashMap<String, PageGeometry> =
+            master_pages.iter().filter_map(|(n, m)| Some((n.clone(), grown(m.layout.as_deref()?, Some(m))?))).collect();
         // The first page's layout; without a master page naming one that
         // exists, the last one read, as before.
-        doc.page = master_layout.filter(|n| layouts.contains_key(n)).or(last_layout).and_then(|n| layouts.get(&n).copied());
+        doc.page = match master_layout.filter(|n| layouts.contains_key(n)) {
+            Some(layout) => grown(&layout, master.as_ref().and_then(|n| master_pages.get(n))),
+            None => last_layout.and_then(|n| layouts.get(&n).copied()),
+        };
         // A body that changes master page is several sections, the first
         // on the page just read; a list that breaks the contract (a switch
         // where no paragraph starts) leaves the document one section.
-        let mut sections = master_sections(&mut doc, &switches, master.as_deref(), &master_pages, &layouts);
+        let mut sections = master_sections(&mut doc, &switches, master.as_deref(), &master_pages, &master_geometry);
         // A section whose page has one column takes the columns of a
         // `text:section` wrapping its paragraphs: LibreOffice writes a Word
         // section's columns as one, from the section's start to at most
@@ -4949,6 +4980,33 @@ mod tests {
         let ordinals = crate::lists::ordinals(d.paragraphs.iter().map(|p| &p.style));
         let shown: Vec<u32> = ordinals.into_iter().filter(|n| *n > 0).collect();
         assert_eq!(shown, [1, 2, 3, 1, 2]);
+    }
+
+    /// A page layout's header and footer areas take room only on a master
+    /// page that shows a header or footer: the social housing dictionary's
+    /// layout declares a 0.5in header area its master never uses, and its
+    /// body starts at the 1in margin, as Writer draws it.
+    #[test]
+    fn a_header_area_takes_room_only_where_the_master_shows_a_header() {
+        let styles = |header: &str| {
+            format!(
+                "<office:document-styles><office:automatic-styles><style:page-layout style:name=\"PL\">\
+                 <style:page-layout-properties fo:page-width=\"8.27in\" fo:page-height=\"11.69in\" fo:margin-top=\"1in\" fo:margin-bottom=\"1in\"/>\
+                 <style:header-style><style:header-footer-properties fo:min-height=\"0.5in\"/></style:header-style>\
+                 <style:footer-style><style:header-footer-properties fo:min-height=\"0.25in\"/></style:footer-style>\
+                 </style:page-layout></office:automatic-styles><office:master-styles>\
+                 <style:master-page style:name=\"Standard\" style:page-layout-name=\"PL\">{header}</style:master-page>\
+                 </office:master-styles></office:document-styles>"
+            )
+        };
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        let margins = |header: &str| {
+            let page = read_package(content, &styles(header)).page.unwrap();
+            (page.margin_top_pt, page.margin_bottom_pt)
+        };
+        assert_eq!(margins("<style:footer><text:p>1</text:p></style:footer>"), (72.0, 90.0), "no header: the footer's area alone");
+        assert_eq!(margins("<style:header><text:p>Report</text:p></style:header>"), (108.0, 72.0), "the header's area alone");
+        assert_eq!(margins("<style:header style:display=\"false\"><text:p>Report</text:p></style:header>"), (72.0, 72.0), "a header turned off takes none");
     }
 
     /// A file with several master pages (a Word conversion gives each
