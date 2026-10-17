@@ -52,4 +52,13 @@ ignore = [
     # ^8.5, so Cargo.lock cannot leave 8.6.0. No advisory names it; remove
     # once those crates move to zip 9 (renovate #1537).
     { crate = "zip@8.6.0", reason = "yanked with no non-yanked 8.x left; calamine/rust_xlsxwriter latest still need ^8.5 — move to zip 9 with #1537; review by 2027-01-01" },
+    # The three zip 8.6.0 advisories of October 2026 are all in archive
+    # extraction to disk (`ZipArchive::extract`, `ZipStreamReader::extract`):
+    # permission bits and symlink targets taken from the archive. Nothing
+    # here calls either; calamine and rust_xlsxwriter read and write
+    # entries only. Patched only in zip 9, which those crates do not take
+    # yet: remove with the zip@8.6.0 entry above (#1537).
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 SUID/SGID bits kept by extract(); never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 extract() symlink targets outside the destination; never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 extract() permissions through symlinks; never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
 ]
