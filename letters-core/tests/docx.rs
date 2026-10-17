@@ -1987,6 +1987,35 @@ fn floating_header_and_footer_lines_survive() {
     assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
 }
 
+/// The first page's own header and footer survive a save and reopen as
+/// Word's "different first page" (`w:titlePg` and the `first` parts),
+/// and the running ones stay the others'.
+#[test]
+fn the_first_pages_own_header_and_footer_survive() {
+    use letters_core::{Alignment, HfLine, HfStory};
+    let mut d = Document::from_plain_text("body");
+    d.header = Some("Running title".into());
+    d.footer = Some("{page}".into());
+    d.first_header = Some(HfStory {
+        text: "Letterhead\nDepartment".into(),
+        alignment: Alignment::Center,
+        lines: vec![
+            HfLine { alignment: Alignment::Center, space_after_pt: 12.0, line_height: Some(LineHeight::Exact(10.0)), ..Default::default() },
+            HfLine { alignment: Alignment::Right, space_before_pt: 3.0, line_height: Some(LineHeight::Minimum(14.0)), ..Default::default() },
+        ],
+        ..Default::default()
+    });
+    d.first_footer = Some(HfStory { text: "Page {page}".into(), ..Default::default() });
+    let rt = round_trip(&d);
+    assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (Some("Running title"), Some("{page}")));
+    let first = rt.first_header.as_ref().expect("the first page's own header");
+    assert_eq!((first.text.as_str(), first.alignment), ("Letterhead\nDepartment", Alignment::Center));
+    assert_eq!(first.lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>(), d.first_header.as_ref().unwrap().lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>());
+    assert_eq!(rt.first_footer.as_ref().map(|s| s.text.as_str()), Some("Page {page}"));
+    // Without a first page of its own, a document reads none.
+    assert_eq!(round_trip(&Document::from_plain_text("body")).first_header, None);
+}
+
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with
 /// `w:val="none"` over the table's grid).
 #[test]

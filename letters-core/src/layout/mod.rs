@@ -583,8 +583,11 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
     // Each section's paragraphs and page (LET-005S); a document of one
     // section is one run on its own page or the application's.
     let runs = crate::sections::runs(doc, opts.page);
-    let geometries: Vec<PageGeometry> = runs.iter().enumerate().map(|(k, (_, g))| section_geometry(doc, k, *g, opts, shaper)).collect();
-    let mut flow = Flow::new(geometries[0], opts);
+    let geometries: Vec<PageGeometry> = runs.iter().enumerate().map(|(k, (_, g))| section_geometry(doc, k, *g, false, opts, shaper)).collect();
+    // The first page makes room for its own header and footer.
+    let first = if doc.first_header.is_some() || doc.first_footer.is_some() { section_geometry(doc, 0, runs[0].1, true, opts, shaper) } else { geometries[0] };
+    let mut flow = Flow::new(first, opts);
+    flow.geometry = geometries[0];
     // Each footnote's height at the foot of a page, for the flow to keep
     // room for the notes of the lines it places.
     flow.shape_notes(doc, shaper);
@@ -638,17 +641,13 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
 /// above the top margin pushes the body down, and a tall footer pushes its
 /// foot up, as Word and LibreOffice lay a page out: a letterhead's logo is
 /// not drawn over the text.
-fn section_geometry(doc: &Document, k: usize, page: PageGeometry, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> PageGeometry {
+fn section_geometry(doc: &Document, k: usize, page: PageGeometry, first: bool, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> PageGeometry {
     let mut geometry = page;
     let width = content_width(&geometry);
-    let (header, header_own) = crate::sections::header(doc, k);
-    let (footer, footer_own) = crate::sections::footer(doc, k);
-    let header_pictures: &[Run] = if header_own { &doc.header_pictures } else { &[] };
-    let footer_pictures: &[Run] = if footer_own { &doc.footer_pictures } else { &[] };
-    let header_lines: &[HfLine] = if header_own { &doc.header_lines } else { &[] };
-    let footer_lines: &[HfLine] = if footer_own { &doc.footer_lines } else { &[] };
-    let header_h = header_footer_height(header_pictures, header, doc.header_alignment, header_lines, width, opts, shaper);
-    let footer_h = header_footer_height(footer_pictures, footer, doc.footer_alignment, footer_lines, width, opts, shaper);
+    let [header_h, footer_h] = [true, false].map(|header| {
+        let s = page_story(doc, k, first, header);
+        header_footer_height(s.pictures, s.text, s.alignment, s.lines, width, opts, shaper)
+    });
     if header_h > 0.0 {
         geometry.margin_top_pt = geometry.margin_top_pt.max(opts.header_distance_pt + header_h);
     }
@@ -656,6 +655,32 @@ fn section_geometry(doc: &Document, k: usize, page: PageGeometry, opts: &LayoutO
         geometry.margin_bottom_pt = geometry.margin_bottom_pt.max(opts.footer_distance_pt + footer_h);
     }
     geometry
+}
+
+/// A page's header or footer: its text, the pictures above it, its
+/// alignment and its lines.
+struct PageStory<'d> {
+    text: Option<&'d str>,
+    pictures: &'d [Run],
+    alignment: crate::model::Alignment,
+    lines: &'d [HfLine],
+}
+
+/// The header (`header`) or footer on section `k`'s pages, or on the
+/// document's first page (`first`) when that has its own. A section's
+/// own header or footer has its text alone: the document's lines and
+/// pictures go with the document's.
+fn page_story(doc: &Document, k: usize, first: bool, header: bool) -> PageStory<'_> {
+    let own = if header { &doc.first_header } else { &doc.first_footer };
+    if let Some(s) = own.as_ref().filter(|_| first && k == 0) {
+        return PageStory { text: Some(&s.text), pictures: &s.pictures, alignment: s.alignment, lines: &s.lines };
+    }
+    let ((text, doc_own), pictures, alignment, lines) = if header {
+        (crate::sections::header(doc, k), &doc.header_pictures, doc.header_alignment, &doc.header_lines)
+    } else {
+        (crate::sections::footer(doc, k), &doc.footer_pictures, doc.footer_alignment, &doc.footer_lines)
+    };
+    PageStory { text, pictures: if doc_own { pictures } else { &[] }, alignment, lines: if doc_own { lines } else { &[] } }
 }
 
 /// The width between a page's side margins.
@@ -1592,13 +1617,19 @@ impl<'o> Flow<'o> {
         self.geometry.margin_left_pt + self.column as f64 * (self.column_width() + self.geometry.column_gap_pt)
     }
 
+    /// The page being filled's own geometry: the section's, or the first
+    /// page's when its header or footer is its own (`Document::first_header`).
+    fn page_geometry(&self) -> &PageGeometry {
+        self.pages.last().map_or(&self.geometry, |p| &p.geometry)
+    }
+
     fn top(&self) -> f64 {
-        self.geometry.margin_top_pt
+        self.page_geometry().margin_top_pt
     }
 
     /// The foot of the text area, above the bottom margin.
     fn foot(&self) -> f64 {
-        foot_of(&self.geometry)
+        foot_of(self.page_geometry())
     }
 
     fn note_len(&self, note: usize) -> usize {
@@ -1838,14 +1869,8 @@ impl<'o> Flow<'o> {
             let g = page.geometry;
             let (left, width, height) = (g.margin_left_pt, content_width(&g), page.height_pt);
             let section = page_sections.get(page.index).copied().unwrap_or(0);
-            let (header, header_own) = crate::sections::header(doc, section);
-            let (footer, footer_own) = crate::sections::footer(doc, section);
-            // A section's own header or footer has its text alone: the
-            // document's lines and pictures go with the document's.
-            for (source, template, pictures, alignment, story) in [
-                (Source::Header, header, if header_own { doc.header_pictures.as_slice() } else { &[] }, doc.header_alignment, if header_own { doc.header_lines.as_slice() } else { &[] }),
-                (Source::Footer, footer, if footer_own { doc.footer_pictures.as_slice() } else { &[] }, doc.footer_alignment, if footer_own { doc.footer_lines.as_slice() } else { &[] }),
-            ] {
+            for source in [Source::Header, Source::Footer] {
+                let PageStory { text: template, pictures, alignment, lines: story } = page_story(doc, section, page.index == 0, source == Source::Header);
                 let row_h = picture_row_height(pictures, width);
                 let text_h = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
                     let text = page_field_text(t, page.index + 1, total);
@@ -1860,9 +1885,9 @@ impl<'o> Flow<'o> {
                 let text = page_field_text(template, page.index + 1, total);
                 let lines = header_footer_lines(&text, alignment, story, pictures, width, opts, shaper);
                 // Under the pictures' row.
-                let mut y = top + row_h;
+                let (boxes, _) = hf_line_boxes(&text, &lines, story);
                 let chars: Vec<char> = text.chars().collect();
-                for (k, lb) in lines.iter().enumerate() {
+                for (k, (lb, &(dy, h, ascent))) in lines.iter().zip(&boxes).enumerate() {
                     // The line of the text this one is on: as many breaks
                     // before it.
                     let story_line = (!story.is_empty()).then(|| {
@@ -1873,7 +1898,7 @@ impl<'o> Flow<'o> {
                     // across the page, out of the flow.
                     let float = story_line.as_ref().and_then(|l| l.float);
                     let (x_pt, top_pt) = match float {
-                        None => (left + lb.x_pt, y),
+                        None => (left + lb.x_pt, top + row_h + dy),
                         Some(f) => {
                             let across = match story_line.as_ref().map_or(alignment, |l| l.alignment) {
                                 crate::model::Alignment::Center => page.width_pt / 2.0 - (left + width / 2.0),
@@ -1897,13 +1922,10 @@ impl<'o> Flow<'o> {
                         box_width_pt: width,
                         x_pt,
                         top_pt,
-                        baseline_pt: top_pt + lb.ascent_pt,
-                        height_pt: lb.natural_height(),
+                        baseline_pt: top_pt + ascent,
+                        height_pt: h,
                         story_line,
                     });
-                    if float.is_none() {
-                        y += lb.natural_height();
-                    }
                 }
             }
         }
@@ -1969,15 +1991,41 @@ fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: cra
 /// The room a header's or footer's `lines` of `text` take: a floating
 /// line's (`HfLine::float`) none.
 fn flow_height(text: &str, lines: &[LineBox], story: &[HfLine]) -> f64 {
+    hf_line_boxes(text, lines, story).1
+}
+
+/// Where each of a header's or footer's lines sits below the text's top:
+/// its top, height and baseline, each paragraph with the room above and
+/// below it and its line height rule (`HfLine`); and the text's height,
+/// to the foot of its last line.
+/// A floating line takes no room.
+fn hf_line_boxes(text: &str, lines: &[LineBox], story: &[HfLine]) -> (Vec<(f64, f64, f64)>, f64) {
     let chars: Vec<char> = text.chars().collect();
-    lines
-        .iter()
-        .filter(|lb| {
-            let n = chars[..lb.start.min(chars.len())].iter().filter(|&&c| c == '\n').count();
-            story.get(n).is_none_or(|l| l.float.is_none())
-        })
-        .map(LineBox::natural_height)
-        .sum()
+    let (mut y, mut out, mut prev) = (0.0, Vec::with_capacity(lines.len()), None::<usize>);
+    for lb in lines {
+        let n = chars[..lb.start.min(chars.len())].iter().filter(|&&c| c == '\n').count();
+        let line = story.get(n);
+        let natural = lb.natural_height();
+        if line.is_some_and(|l| l.float.is_some()) {
+            out.push((y, natural, lb.ascent_pt));
+            continue;
+        }
+        if prev != Some(n) {
+            y += prev.and_then(|p| story.get(p)).map_or(0.0, |p| p.space_after_pt.max(0.0));
+            y += line.map_or(0.0, |l| l.space_before_pt.max(0.0));
+            prev = Some(n);
+        }
+        let (h, ascent) = match line.and_then(|l| l.line_height) {
+            Some(crate::model::LineHeight::Exact(pt)) if pt.is_finite() && pt > 0.0 => (pt, 0.8 * pt),
+            Some(crate::model::LineHeight::Minimum(pt)) if pt.is_finite() && pt > natural => (pt, lb.ascent_pt + pt - natural),
+            _ => (natural, lb.ascent_pt),
+        };
+        out.push((y, h, ascent));
+        y += h;
+    }
+    // The last paragraph's space after is outside the part, as Writer
+    // sizes a header to its text.
+    (out, y)
 }
 
 /// The lines of a header's or footer's text under its pictures. The
