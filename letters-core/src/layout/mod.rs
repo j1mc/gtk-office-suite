@@ -758,7 +758,8 @@ struct Shaped {
 pub fn paragraph_box_x(p: &Paragraph) -> f64 {
     let st = &p.style;
     let list_indent = if st.list == ListKind::None { 0.0 } else { lists::text_indent_pt(st.list_level) };
-    let quote_indent = if st.block_quote { QUOTE_INDENT_PT } else { 0.0 };
+    // A file's own quote style gives its indent in `left_indent_pt`.
+    let quote_indent = if st.block_quote && !st.own_look { QUOTE_INDENT_PT } else { 0.0 };
     st.left_indent_pt.max(0.0) + list_indent + quote_indent
 }
 

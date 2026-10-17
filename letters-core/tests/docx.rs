@@ -430,6 +430,30 @@ fn block_quote_survives() {
     let rt = round_trip(&d);
     assert!(rt.paragraphs[0].style.block_quote, "block quote lost");
     assert!(!rt.paragraphs[1].style.block_quote);
+    // It reopens looking as it did: the Quote style written is the
+    // built-in quote's look, 18pt in and italic, now the file's own.
+    let q = &rt.paragraphs[0];
+    assert!(q.style.own_look);
+    assert_eq!(q.style.left_indent_pt, letters_core::layout::QUOTE_INDENT_PT);
+    assert!(q.runs.iter().all(|r| r.style.italic), "{:?}", q.runs);
+}
+
+/// A file's own Quote style is the quote's look: Writer draws the render
+/// lab's block quote at the margin, its Quote style setting italics but no
+/// indent, so none is added to it.
+#[test]
+fn a_files_own_quote_style_is_its_look() {
+    let d = doctor_parts(&Document::from_plain_text("wise words"), |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        *body = body.replacen("<w:p>", "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>", 1);
+        let styles = parts.get_mut("word/styles.xml").unwrap();
+        let at = styles.find("w:styleId=\"Quote\"").and_then(|i| styles[..i].rfind("<w:style ")).unwrap();
+        let end = at + styles[at..].find("</w:style>").unwrap() + "</w:style>".len();
+        styles.replace_range(at..end, "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:rPr><w:i/></w:rPr></w:style>");
+    });
+    let q = &d.paragraphs[0].style;
+    assert!(q.block_quote && q.own_look, "{q:?}");
+    assert_eq!(letters_core::layout::paragraph_box_x(&d.paragraphs[0]), 0.0, "no indent of its own, none added");
 }
 
 #[test]

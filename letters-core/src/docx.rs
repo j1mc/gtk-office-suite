@@ -2653,7 +2653,7 @@ fn patch_styles_xml(xml: &str, defaults: &str, headings: &str) -> String {
     // quote and inline code read back as plain text after a pass through
     // Writer. The names are the ones Writer itself uses for these.
     for (id, def) in [
-        ("Quote", "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"),
+        ("Quote", "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:ind w:left=\"360\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"),
         ("PreformattedText", "<w:style w:type=\"paragraph\" w:styleId=\"PreformattedText\"><w:name w:val=\"Preformatted Text\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Liberation Mono\" w:hAnsi=\"Liberation Mono\" w:cs=\"Liberation Mono\"/><w:sz w:val=\"20\"/></w:rPr></w:style>"),
         ("SourceText", "<w:style w:type=\"character\" w:styleId=\"SourceText\"><w:name w:val=\"Source Text\"/><w:qFormat/><w:rPr><w:rFonts w:ascii=\"Liberation Mono\" w:hAnsi=\"Liberation Mono\" w:cs=\"Liberation Mono\"/></w:rPr></w:style>"),
     ] {
@@ -3113,7 +3113,9 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         Some(id @ ("Title" | "Subtitle")) => Some(id.to_string()),
         _ => None,
     };
-    let own_look = named_style.as_deref().is_some_and(style_defined);
+    // A quote style the file defines is its own look too: its indent and
+    // italics are the paragraph's (read below), with none added.
+    let own_look = named_style.as_deref().is_some_and(style_defined) || (block_quote && p.style_id().is_some_and(style_defined));
     // Either spelling counts: the paragraph property, or a run-level
     // break before this paragraph's own text.
     let page_break_before = p.is_page_break_before() || run_page_break(p).leading;

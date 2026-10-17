@@ -982,6 +982,9 @@ fn title_subtitle_and_quotes_have_their_own_looks() {
     assert_eq!(xs[2] - xs[4], QUOTE_INDENT_PT);
     assert_eq!(xs[0], xs[4]);
     assert_eq!(paragraph_look(&d.paragraphs[4].style), Look::Body);
+    // A file's own quote style gives the indent; none is added to it.
+    d.paragraphs[2].style.own_look = true;
+    assert_eq!(paragraph_box_x(&d.paragraphs[2]), 0.0);
 }
 
 /// The page stack's lookups (#1282) against the definitions they replace:
