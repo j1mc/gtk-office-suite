@@ -182,6 +182,23 @@ fn a_cells_paragraphs_collapse_the_space_between_them() {
     assert_eq!(height, 4.5 + LINE + 4.5 + LINE + 4.5 + CELL_RULE_PT);
 }
 
+/// A list item in a cell has its marker, as in the body: the crime
+/// supervisor form's bullets beside its logo, numbered items counted.
+#[test]
+fn a_list_item_in_a_cell_has_its_marker() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let item = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, list: crate::model::ListKind::Numbered, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [item("one"), item("two")]);
+    let t = lay(&d);
+    let markers: Vec<(String, f64)> = t.pages[0].items.iter().filter_map(|i| match i { Item::Marker { text, x_pt, .. } => Some((text.clone(), *x_pt)), _ => None }).collect();
+    assert_eq!(markers.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), ["1.", "2."]);
+    let text_x = line_items(&t.pages[0])[0].2;
+    assert!(markers[0].1 < text_x, "the marker hangs before the text: {markers:?} {text_x}");
+}
+
 /// An unruled table's cells draw no rule, and its rows hold no rule's
 /// height: a one-line row is its line.
 #[test]
@@ -309,8 +326,10 @@ fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
 
 /// A table is drawn with the file's column widths: a narrow number column
 /// beside a wide text one, as Word and LibreOffice draw an agenda. Widths
-/// wider than the column box are scaled to fit, and a table whose column
-/// count changed since it was read falls back to equal columns.
+/// wider than the text run on into the right margin and are scaled only
+/// past the page's edge; a table sized as a share of the text's width is
+/// scaled to it; and a table whose column count changed since it was read
+/// falls back to equal columns.
 #[test]
 fn a_table_takes_the_files_column_widths() {
     let cells_x_w = |d: &Document| -> Vec<(f64, f64)> {
@@ -330,9 +349,16 @@ fn a_table_takes_the_files_column_widths() {
     assert_eq!(cells_x_w(&d), [(x0, 36.0), (x0 + 36.0, 400.0)]);
 
     let box_w = 595.3 - 144.0;
+    d.table_columns.insert(table, vec![240.0, 240.0]);
+    assert_eq!(cells_x_w(&d), [(x0, 240.0), (x0 + 240.0, 240.0)], "into the right margin, as the file has it");
     d.table_columns.insert(table, vec![box_w, box_w]);
     let got = cells_x_w(&d);
-    assert!((got[0].1 - box_w / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + box_w / 2.0)).abs() < 1e-9, "scaled to fit: {got:?}");
+    let room = box_w + 72.0;
+    assert!((got[0].1 - room / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + room / 2.0)).abs() < 1e-9, "scaled to the page's edge: {got:?}");
+    d.table_relative.insert(table);
+    let got = cells_x_w(&d);
+    assert!((got[0].1 - box_w / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + box_w / 2.0)).abs() < 1e-9, "a share of the text fits it: {got:?}");
+    d.table_relative.clear();
 
     d.table_columns.insert(table, vec![36.0, 200.0, 100.0]);
     let got = cells_x_w(&d);

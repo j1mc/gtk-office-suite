@@ -189,6 +189,9 @@ impl PangoShaper {
             if st.italic {
                 add(pango::AttrInt::new_style(pango::Style::Italic).into());
             }
+            if st.caps {
+                add(pango::AttrInt::new_text_transform(pango::TextTransform::Uppercase).into());
+            }
             if st.underline || st.link.is_some() {
                 add(pango::AttrInt::new_underline(pango::Underline::Single).into());
             }
