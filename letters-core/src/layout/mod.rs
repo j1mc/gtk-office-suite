@@ -1141,7 +1141,13 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let cols = cells.iter().map(|(_, c)| c.col).max().unwrap_or(0) + 1;
     let rows = cells.iter().map(|(_, c)| c.row).max().unwrap_or(0) + 1;
     let table_w = flow.column_width();
-    let widths = column_widths(doc.table_columns.get(&first.table), cols as usize, table_w);
+    // A table the file made wider than the text runs on into the right
+    // margin, as Word and Writer draw it; only one wider than the page's
+    // edge is narrowed. One sized as a share of the text's width fits it,
+    // and between columns a table keeps to its column.
+    let fits = flow.geometry.columns > 1 || doc.table_relative.contains(&first.table);
+    let room = if fits { table_w } else { table_w + flow.geometry.margin_right_pt.max(0.0) };
+    let widths = column_widths(doc.table_columns.get(&first.table), cols as usize, table_w, room);
     let col_x: Vec<f64> = widths.iter().scan(0.0, |x, w| { let at = *x; *x += w; Some(at) }).collect();
     let spans: &[crate::model::CellSpan] = doc.table_spans.get(&first.table).map_or(&[], Vec::as_slice);
     // The cell at a grid position, as (columns, rows) it spans; `None`
@@ -1445,14 +1451,14 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
     }
 }
 
-/// A table's `cols` column widths: the file's, scaled down to `table_w` if
+/// A table's `cols` column widths: the file's, scaled down to `room` if
 /// they add up to more, or equal columns across `table_w` without them (or
 /// when the table has gained or lost a column since).
-fn column_widths(file: Option<&Vec<f64>>, cols: usize, table_w: f64) -> Vec<f64> {
+fn column_widths(file: Option<&Vec<f64>>, cols: usize, table_w: f64, room: f64) -> Vec<f64> {
     match file.filter(|w| w.len() == cols && w.iter().all(|x| x.is_finite() && *x > 0.0)) {
         Some(w) => {
             let total: f64 = w.iter().sum();
-            let scale = if total > table_w { table_w / total } else { 1.0 };
+            let scale = if total > room { room / total } else { 1.0 };
             w.iter().map(|x| x * scale).collect()
         }
         None => vec![table_w / cols as f64; cols],

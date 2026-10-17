@@ -1920,6 +1920,22 @@ fn a_regular_run_in_a_heading_survives() {
     assert!(!rt.paragraphs[0].runs[0].style.bold);
 }
 
+/// A table sized as a share of the text's width stays so through a save
+/// and reopen (`w:tblW w:type="pct"`); one with the file's widths does not
+/// become one.
+#[test]
+fn a_table_sized_to_the_text_survives() {
+    let mut d = Document::from_plain_text("after");
+    let shared = d.insert_table_at(0, 1, 2);
+    d.table_columns.insert(shared, vec![200.0, 300.0]);
+    d.table_relative.insert(shared);
+    let rt = round_trip(&d);
+    let table = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+    assert_eq!(rt.table_relative.iter().copied().collect::<Vec<_>>(), [table]);
+    d.table_relative.clear();
+    assert!(round_trip(&d).table_relative.is_empty());
+}
+
 /// Capitals survive a save and reopen with the text in its own case, and
 /// a paragraph style's `w:caps` puts its runs in capitals: the crime
 /// supervisor form's title, typed "Crime SUPERVISOR STANDARD and".
