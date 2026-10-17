@@ -1920,6 +1920,18 @@ fn a_regular_run_in_a_heading_survives() {
     assert!(!rt.paragraphs[0].runs[0].style.bold);
 }
 
+/// A row kept on one page stays so through a save and reopen
+/// (`w:cantSplit`); the others do not become so.
+#[test]
+fn a_row_kept_whole_survives() {
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 3, 1);
+    d.table_whole_rows.entry(table).or_default().insert(1);
+    let rt = round_trip(&d);
+    let id = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+    assert_eq!(rt.table_whole_rows.get(&id).map(|r| r.iter().copied().collect::<Vec<_>>()), Some(vec![1]));
+}
+
 /// A table sized as a share of the text's width stays so through a save
 /// and reopen (`w:tblW w:type="pct"`); one with the file's widths does not
 /// become one.
@@ -1973,6 +1985,35 @@ fn floating_header_and_footer_lines_survive() {
     let rt = round_trip(&d);
     assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
     assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+}
+
+/// The first page's own header and footer survive a save and reopen as
+/// Word's "different first page" (`w:titlePg` and the `first` parts),
+/// and the running ones stay the others'.
+#[test]
+fn the_first_pages_own_header_and_footer_survive() {
+    use letters_core::{Alignment, HfLine, HfStory};
+    let mut d = Document::from_plain_text("body");
+    d.header = Some("Running title".into());
+    d.footer = Some("{page}".into());
+    d.first_header = Some(HfStory {
+        text: "Letterhead\nDepartment".into(),
+        alignment: Alignment::Center,
+        lines: vec![
+            HfLine { alignment: Alignment::Center, space_after_pt: 12.0, line_height: Some(LineHeight::Exact(10.0)), ..Default::default() },
+            HfLine { alignment: Alignment::Right, space_before_pt: 3.0, line_height: Some(LineHeight::Minimum(14.0)), ..Default::default() },
+        ],
+        ..Default::default()
+    });
+    d.first_footer = Some(HfStory { text: "Page {page}".into(), ..Default::default() });
+    let rt = round_trip(&d);
+    assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (Some("Running title"), Some("{page}")));
+    let first = rt.first_header.as_ref().expect("the first page's own header");
+    assert_eq!((first.text.as_str(), first.alignment), ("Letterhead\nDepartment", Alignment::Center));
+    assert_eq!(first.lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>(), d.first_header.as_ref().unwrap().lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>());
+    assert_eq!(rt.first_footer.as_ref().map(|s| s.text.as_str()), Some("Page {page}"));
+    // Without a first page of its own, a document reads none.
+    assert_eq!(round_trip(&Document::from_plain_text("body")).first_header, None);
 }
 
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with

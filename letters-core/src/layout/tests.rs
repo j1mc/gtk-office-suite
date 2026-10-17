@@ -2,7 +2,7 @@
 // line, so an A4 page with 1in margins holds 75 chars × 46 lines.
 
 use super::*;
-use crate::model::{Alignment, BorderStyle, CellFill, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
+use crate::model::{Alignment, BorderStyle, CellFill, HfStory, LineHeight, ParaBorder, ParaBorders, ParaStyle, RowHeight, TabAlign, TabLeader, TabStop, TableCell, CellPadding};
 
 const LINE: f64 = 15.0;
 const LINES_PER_PAGE: usize = 46;
@@ -440,6 +440,34 @@ fn a_tall_row_splits_across_pages() {
     assert_eq!(b.first().map(String::as_str), Some(format!("line {n}").as_str()), "the next line, not a repeat or a gap");
 }
 
+/// A row kept on one page that does not fit what is left of a page
+/// starts the next, as Writer moves the social housing dictionary's long
+/// rows whole; one not kept so splits there; and one taller than a page
+/// splits all the same.
+#[test]
+fn a_row_kept_whole_starts_the_next_page() {
+    let build = |filler: usize, row_lines: usize| -> (Document, u32) {
+        let mut d = doc_of(filler, "filler");
+        d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("after")] });
+        let table = d.insert_table_at(filler, 1, 1);
+        let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+        let lines: Vec<Paragraph> = (0..row_lines)
+            .map(|n| Paragraph { style: ParaStyle { table_cell: Some(TableCell { table, row: 0, col: 0 }), ..Default::default() }, runs: vec![Run::plain(format!("line {n}"))] })
+            .collect();
+        d.paragraphs.splice(at..=at, lines);
+        (d, table)
+    };
+    let first_cell_page = |d: &Document| lay(d).pages.iter().position(|p| p.items.iter().any(|i| matches!(i, Item::Cell { .. }))).unwrap();
+    // 40 lines of the page's 46 taken, a 10-line row after them.
+    let (mut d, table) = build(40, 10);
+    assert_eq!(first_cell_page(&d), 0, "not kept whole, the row splits at the foot");
+    d.table_whole_rows.entry(table).or_default().insert(0);
+    assert_eq!(first_cell_page(&d), 1, "kept whole, it starts the next page");
+    let (mut d, table) = build(40, 80);
+    d.table_whole_rows.entry(table).or_default().insert(0);
+    assert_eq!(first_cell_page(&d), 0, "taller than a page, it splits all the same");
+}
+
 /// A shaded cell carries its colour to the page (a form's grey header
 /// cells), and the shading moves with its cell when rows and columns are
 /// inserted or deleted.
@@ -599,6 +627,30 @@ fn headers_and_footers_repeat_with_page_numbers() {
         _ => None,
     });
     assert!((footer_top.unwrap() - (841.9 - 36.0)).abs() < 1e-9, "footer bottom sits at the footer distance");
+}
+
+/// The first page's own header (`Document::first_header`, a title page's
+/// letterhead) is drawn on the first page alone, which makes room for it
+/// and its lines' spacing; the pages after have the running header and
+/// the margin it leaves them.
+#[test]
+fn the_first_page_has_its_own_header_and_the_room_it_needs() {
+    let mut d = doc_of(60, "x");
+    d.header = Some("Report".into());
+    let spaced = HfLine { space_after_pt: 12.0, ..Default::default() };
+    d.first_header = Some(HfStory { text: "Letterhead\n\n\n\n\n".into(), lines: vec![spaced; 6], ..Default::default() });
+    let t = lay(&d);
+    let headers = |p: &Page| -> Vec<String> {
+        p.items.iter().filter_map(|i| match i { Item::Line { source: Source::Header, text, .. } => Some(text.clone()), _ => None }).collect()
+    };
+    let first_body = |p: &Page| p.items.iter().find_map(|i| match i { Item::Line { source: Source::Paragraph(_), top_pt, .. } => Some(*top_pt), _ => None }).unwrap();
+    assert_eq!(headers(&t.pages[0]).first().map(String::as_str), Some("Letterhead"));
+    assert!(!headers(&t.pages[0]).contains(&"Report".to_string()), "{:?}", headers(&t.pages[0]));
+    assert_eq!(headers(&t.pages[1]), vec!["Report"]);
+    // Six 15pt lines and the space after the first five, below the
+    // header's distance from the page's top.
+    assert!((first_body(&t.pages[0]) - (36.0 + 6.0 * 15.0 + 5.0 * 12.0)).abs() < 1e-9, "{}", first_body(&t.pages[0]));
+    assert_eq!(first_body(&t.pages[1]), 72.0, "the running header fits the margin");
 }
 
 #[test]
