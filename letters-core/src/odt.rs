@@ -722,18 +722,24 @@ fn content_xml(doc: &Document) -> String {
                     };
                     // The file's row heights, as row styles: a minimum
                     // height, or a fixed one.
+                    // A row kept on one page says so too.
                     let row_styles: Vec<String> = (0..rows as usize)
-                        .map(|r| match doc.table_rows.get(&c.table).and_then(|h| h.get(r).copied().flatten()) {
-                            Some(h) => {
-                                let name = format!("Table{tables_written}.R{r}");
+                        .map(|r| {
+                            let height = doc.table_rows.get(&c.table).and_then(|h| h.get(r).copied().flatten()).map(|h| {
                                 let prop = if h.exact { "style:row-height" } else { "style:min-row-height" };
-                                auto.push_str(&format!(
-                                    "<style:style style:name=\"{name}\" style:family=\"table-row\"><style:table-row-properties {prop}=\"{:.2}pt\"/></style:style>",
-                                    h.pt
-                                ));
-                                format!(" table:style-name=\"{name}\"")
+                                format!(" {prop}=\"{:.2}pt\"", h.pt)
+                            });
+                            let whole = doc.table_whole_rows.get(&c.table).is_some_and(|w| w.contains(&(r as u32)));
+                            if height.is_none() && !whole {
+                                return String::new();
                             }
-                            None => String::new(),
+                            let name = format!("Table{tables_written}.R{r}");
+                            auto.push_str(&format!(
+                                "<style:style style:name=\"{name}\" style:family=\"table-row\"><style:table-row-properties{}{}/></style:style>",
+                                height.unwrap_or_default(),
+                                if whole { " fo:keep-together=\"always\"" } else { "" }
+                            ));
+                            format!(" table:style-name=\"{name}\"")
                         })
                         .collect();
                     body.push_str(&format!("<table:table table:name=\"Table{tables_written}\"{table_style}>{columns}"));
@@ -1503,6 +1509,9 @@ struct AutoStyles {
     cell_valign: std::collections::HashMap<String, crate::model::VAlign>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
+    /// Table-row styles that keep their row on one page
+    /// (`fo:keep-together="always"`).
+    row_whole: std::collections::HashSet<String>,
     /// Table styles that size the table as a share of the text's width
     /// (`style:rel-width`, or `table:align="margins"`).
     table_relative: std::collections::HashSet<String>,
@@ -1678,7 +1687,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1774,6 +1783,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                         };
                         if let (Some(name), Some(h)) = (cur_name.clone(), height) {
                             out.row.insert(name, h);
+                        }
+                        if let Some(name) = cur_name.clone().filter(|_| attr_val(&e, "fo:keep-together").as_deref() == Some("always")) {
+                            out.row_whole.insert(name);
                         }
                     }
                     "style:text-properties" => {
@@ -2795,7 +2807,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default() };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default() };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3141,6 +3153,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     if let Some(t) = table.as_mut().filter(|t| t.3 == table_depth) {
                         t.1 += 1;
                         t.2 = -1;
+                        if attr_val(&e, "table:style-name").is_some_and(|n| auto.row_whole.contains(&n) || named.row_whole.contains(&n)) {
+                            doc.table_whole_rows.entry(t.0).or_default().insert(t.1 as u32);
+                        }
                         if let Some(h) = attr_val(&e, "table:style-name").and_then(|n| auto.row.get(&n).copied()) {
                             let heights = row_heights.entry(t.0).or_default();
                             heights.resize(t.1 as usize, None);
@@ -4370,6 +4385,20 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
         assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+    }
+
+    /// A row kept on one page stays so through a save and reopen (its row
+    /// style's `fo:keep-together="always"`), beside a row height.
+    #[test]
+    fn a_row_kept_whole_round_trips() {
+        let mut d = Document::from_plain_text("after");
+        let table = d.insert_table_at(0, 3, 1);
+        d.table_whole_rows.entry(table).or_default().extend([0, 2]);
+        d.table_rows.insert(table, vec![None, None, Some(crate::model::RowHeight { pt: 40.0, exact: false })]);
+        let rt = round_trip(&d);
+        let id = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+        assert_eq!(rt.table_whole_rows.get(&id).map(|r| r.iter().copied().collect::<Vec<_>>()), Some(vec![0, 2]));
+        assert_eq!(rt.table_rows.get(&id).and_then(|r| r.get(2).copied().flatten()).map(|h| h.pt), Some(40.0));
     }
 
     /// A table sized as a share of the text's width stays so through a

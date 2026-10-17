@@ -2120,6 +2120,31 @@ fn header_and_footer_lines_survive_writer_both_ways() {
     close(&rt, "odt → Writer → docx");
 }
 
+/// A table row kept on one page stays so through Writer both ways (Word's
+/// `w:cantSplit`, ODF's row `fo:keep-together="always"`), and a row not
+/// kept so is not made so.
+#[test]
+fn a_row_kept_whole_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 3, 1);
+    d.table_whole_rows.entry(table).or_default().insert(1);
+    let close = |got: &Document, how: &str| {
+        let id = got.paragraphs.iter().find_map(|p| p.style.table_cell).expect("a table").table;
+        let rows: Vec<u32> = got.table_whole_rows.get(&id).map(|r| r.iter().copied().collect()).unwrap_or_default();
+        assert_eq!(rows, [1], "{how}: only the middle row is kept whole");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("whole.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("whole.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "whole") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// Through Writer both ways, a table sized as a share of the text's width
 /// stays one (the transparency return's 100% table), and a table with its
 /// own widths, wider than the text, keeps them (the crime supervisor
