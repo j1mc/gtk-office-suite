@@ -191,7 +191,7 @@ pub fn float(document_xml: &str, floating: &[(String, String, ImageAnchor)], fir
 /// paragraph, where the reader finds them. Returns the part and its images
 /// as (relationship id, bytes, file name); a picture whose file cannot be
 /// read is left out.
-pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model::Run], alignment: crate::model::Alignment, lines: &[crate::model::HfLine]) -> (String, Vec<(String, Vec<u8>, String)>) {
+pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model::Run], alignment: crate::model::Alignment, lines: &[crate::model::HfLine], page_w_pt: f64) -> (String, Vec<(String, Vec<u8>, String)>) {
     let mut images = Vec::new();
     let mut floating = Vec::new();
     let mut drawings = String::new();
@@ -218,15 +218,28 @@ pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model:
         images.push((rel, bytes, name));
     }
     let mut body = String::new();
+    // A floating line is a text box, in the paragraph of the next line
+    // that is not (or one of its own after the last), where a reader finds
+    // it ahead of that line.
+    let mut boxes = String::new();
+    let mut first = true;
     for (k, text) in text.split('\n').enumerate() {
         let own = lines.get(k);
+        if let Some((line, float)) = own.and_then(|l| l.float.map(|f| (l, f))) {
+            boxes.push_str(&text_box(text, line, float, page_w_pt, 9900 + k));
+            continue;
+        }
         body.push_str("<w:p>");
         body.push_str(&line_properties(own.map_or(alignment, |l| l.alignment), own.map_or(&[], |l| l.tab_stops.as_slice())));
-        if k == 0 {
+        if std::mem::take(&mut first) {
             body.push_str(&drawings);
         }
+        body.push_str(&std::mem::take(&mut boxes));
         body.push_str(&line_runs(text, own.map(|l| &l.look)));
         body.push_str("</w:p>");
+    }
+    if !boxes.is_empty() || first {
+        body.push_str(&format!("<w:p>{}{boxes}</w:p>", if first { drawings.as_str() } else { "" }));
     }
     let tag = if is_header { "w:hdr" } else { "w:ftr" };
     let xml = format!(
@@ -235,10 +248,46 @@ pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model:
          xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
          xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" \
          xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
-         xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">{body}</{tag}>"
+         xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\" \
+         xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" \
+         xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\">{body}</{tag}>"
     );
     let xml = if floating.is_empty() { xml } else { float(&xml, &floating, if is_header { 9700 } else { 9750 }) };
     (xml, images)
+}
+
+/// A floating header or footer line as Word's text box: the page's width,
+/// set against its top or bottom and across it by the line's alignment,
+/// its text inset from the edge as far as the line floats.
+fn text_box(text: &str, line: &crate::model::HfLine, float: crate::model::HfFloat, page_w_pt: f64, id: usize) -> String {
+    use crate::model::{Alignment, HfFloat};
+    let emu = |pt: f64| (pt * 12_700.0).round().max(0.0) as i64;
+    let (v_align, anchor, t_ins, b_ins) = match float {
+        HfFloat::Top(d) => ("top", "t", emu(d), 0),
+        HfFloat::Bottom(d) => ("bottom", "b", 0, emu(d)),
+    };
+    let h_align = match line.alignment {
+        Alignment::Center => "center",
+        Alignment::Right => "right",
+        _ => "left",
+    };
+    let size_pt = line.look.font_size_hp.map_or(12.0, |hp| f64::from(hp) / 2.0);
+    let (cx, cy) = (emu(page_w_pt), emu(size_pt * 1.25) + t_ins + b_ins);
+    format!(
+        "<w:r><mc:AlternateContent><mc:Choice Requires=\"wps\"><w:drawing>\
+         <wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" relativeHeight=\"{id}\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">\
+         <wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"page\"><wp:align>{h_align}</wp:align></wp:positionH>\
+         <wp:positionV relativeFrom=\"page\"><wp:align>{v_align}</wp:align></wp:positionV>\
+         <wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/><wp:wrapNone/>\
+         <wp:docPr id=\"{id}\" name=\"Text Box {id}\"/><wp:cNvGraphicFramePr/>\
+         <a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>\
+         <wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>\
+         <wps:txbx><w:txbxContent><w:p>{props}{runs}</w:p></w:txbxContent></wps:txbx>\
+         <wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"0\" tIns=\"{t_ins}\" rIns=\"0\" bIns=\"{b_ins}\" anchor=\"{anchor}\"><a:noAutofit/></wps:bodyPr>\
+         </wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>",
+        props = line_properties(line.alignment, &line.tab_stops),
+        runs = line_runs(text, Some(&line.look)),
+    )
 }
 
 /// A header's or footer's paragraph properties: its alignment and tab
