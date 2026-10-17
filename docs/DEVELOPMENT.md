@@ -60,8 +60,9 @@ are the current homes for per-app logic; the direction of travel is to
 extract them into GTK-free `letters-core`/`tables-core`/`decks-core` crates.
 
 Engine choices (deliberate, don't churn): IronCalc for spreadsheet
-formulas/model, rdocx for DOCX I/O, pulldown-cmark for Markdown, Typst CLI
-for PDF export, zspell for spell checking, zip + quick-xml for PPTX.
+formulas/model, rdocx for DOCX I/O, pulldown-cmark for Markdown, Typst
+(in-process through `suite-export`) for PDF export, zspell for spell
+checking, zip + quick-xml for PPTX.
 
 ## Workflow
 
