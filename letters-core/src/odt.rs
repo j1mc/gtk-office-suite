@@ -938,8 +938,9 @@ fn content_xml(doc: &Document) -> String {
                 inner.push_str(&chip_xml(chip, &r.text, r.style.link.as_deref()));
                 continue;
             }
-            // A tab is an element in ODF: a raw one is only whitespace.
-            let mut run_xml = esc(&r.text).replace('\t', "<text:tab/>");
+            // A tab and a line break are elements in ODF: raw, they are
+            // only whitespace.
+            let mut run_xml = esc(&r.text).replace('\t', "<text:tab/>").replace('\n', "<text:line-break/>");
             let plain = RunStyle { revision: None, comments: Vec::new(), ..r.style.clone() };
             if plain != RunStyle::default() {
                 let ti = run_styles.iter().position(|s| *s == plain).unwrap() + 1;
@@ -1898,7 +1899,12 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                                 }
                                 out.para_text.insert(name, st);
                             } else {
+                                // A span's too: the statistical release's
+                                // Verdana is named only so.
                                 if let Some(fname) = attr_val(&e, "style:font-name").filter(|_| !st.code) {
+                                    if st.font_family.is_none() {
+                                        st.font_family = Some(fname.clone());
+                                    }
                                     out.text_font_name.insert(name.clone(), fname);
                                 }
                                 out.text.insert(name, st);
@@ -3567,6 +3573,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 }
                 "text:tab" if para.is_some() => {
                     push_text(&mut para, &span_stack, &link_stack, &rev_stack, "\t");
+                }
+                // A line break within the paragraph (Shift+Enter): the
+                // statistical release's two-line title.
+                "text:line-break" if para.is_some() => {
+                    push_text(&mut para, &span_stack, &link_stack, &rev_stack, "\n");
                 }
                 "text:p" if note.is_some() => {}
                 "text:p" | "text:h" if in_body => {
@@ -5656,6 +5667,38 @@ mod tests {
         ];
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].runs, d.paragraphs[0].runs);
+    }
+
+    /// A span's face named only by its font declaration
+    /// (`style:font-name`), as Writer saves a Word file's: the statistical
+    /// release's Verdana body came out in the paragraph's Arial.
+    #[test]
+    fn a_spans_face_named_by_its_declaration_is_read() {
+        let content = "<office:document-content><office:automatic-styles>\
+             <style:style style:name=\"T1\" style:parent-style-name=\"DefaultParagraphFont\" style:family=\"text\"><style:text-properties style:font-name=\"Verdana\" style:font-name-complex=\"Arial\" fo:font-weight=\"bold\"/></style:style>\
+             </office:automatic-styles><office:body><office:text>\
+             <text:p text:style-name=\"Normal\"><text:span text:style-name=\"T1\">Impact</text:span></text:p>\
+             </office:text></office:body></office:document-content>";
+        let styles = "<office:document-styles><office:styles>\
+             <style:style style:name=\"Normal\" style:family=\"paragraph\"><style:text-properties style:font-name=\"Arial\"/></style:style>\
+             <style:style style:name=\"DefaultParagraphFont\" style:family=\"text\"/>\
+             </office:styles></office:document-styles>";
+        let run = &read_package(content, styles).paragraphs[0].runs[0];
+        assert_eq!((run.text.as_str(), run.style.font_family.as_deref(), run.style.bold), ("Impact", Some("Verdana"), true));
+    }
+
+    /// A line break within a paragraph (`text:line-break`, Shift+Enter)
+    /// is read and written: the statistical release's title is two lines,
+    /// and ran together as one.
+    #[test]
+    fn a_line_break_within_a_paragraph_survives() {
+        let content = "<office:document-content><office:body><office:text>\
+             <text:p>Statistical Release<text:line-break/>October<text:s/>2020</text:p>\
+             </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        assert_eq!(d.paragraphs.len(), 1);
+        assert_eq!(d.paragraphs[0].runs[0].text, "Statistical Release\nOctober 2020");
+        assert_eq!(round_trip(&d).paragraphs[0].runs, d.paragraphs[0].runs);
     }
 
     #[test]
