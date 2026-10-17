@@ -2161,6 +2161,47 @@ fn a_tables_width_kind_survives_writer_both_ways() {
     close(&rt, "odt → Writer → docx");
 }
 
+/// A classification label floating at the top and foot of the page, out
+/// of the header's and footer's flow, through Writer both ways: the crime
+/// supervisor form's "OFFICIAL" text boxes, 15pt in from the page's edge.
+#[test]
+fn floating_header_and_footer_lines_survive_writer_both_ways() {
+    use letters_core::{HfFloat, HfLine, RunStyle};
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("body text");
+    let label = |float| HfLine { alignment: Alignment::Center, look: RunStyle { font_size_hp: Some(24), ..Default::default() }, float: Some(float), ..Default::default() };
+    d.header = Some("OFFICIAL\nThe Crime Contract 2025".into());
+    d.header_lines = vec![label(HfFloat::Top(15.0)), HfLine { alignment: Alignment::Center, ..Default::default() }];
+    d.footer = Some("OFFICIAL\nOctober 2025".into());
+    d.footer_lines = vec![label(HfFloat::Bottom(15.0)), HfLine::default()];
+    let close = |got: &Document, how: &str| {
+        for (name, text, lines, want_text, want_lines) in [
+            ("header", &got.header, &got.header_lines, &d.header, &d.header_lines),
+            ("footer", &got.footer, &got.footer_lines, &d.footer, &d.footer_lines),
+        ] {
+            assert_eq!(text.as_deref().map(str::trim_end), want_text.as_deref(), "{how}: {name} text");
+            let floats: Vec<Option<HfFloat>> = lines.iter().map(|l| l.float).collect();
+            assert_eq!(floats.len().min(2), 2, "{how}: {name} lines {lines:?}");
+            match (floats[0], want_lines[0].float) {
+                (Some(HfFloat::Top(a)), Some(HfFloat::Top(b))) | (Some(HfFloat::Bottom(a)), Some(HfFloat::Bottom(b))) => assert!((a - b).abs() < 0.5, "{how}: {name} inset {a}"),
+                other => panic!("{how}: {name} label floats {other:?}"),
+            }
+            assert_eq!(lines[0].alignment, Alignment::Center, "{how}: {name} label across the page");
+            assert!(floats[1..].iter().all(Option::is_none), "{how}: {name} only the label floats");
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("float.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    close(&docx::read(docx_path.to_str().unwrap()).expect("read our docx"), "our docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("float.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "float") else { return };
+    close(&rt, "odt → Writer → docx");
+}
+
 /// Keep-lines and widow control across the format boundary, both ways:
 /// our docx converted to odt, and our odt converted to docx.
 ///

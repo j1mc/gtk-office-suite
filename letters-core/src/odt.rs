@@ -1266,7 +1266,11 @@ fn styles_xml(doc: &Document) -> String {
     // Each line of the document's own header and footer with a look of
     // its own names a style of its own: its alignment, tab stops and the
     // look of its text.
-    let line_styles = |prefix: &str, lines: &[crate::model::HfLine], styles: &mut String| -> Vec<String> {
+    // A floating line is a frame: a text box the page's width, set against
+    // its top or bottom by a graphic style of its own, its text inset by
+    // the style's padding. The frame's opening markup goes with the line.
+    let page_w = doc.page.unwrap_or_default().width_pt;
+    let line_styles = |prefix: &str, lines: &[crate::model::HfLine], styles: &mut String| -> Vec<(String, Option<String>)> {
         if !own_shown {
             return Vec::new();
         }
@@ -1286,7 +1290,23 @@ fn styles_xml(doc: &Document) -> String {
                     "<style:style style:name=\"{name}\" style:family=\"paragraph\"><style:paragraph-properties{align}>{tabs}</style:paragraph-properties><style:text-properties{}/></style:style>",
                     run_style_props(&line.look)
                 ));
-                format!(" text:style-name=\"{name}\"")
+                let frame = line.float.map(|f| {
+                    let (v_pos, top, bottom) = match f {
+                        crate::model::HfFloat::Top(d) => ("top", d, 0.0),
+                        crate::model::HfFloat::Bottom(d) => ("bottom", 0.0, d),
+                    };
+                    let h_pos = match line.alignment {
+                        Alignment::Center => "center",
+                        Alignment::Right => "right",
+                        _ => "left",
+                    };
+                    styles.push_str(&format!(
+                        "<style:style style:name=\"{name}Box\" style:family=\"graphic\"><style:graphic-properties style:vertical-pos=\"{v_pos}\" style:vertical-rel=\"page\" style:horizontal-pos=\"{h_pos}\" style:horizontal-rel=\"page\" fo:padding-top=\"{top:.2}pt\" fo:padding-bottom=\"{bottom:.2}pt\" fo:padding-left=\"0pt\" fo:padding-right=\"0pt\" fo:border=\"none\" draw:stroke=\"none\" draw:fill=\"none\" draw:textarea-vertical-align=\"{v_pos}\" style:wrap=\"run-through\" style:run-through=\"foreground\"/></style:style>"
+                    ));
+                    let height = line.look.font_size_hp.map_or(12.0, |hp| f64::from(hp) / 2.0) * 1.25 + top + bottom;
+                    format!("<draw:frame draw:style-name=\"{name}Box\" draw:name=\"{name}Box\" text:anchor-type=\"paragraph\" svg:width=\"{page_w:.2}pt\" svg:height=\"{height:.2}pt\" draw:z-index=\"0\"><draw:text-box>")
+                });
+                (format!(" text:style-name=\"{name}\""), frame)
             })
             .collect()
     };
@@ -1483,6 +1503,9 @@ struct AutoStyles {
     /// Table styles that size the table as a share of the text's width
     /// (`style:rel-width`, or `table:align="margins"`).
     table_relative: std::collections::HashSet<String>,
+    /// A graphic style's padding above and below its text, in points: a
+    /// text box's inset.
+    graphic_padding: std::collections::HashMap<String, (f64, f64)>,
     /// A table-cell style's padding, when it gives one.
     cell_padding: std::collections::HashMap<String, crate::model::CellPadding>,
     /// A paragraph or table style's `style:master-page-name`: the master
@@ -1652,7 +1675,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1685,7 +1708,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                     }
                     "style:graphic-properties" if cur_family == "graphic" => {
                         if let Some(name) = cur_name.clone() {
-                            out.graphic.insert(name, graphic_placement(&e));
+                            out.graphic.insert(name.clone(), graphic_placement(&e));
+                            let pad = |a: &str| attr_val(&e, a).or_else(|| attr_val(&e, "fo:padding")).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
+                            out.graphic_padding.insert(name, (pad("fo:padding-top"), pad("fo:padding-bottom")));
                         }
                     }
                     "style:table-properties" if cur_family == "table" => {
@@ -2032,14 +2057,27 @@ fn continue_numbering(paragraphs: &mut [Paragraph], top_lists: &[(usize, usize, 
 /// "Standard", else the first one declared.
 /// A header's or footer's text as its paragraphs, one a line, each in
 /// `style`; the pictures' frames sit in the first.
-fn hf_paragraphs(text: &str, style: &str, lines: &[String], pics: &str) -> String {
-    text.split('\n')
-        .enumerate()
-        .map(|(k, line)| {
-            let style = lines.get(k).map_or(style, String::as_str);
-            format!("<text:p{style}>{}{}</text:p>", if k == 0 { pics } else { "" }, page_fields(&odf_spaces(&esc(line))))
-        })
-        .collect()
+fn hf_paragraphs(text: &str, style: &str, lines: &[(String, Option<String>)], pics: &str) -> String {
+    // A floating line's frame goes in the paragraph of the next line that
+    // is not (or one of its own after the last), where a reader finds it
+    // ahead of that line.
+    let mut out = String::new();
+    let mut frames = String::new();
+    let mut first = true;
+    for (k, line) in text.split('\n').enumerate() {
+        let (style, frame) = lines.get(k).map_or((style, None), |(s, f)| (s.as_str(), f.as_deref()));
+        let content = page_fields(&odf_spaces(&esc(line)));
+        if let Some(frame) = frame {
+            frames.push_str(&format!("{frame}<text:p{style}>{content}</text:p></draw:text-box></draw:frame>"));
+            continue;
+        }
+        let pics = if std::mem::take(&mut first) { pics } else { "" };
+        out.push_str(&format!("<text:p{style}>{pics}{}{content}</text:p>", std::mem::take(&mut frames)));
+    }
+    if !frames.is_empty() || first {
+        out.push_str(&format!("<text:p>{}{frames}</text:p>", if first { pics } else { "" }));
+    }
+    out
 }
 
 /// Text with its tabs and its runs of spaces as ODF's elements: raw, they
@@ -2109,6 +2147,90 @@ fn hf_line(style: Option<&str>, named: &AutoStyles) -> crate::model::HfLine {
         cur = named.para_parent.get(&n).cloned();
     }
     line
+}
+
+/// A text box of the document's own header or footer being read (a
+/// classification label): its lines, each with its text, look and whether
+/// that look has its first text's yet, and where the box floats. Its lines
+/// go ahead of the line of the paragraph that anchors it.
+struct HfBox {
+    lines: Vec<(String, crate::model::HfLine, bool)>,
+    float: Option<crate::model::HfFloat>,
+    across: Option<Alignment>,
+}
+
+/// Text of a header's or footer's text box added to its last line (a
+/// line of its own if it has none yet); its first text gives the line its
+/// span's look.
+fn hf_box_text(b: &mut HfBox, txt: &str, spans: &[Option<String>], named: &AutoStyles) {
+    if b.lines.is_empty() {
+        b.lines.push((String::new(), Default::default(), false));
+    }
+    let (text, line, styled) = b.lines.last_mut().expect("a line");
+    if !*styled && !txt.trim().is_empty() {
+        *styled = true;
+        if let Some(span) = spans.iter().rev().flatten().next() {
+            hf_span_look(&mut line.look, span, named);
+        }
+    }
+    text.push_str(txt);
+}
+
+/// A header's or footer's text box read: its lines with text go ahead of
+/// the line being read (the paragraph that anchors the box), floating
+/// where the box does and across the page as it sits. A box that does not
+/// float against the page has its text on that line.
+fn finish_hf_box(b: HfBox, text: &mut Option<String>, lines: &mut Vec<crate::model::HfLine>) {
+    let shown: Vec<(String, crate::model::HfLine)> = b
+        .lines
+        .into_iter()
+        .filter(|(t, ..)| !t.trim().is_empty())
+        .map(|(t, mut line, _)| {
+            line.float = b.float;
+            if let Some(a) = b.across {
+                line.alignment = a;
+            }
+            (t, line)
+        })
+        .collect();
+    if shown.is_empty() {
+        return;
+    }
+    let t = text.get_or_insert_with(String::new);
+    // A box placed against its paragraph sits over that paragraph's line:
+    // its text is that line's.
+    if b.float.is_none() {
+        t.extend(shown.iter().map(|(s, _)| s.as_str()));
+        return;
+    }
+    let at = t.rfind('\n').map_or(0, |i| i + 1);
+    let joined: String = shown.iter().map(|(s, _)| format!("{s}\n")).collect();
+    t.insert_str(at, &joined);
+    let k = lines.len().saturating_sub(1);
+    lines.splice(k..k, shown.into_iter().map(|(_, l)| l));
+}
+
+/// Where a header's or footer's text box of graphic style `style` (at
+/// `svg:y` `y`) floats and how it sits across the page: set against the
+/// page's top or bottom, its text inset by the style's padding; `None`
+/// for a box placed against anything else.
+fn hf_box_place(style: Option<&str>, y: Option<&str>, named: &AutoStyles) -> (Option<crate::model::HfFloat>, Option<Alignment>) {
+    use crate::model::{AnchorAlign, AnchorFrame, HfFloat};
+    let Some(place) = style.and_then(|n| named.graphic.get(n)) else { return (None, None) };
+    let (top, bottom) = style.and_then(|n| named.graphic_padding.get(n)).copied().unwrap_or((0.0, 0.0));
+    let float = match (place.v_from, place.v_align) {
+        (AnchorFrame::Page, Some(AnchorAlign::Start)) => Some(HfFloat::Top(top)),
+        (AnchorFrame::Page, Some(AnchorAlign::End)) => Some(HfFloat::Bottom(bottom)),
+        (AnchorFrame::Page, None) => y.and_then(parse_length_pt).map(|y| HfFloat::Top(y + top)),
+        _ => None,
+    };
+    let across = match (place.h_from, place.h_align) {
+        (AnchorFrame::Page | AnchorFrame::Margin, Some(AnchorAlign::Center)) => Some(Alignment::Center),
+        (AnchorFrame::Page | AnchorFrame::Margin, Some(AnchorAlign::End)) => Some(Alignment::Right),
+        (AnchorFrame::Page | AnchorFrame::Margin, Some(AnchorAlign::Start)) => Some(Alignment::Left),
+        _ => None,
+    };
+    (float, across)
 }
 
 /// Span style `name`'s own look over a header's or footer's line's: its
@@ -3601,6 +3723,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         // its line being read has taken its first text's look yet.
         let mut hf_spans: Vec<Option<String>> = Vec::new();
         let mut hf_styled = false;
+        // A text box of the document's own header or footer being read,
+        // and where the frame around a text box places it.
+        let mut hf_box: Option<HfBox> = None;
+        let mut hf_frame_place: (Option<crate::model::HfFloat>, Option<Alignment>) = (None, None);
         let para_alignment = |name: &str| -> Alignment {
             let mut cur = Some(name.to_string());
             for _ in 0..8 {
@@ -3707,7 +3833,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         let target = if in_any_header { &mut m.header } else { &mut m.footer };
                         target.get_or_insert_with(String::new).push_str(&gap);
                     }
-                    if in_header || in_footer {
+                    if let Some(b) = hf_box.as_mut().filter(|_| (in_header || in_footer) && hf_box_depth > 0) {
+                        hf_box_text(b, &gap, &hf_spans, &named);
+                    } else if in_header || in_footer {
                         let target = if in_header { &mut doc.header } else { &mut doc.footer };
                         target.get_or_insert_with(String::new).push_str(&gap);
                     }
@@ -3737,6 +3865,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                     });
                     hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), anchor, href: None, alt: String::new(), in_alt: false, depth: 0 }));
+                    hf_frame_place = hf_box_place(attr_val(&e, "draw:style-name").as_deref(), attr_val(&e, "svg:y").as_deref(), &named);
                 }
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:image" => {
                     if let Some((_, f)) = hf_frame.as_mut().filter(|(_, f)| f.href.is_none()) {
@@ -3780,6 +3909,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         if (in_header || in_footer) && hf_box_depth == 0 {
                             hf_para_style = attr_val(&e, "text:style-name");
                         }
+                        if let Some(b) = hf_box.as_mut().filter(|_| (in_header || in_footer) && hf_box_depth > 0) {
+                            b.lines.push((String::new(), hf_line(attr_val(&e, "text:style-name").as_deref(), &named), false));
+                        }
                         if hf_box_depth == 0 {
                             let new_line = hf_row.is_none_or(|started| !started);
                             hf_row = hf_row.map(|_| true);
@@ -3805,9 +3937,22 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             }
                         }
                     }
-                    "text:span" if (in_header || in_footer) && hf_box_depth == 0 => hf_spans.push(attr_val(&e, "text:style-name")),
+                    "text:span" if in_header || in_footer => hf_spans.push(attr_val(&e, "text:style-name")),
                     "table:table-row" if in_any_header || in_any_footer => hf_row = Some(false),
-                    "draw:text-box" if in_header || in_footer => hf_box_depth += 1,
+                    "draw:text-box" if in_header || in_footer => {
+                        hf_box_depth += 1;
+                        if hf_box.is_none() {
+                            hf_box = Some(HfBox { lines: Vec::new(), float: hf_frame_place.0, across: hf_frame_place.1 });
+                        }
+                    }
+                    // Writer's own text box: its paragraphs are inside it.
+                    "draw:custom-shape" if in_header || in_footer => {
+                        hf_box_depth += 1;
+                        if hf_box.is_none() {
+                            let (float, across) = hf_box_place(attr_val(&e, "draw:style-name").as_deref(), attr_val(&e, "svg:y").as_deref(), &named);
+                            hf_box = Some(HfBox { lines: Vec::new(), float, across });
+                        }
+                    }
                     "svg:title" | "svg:desc" => in_alt = true,
                     "text:page-number" | "text:page-count" if in_any_header || in_any_footer => {
                         let placeholder = if e.name().as_ref() == "text:page-number" { "{page}" } else { "{total}" };
@@ -3841,7 +3986,15 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     _ => {}
                 },
                 Ok(Event::End(e)) => match e.name().as_ref() {
-                    "draw:text-box" => hf_box_depth = hf_box_depth.saturating_sub(1),
+                    "draw:text-box" | "draw:custom-shape" if hf_box_depth > 0 => {
+                        hf_box_depth -= 1;
+                        if hf_box_depth == 0 {
+                            if let Some(b) = hf_box.take() {
+                                let (text, lines) = if in_header { (&mut doc.header, &mut doc.header_lines) } else { (&mut doc.footer, &mut doc.footer_lines) };
+                                finish_hf_box(b, text, lines);
+                            }
+                        }
+                    }
                     "table:table-row" => hf_row = None,
                     "style:header" => {
                         in_header = false;
@@ -3853,7 +4006,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                     "svg:title" | "svg:desc" => in_alt = false,
                     "text:page-number" | "text:page-count" => in_field = false,
-                    "text:span" if (in_header || in_footer) && hf_box_depth == 0 => {
+                    "text:span" if in_header || in_footer => {
                         hf_spans.pop();
                     }
                     _ => {}
@@ -3877,6 +4030,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         if in_any_footer {
                             append_hf(&mut m.footer, &txt, gap);
                         }
+                    }
+                    if let Some(b) = hf_box.as_mut().filter(|_| (in_header || in_footer) && hf_box_depth > 0) {
+                        hf_box_text(b, &txt, &hf_spans, &named);
+                        continue;
                     }
                     if (in_header || in_footer) && hf_box_depth == 0 && !hf_styled && !txt.trim().is_empty() {
                         hf_styled = true;
@@ -3910,10 +4067,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             m.footer.get_or_insert_with(String::new).push_str(&txt);
                         }
                     }
-                    if in_header {
+                    if let Some(b) = hf_box.as_mut().filter(|_| (in_header || in_footer) && hf_box_depth > 0) {
+                        hf_box_text(b, &txt, &hf_spans, &named);
+                    } else if in_header {
                         doc.header.get_or_insert_with(String::new).push_str(&txt);
-                    }
-                    if in_footer {
+                    } else if in_footer {
                         doc.footer.get_or_insert_with(String::new).push_str(&txt);
                     }
                 }
@@ -4189,6 +4347,22 @@ mod tests {
         assert_eq!(rt.table_relative.iter().copied().collect::<Vec<_>>(), [table]);
         d.table_relative.clear();
         assert!(round_trip(&d).table_relative.is_empty());
+    }
+
+    /// A floating header or footer line survives a save and reopen as a
+    /// text box set against the page, its text ahead of the line whose
+    /// paragraph holds it.
+    #[test]
+    fn floating_header_and_footer_lines_round_trip() {
+        use crate::model::{HfFloat, HfLine};
+        let mut d = Document::from_plain_text("body");
+        d.header = Some("OFFICIAL\nThe Crime Contract 2025".into());
+        d.header_lines = vec![HfLine { alignment: Alignment::Center, look: RunStyle { font_size_hp: Some(24), ..Default::default() }, float: Some(HfFloat::Top(15.0)), ..Default::default() }, HfLine::default()];
+        d.footer = Some("OFFICIAL\n{page}".into());
+        d.footer_lines = vec![HfLine { alignment: Alignment::Right, float: Some(HfFloat::Bottom(10.0)), ..Default::default() }, HfLine::default()];
+        let rt = round_trip(&d);
+        assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
+        assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
     }
 
     /// A floating picture is a frame anchored to its paragraph, placed by

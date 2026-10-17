@@ -1936,6 +1936,21 @@ fn a_table_sized_to_the_text_survives() {
     assert!(round_trip(&d).table_relative.is_empty());
 }
 
+/// A floating header or footer line survives a save and reopen as a text
+/// box set against the page, ahead of the line whose paragraph holds it.
+#[test]
+fn floating_header_and_footer_lines_survive() {
+    use letters_core::{Alignment, HfFloat, HfLine, RunStyle};
+    let mut d = Document::from_plain_text("body");
+    d.header = Some("OFFICIAL\nThe Crime Contract 2025".into());
+    d.header_lines = vec![HfLine { alignment: Alignment::Center, look: RunStyle { font_size_hp: Some(24), ..Default::default() }, float: Some(HfFloat::Top(15.0)), ..Default::default() }, HfLine::default()];
+    d.footer = Some("OFFICIAL\n{page}".into());
+    d.footer_lines = vec![HfLine { alignment: Alignment::Right, float: Some(HfFloat::Bottom(10.0)), ..Default::default() }, HfLine::default()];
+    let rt = round_trip(&d);
+    assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
+    assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+}
+
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with
 /// `w:val="none"` over the table's grid).
 #[test]
