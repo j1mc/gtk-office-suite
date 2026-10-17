@@ -505,7 +505,7 @@ fn a_footers_lines_each_keep_their_own_alignment_and_look() {
         .items
         .iter()
         .filter_map(|i| match i {
-            Item::Line { source: Source::Footer, x_pt, height_pt, text, story_line, .. } => Some((*x_pt, *height_pt, text.clone(), story_line.clone())),
+            Item::Line { source: Source::Footer, x_pt, height_pt, text, story_line, .. } => Some((*x_pt, *height_pt, text.clone(), story_line.as_deref().cloned())),
             _ => None,
         })
         .collect();
@@ -513,6 +513,31 @@ fn a_footers_lines_each_keep_their_own_alignment_and_look() {
     assert!((lines[0].0 + 6.0 - (page.width_pt - 72.0)).abs() < 1e-6, "the number ends at the right margin: {}", lines[0].0);
     assert_eq!((lines[0].1, lines[1].0, lines[1].1), (LINE, 72.0, 10.0), "the date at the left margin, as tall as its 8pt");
     assert_eq!(lines[1].3.as_ref().map(|l| &l.look), Some(&small), "drawn in its line's look");
+}
+
+/// A floating header or footer line takes no room: the header's title is
+/// its first line, and the label sits against the page's top (and the
+/// footer's against its foot), centred across the page.
+#[test]
+fn a_floating_line_sits_against_the_page_and_takes_no_room() {
+    use crate::model::{HfFloat, HfLine};
+    let mut d = doc_of(1, "x");
+    let label = |float| HfLine { alignment: Alignment::Center, float: Some(float), ..Default::default() };
+    d.header = Some("OFFICIAL\nTitle".into());
+    d.header_lines = vec![label(HfFloat::Top(15.0))];
+    d.footer = Some("OFFICIAL\n{page}".into());
+    d.footer_lines = vec![label(HfFloat::Bottom(15.0))];
+    let t = lay(&d);
+    let page = &t.pages[0];
+    let lines = |src: Source| -> Vec<(String, f64, f64)> {
+        page.items.iter().filter_map(|i| match i { Item::Line { source, text, x_pt, top_pt, .. } if *source == src => Some((text.clone(), *x_pt, *top_pt)), _ => None }).collect()
+    };
+    let (header, footer) = (lines(Source::Header), lines(Source::Footer));
+    assert_eq!((header[0].0.as_str(), header[0].2), ("OFFICIAL", 15.0), "against the page's top");
+    assert!((header[0].1 + 8.0 * 6.0 / 2.0 - page.width_pt / 2.0).abs() < 1e-6, "centred across the page: {}", header[0].1);
+    assert_eq!(header[1].2, opts().header_distance_pt, "the title is the header's first line");
+    assert_eq!(footer[0].2, page.height_pt - 15.0 - LINE, "against the page's foot");
+    assert_eq!(footer[1].2, page.height_pt - opts().footer_distance_pt - LINE, "the footer is its number alone");
 }
 
 /// A header at the right ends at the right margin, a footer centred sits
