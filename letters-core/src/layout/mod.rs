@@ -476,14 +476,22 @@ pub fn image_size_pt(run: &Run, max_width_pt: f64) -> (f64, f64) {
     }
 }
 
-/// The room an image run takes in its line: its size, or none for a
-/// floating image, which is drawn where its anchor puts it.
+/// The room an image run takes in its line: its size and the room kept
+/// beside it, or none for a floating image, which is drawn where its
+/// anchor puts it.
 pub fn inline_size_pt(run: &Run, max_width_pt: f64) -> (f64, f64) {
     if run.style.image_anchor.is_some() {
         (0.0, 0.0)
     } else {
-        image_size_pt(run, max_width_pt)
+        let (left, right) = image_sides_pt(run);
+        let (w, h) = image_size_pt(run, (max_width_pt - left - right).max(1.0));
+        (w + left + right, h)
     }
+}
+
+/// The room kept left and right of an inline image, in points.
+pub fn image_sides_pt(run: &Run) -> (f64, f64) {
+    run.style.image_sides_emu.map_or((0.0, 0.0), |(l, r)| (l as f64 / EMU_PER_PT, r as f64 / EMU_PER_PT))
 }
 
 /// Pixel size from a PNG file's IHDR chunk.
@@ -1115,8 +1123,10 @@ fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: us
         if run.style.image_anchor.is_some() {
             continue;
         }
-        let (w, h) = image_size_pt(run, box_w);
-        flow.push(Item::Image { para: idx, src, x_pt: box_x + x, y_pt: baseline - h, width_pt: w, height_pt: h });
+        // Drawn inside the room its line keeps beside it.
+        let (left, right) = image_sides_pt(run);
+        let (w, h) = image_size_pt(run, (box_w - left - right).max(1.0));
+        flow.push(Item::Image { para: idx, src, x_pt: box_x + x + left, y_pt: baseline - h, width_pt: w, height_pt: h });
     }
     if k == 0 {
         place_floating(flow, idx, para, top, false);

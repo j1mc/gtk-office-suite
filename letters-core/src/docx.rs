@@ -1044,6 +1044,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     THEME.with(|t| *t.borrow_mut() = theme_fonts(path));
     RESTARTED.with(|r| r.borrow_mut().clear());
     ANCHORS.with(|a| *a.borrow_mut() = anchor_placements(path));
+    INLINE_SIDES.with(|s| *s.borrow_mut() = inline_sides(path));
     STYLE_FONTS.with(|s| *s.borrow_mut() = style_fonts(path));
 
     // Paragraph properties rdocx cannot hand back: strict-spelled indents
@@ -1880,6 +1881,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     // Floating pictures, written inline and anchored afterwards: their
     // image relationship, alt text and placement.
     let mut floating: Vec<(String, String, crate::model::ImageAnchor)> = Vec::new();
+    // Each inline picture's room beside it, in order (`docx_anchors::sides`).
+    let mut inline_sides: Vec<(u64, u64)> = Vec::new();
     // Tracked changes, written as bracketed text and made w:ins/w:del below.
     let mut revisions: Vec<crate::model::Revision> = Vec::new();
     let paras = &doc.paragraphs;
@@ -2337,6 +2340,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                             floating.push((rel, run.text.clone(), anchor));
                             continue;
                         }
+                        inline_sides.push(run.style.image_sides_emu.unwrap_or((0, 0)));
                         let mut pic = out.add_picture(&bytes, &name, w, h);
                         pic = pic.style("Figure");
                         let _ = pic;
@@ -2479,7 +2483,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         .map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?;
     let tabbed = paras.iter().flat_map(|p| &p.runs).any(|r| r.text.contains('\t'));
     let has_post = post.iter().any(ParaPost::nontrivial);
-    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post {
+    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post && inline_sides.iter().all(|&s| s == (0, 0)) {
         bytes
     } else {
         with_part(&bytes, "word/document.xml", |xml| {
@@ -2489,6 +2493,8 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // with `post` in document order.
             let xml = if has_post { para_post_pass(&xml, &post) } else { xml };
             let xml = if floating.is_empty() { xml } else { crate::docx_anchors::float(&xml, &floating, 9001) };
+            // After floating pictures are anchors: the inline ones are left.
+            let xml = crate::docx_anchors::sides(&xml, &inline_sides);
             let xml = crate::docx_revisions::wrap(&crate::docx_chips::wrap(&xml, &chips), &revisions);
             let xml = crate::docx_comments::wrap(&xml, &doc.comments);
             if has_toc { crate::docx_toc::wrap(&xml) } else { xml }
@@ -3185,12 +3191,18 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 let image_anchor = anchored
                     .then(|| ANCHORS.with(|a| a.borrow_mut().get_mut(&rel_id).and_then(|q| q.pop_front())))
                     .flatten();
+                // An inline picture's room beside it, the next of its image's.
+                let image_sides_emu = (!anchored)
+                    .then(|| INLINE_SIDES.with(|s| s.borrow_mut().get_mut(&rel_id).and_then(|q| q.pop_front())))
+                    .flatten()
+                    .filter(|&(l, r)| l > 0 || r > 0);
                 runs.push(Run {
                     text: alt.unwrap_or_default(),
                     style: RunStyle {
                         image: Some(path.to_string_lossy().into_owned()),
                         image_extent_emu: extent
                             .filter(|(w, h)| *w > 0 && *h > 0),
+                        image_sides_emu,
                         image_anchor,
                         ..Default::default()
                     },
@@ -3258,6 +3270,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 link: link_for(idx),
                 image: None,
                 image_extent_emu: None,
+                image_sides_emu: None,
                 image_anchor: None,
                 footnote: None,
                 html: false,
@@ -3526,6 +3539,23 @@ fn anchor_placements(path: &str) -> crate::docx_anchors::Placements {
         .and_then(|mut zip| part_text(&mut zip, "word/document.xml"))
         .map(|xml| crate::docx_anchors::placements(&xml))
         .unwrap_or_default()
+}
+
+/// The room beside each inline picture of the document at `path`
+/// (`docx_anchors::inline_sides`).
+fn inline_sides(path: &str) -> crate::docx_anchors::Sides {
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|f| zip::ZipArchive::new(f).ok())
+        .and_then(|mut zip| part_text(&mut zip, "word/document.xml"))
+        .map(|xml| crate::docx_anchors::inline_sides(&xml))
+        .unwrap_or_default()
+}
+
+thread_local! {
+    /// The inline pictures' room beside them not yet given to an image run
+    /// of the document being read, per image relationship, in order.
+    static INLINE_SIDES: std::cell::RefCell<crate::docx_anchors::Sides> = Default::default();
 }
 
 thread_local! {
