@@ -975,6 +975,21 @@ fn a_paragraph_kept_with_the_next_moves_with_it() {
     assert_eq!(lay(&d).page_of_paragraph(45), Some(0), "not kept: it fits on page 1");
 }
 
+/// A chain of paragraphs each kept with the next moves as one: two
+/// headings over a paragraph, the first heading fitting the page's last
+/// line, all go to the next page together (questionnaire-2's "Proposal 1"
+/// over "Question 2" over its question), not the first left behind.
+#[test]
+fn a_chain_kept_with_the_next_moves_whole() {
+    let mut d = doc_of(44, "x");
+    let kept = |t: &str| Paragraph { style: ParaStyle { keep_with_next: true, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.push(kept("Proposal"));
+    d.paragraphs.push(kept("Question"));
+    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("word ".repeat(20).trim())] });
+    let t = lay(&d);
+    assert_eq!((t.page_of_paragraph(44), t.page_of_paragraph(45), t.page_of_paragraph(46)), (Some(1), Some(1), Some(1)), "the chain moves whole");
+}
+
 #[test]
 fn a_smart_chip_is_one_object_drawn_as_a_pill() {
     let mut d = doc_of(1, "Due ");

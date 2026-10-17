@@ -633,22 +633,40 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
         // Title, a Word style's keepNext), with the first lines of what
         // follows it — in its own section: the next section starts a page
         // anyway.
-        let keep_next = if (para.style.heading.is_some() || para.style.keep_with_next) && i + 1 < section_end {
-            doc.paragraphs.get(i + 1).filter(|n| n.style.table_cell.is_none()).map(|n| {
-                let s = shape_paragraph(n, col_w, opts, shaper);
-                let (orphans, _) = orphan_widow(&n.style, opts);
-                let lines = s.lines.len().min(orphans.max(1));
-                n.style.space_before_pt
-                    + s.lines[..lines].iter().map(|l| line_height(n, l.natural_height())).sum::<f64>()
-            })
-        } else {
-            None
-        };
+        let keep_next = if keeps_with_next(para) && i + 1 < section_end { keep_chain(doc, i + 1, section_end, col_w, opts, shaper) } else { None };
         let group = border_group(doc, i, section_end);
         place_paragraph(&mut flow, i, para, &shaped, ordinals[i], keep_next, group);
         i += 1;
     }
     flow.finish(doc, opts, shaper)
+}
+
+/// Whether paragraph `p` stays on the page of what follows it: a heading,
+/// or a paragraph set to keep with the next (a Title, a Word style's
+/// keepNext).
+fn keeps_with_next(p: &Paragraph) -> bool {
+    p.style.heading.is_some() || p.style.keep_with_next
+}
+
+/// How much of what follows must share a page with the paragraph before
+/// paragraph `n`: its first lines, or, when it keeps with the next too,
+/// all of it and what that keeps in turn. Word and Writer move the whole
+/// chain: a "Proposal" heading over a "Question" heading goes to the next
+/// page with it, not left behind alone (questionnaire-2). None at a table.
+fn keep_chain(doc: &Document, n: usize, section_end: usize, col_w: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Option<f64> {
+    let mut total = 0.0;
+    for (k, i) in (n..section_end).enumerate() {
+        let p = doc.paragraphs.get(i).filter(|p| p.style.table_cell.is_none())?;
+        let s = shape_paragraph(p, col_w, opts, shaper);
+        let chained = keeps_with_next(p) && i + 1 < section_end && k < 10 && doc.paragraphs.get(i + 1).is_some_and(|n| n.style.table_cell.is_none());
+        let lines = if chained { s.lines.len() } else { s.lines.len().min(orphan_widow(&p.style, opts).0.max(1)) };
+        total += p.style.space_before_pt + s.lines[..lines].iter().map(|l| line_height(p, l.natural_height())).sum::<f64>();
+        if !chained {
+            return Some(total);
+        }
+        total += p.style.space_after_pt.max(0.0);
+    }
+    Some(total)
 }
 
 /// Section `k`'s page as the body sees it: a header taller than the room
