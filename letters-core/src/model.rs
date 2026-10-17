@@ -671,6 +671,12 @@ pub struct Document {
     /// over a date at the left).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer_lines: Vec<HfLine>,
+    /// Whether the space after a paragraph and the space before the next
+    /// add up between them, as Writer spaces every ODF document; otherwise
+    /// the larger of the two applies, as Word does and Writer does for a
+    /// Word file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub space_adds: bool,
     /// The first page's own header, when it has one (Word's "different
     /// first page", ODF's `style:header-first`): a title page's letterhead
     /// over a running header. `None` is the first page with the header the
@@ -753,6 +759,10 @@ pub struct Document {
     /// one deleted and undone is still its own.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub next_section_id: u32,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -945,6 +955,7 @@ impl Document {
             footer_alignment: Alignment::Left,
             header_lines: Vec::new(),
             footer_lines: Vec::new(),
+            space_adds: false,
             first_header: None,
             first_footer: None,
             page: None,

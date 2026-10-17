@@ -774,6 +774,31 @@ fn the_larger_of_space_after_and_space_before_separates_paragraphs() {
     assert_eq!(tops, vec![72.0, 72.0 + LINE + 24.0, 72.0 + 2.0 * LINE + 24.0 + 10.0]);
 }
 
+/// In a document whose spacing adds up (`Document::space_adds`, every
+/// ODF document in Writer), the space after a paragraph and the space
+/// before the next are both kept between them, in the body and in a cell.
+#[test]
+fn spacing_adds_up_where_the_document_says_so() {
+    let mut d = doc_of(3, "x");
+    d.space_adds = true;
+    for p in &mut d.paragraphs {
+        p.style.space_after_pt = 10.0;
+    }
+    d.paragraphs[1].style.space_before_pt = 24.0;
+    d.paragraphs[2].style.space_before_pt = 4.0;
+    let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops, vec![72.0, 72.0 + LINE + 10.0 + 24.0, 72.0 + 2.0 * LINE + 10.0 + 24.0 + 10.0 + 4.0]);
+    let mut d = doc_of(1, "after");
+    d.space_adds = true;
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let para = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, space_before_pt: 4.5, space_after_pt: 4.5, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [para("one"), para("two")]);
+    let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops[1] - tops[0], LINE + 9.0, "{tops:?}");
+}
+
 /// A shaper that counts the paragraphs it shapes.
 struct Counting(usize);
 
