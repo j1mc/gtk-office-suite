@@ -722,18 +722,24 @@ fn content_xml(doc: &Document) -> String {
                     };
                     // The file's row heights, as row styles: a minimum
                     // height, or a fixed one.
+                    // A row kept on one page says so too.
                     let row_styles: Vec<String> = (0..rows as usize)
-                        .map(|r| match doc.table_rows.get(&c.table).and_then(|h| h.get(r).copied().flatten()) {
-                            Some(h) => {
-                                let name = format!("Table{tables_written}.R{r}");
+                        .map(|r| {
+                            let height = doc.table_rows.get(&c.table).and_then(|h| h.get(r).copied().flatten()).map(|h| {
                                 let prop = if h.exact { "style:row-height" } else { "style:min-row-height" };
-                                auto.push_str(&format!(
-                                    "<style:style style:name=\"{name}\" style:family=\"table-row\"><style:table-row-properties {prop}=\"{:.2}pt\"/></style:style>",
-                                    h.pt
-                                ));
-                                format!(" table:style-name=\"{name}\"")
+                                format!(" {prop}=\"{:.2}pt\"", h.pt)
+                            });
+                            let whole = doc.table_whole_rows.get(&c.table).is_some_and(|w| w.contains(&(r as u32)));
+                            if height.is_none() && !whole {
+                                return String::new();
                             }
-                            None => String::new(),
+                            let name = format!("Table{tables_written}.R{r}");
+                            auto.push_str(&format!(
+                                "<style:style style:name=\"{name}\" style:family=\"table-row\"><style:table-row-properties{}{}/></style:style>",
+                                height.unwrap_or_default(),
+                                if whole { " fo:keep-together=\"always\"" } else { "" }
+                            ));
+                            format!(" table:style-name=\"{name}\"")
                         })
                         .collect();
                     body.push_str(&format!("<table:table table:name=\"Table{tables_written}\"{table_style}>{columns}"));
@@ -1529,6 +1535,9 @@ struct AutoStyles {
     cell_valign: std::collections::HashMap<String, crate::model::VAlign>,
     /// A graphic style's placement of a floating frame.
     graphic: std::collections::HashMap<String, crate::model::ImageAnchor>,
+    /// Table-row styles that keep their row on one page
+    /// (`fo:keep-together="always"`).
+    row_whole: std::collections::HashSet<String>,
     /// Table styles that size the table as a share of the text's width
     /// (`style:rel-width`, or `table:align="margins"`).
     table_relative: std::collections::HashSet<String>,
@@ -1704,7 +1713,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1800,6 +1809,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                         };
                         if let (Some(name), Some(h)) = (cur_name.clone(), height) {
                             out.row.insert(name, h);
+                        }
+                        if let Some(name) = cur_name.clone().filter(|_| attr_val(&e, "fo:keep-together").as_deref() == Some("always")) {
+                            out.row_whole.insert(name);
                         }
                     }
                     "style:text-properties" => {
@@ -2390,6 +2402,10 @@ fn put_hf(doc: &mut Document, header: bool, (text, pictures, alignment, lines): 
 #[derive(Default)]
 struct MasterReading {
     layout: Option<String>,
+    /// Whether the master page has a header and a footer shown: only then
+    /// does its page layout's header or footer area take room.
+    has_header: bool,
+    has_footer: bool,
     header: Option<String>,
     footer: Option<String>,
     header_pictures: bool,
@@ -2411,7 +2427,7 @@ fn master_sections(
     switches: &[(usize, String)],
     first: Option<&str>,
     masters: &std::collections::HashMap<String, MasterReading>,
-    layouts: &std::collections::HashMap<String, PageGeometry>,
+    pages: &std::collections::HashMap<String, PageGeometry>,
 ) -> Vec<DocSection> {
     let Some(first) = first else { return Vec::new() };
     let mut starts: Vec<(usize, &str)> = vec![(0, first)];
@@ -2452,7 +2468,7 @@ fn master_sections(
             geometry: if k == 0 {
                 first_page
             } else {
-                masters.get(name).and_then(|m| m.layout.as_ref()).and_then(|l| layouts.get(l)).copied().unwrap_or_default()
+                pages.get(name).copied().unwrap_or_default()
             },
             header: story(k, true),
             footer: story(k, false),
@@ -2850,7 +2866,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), first_header: None, first_footer: None };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default(), first_header: None, first_footer: None };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3196,6 +3212,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     if let Some(t) = table.as_mut().filter(|t| t.3 == table_depth) {
                         t.1 += 1;
                         t.2 = -1;
+                        if attr_val(&e, "table:style-name").is_some_and(|n| auto.row_whole.contains(&n) || named.row_whole.contains(&n)) {
+                            doc.table_whole_rows.entry(t.0).or_default().insert(t.1 as u32);
+                        }
                         if let Some(h) = attr_val(&e, "table:style-name").and_then(|n| auto.row.get(&n).copied()) {
                             let heights = row_heights.entry(t.0).or_default();
                             heights.resize(t.1 as usize, None);
@@ -3768,6 +3787,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut layouts: std::collections::HashMap<String, PageGeometry> = Default::default();
         let mut layout_name = String::new();
         let mut master_layout: Option<String> = None;
+        // Each page layout's header and footer areas, which take room only
+        // on a master page that has a header or footer.
+        let mut hf_areas: std::collections::HashMap<String, (f64, f64)> = Default::default();
         let mut last_layout: Option<String> = None;
         // Inside a page layout's `style:header-style` (true) or
         // `style:footer-style` (false).
@@ -3861,12 +3883,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Empty(e)) | Ok(Event::Start(e)) if hf_style.is_some() && e.name().as_ref() == "style:header-footer-properties" => {
                     let len = |name: &str| attr_val(&e, name).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
                     let height = len("fo:min-height").max(len("svg:height"));
-                    if let Some(page) = layouts.get_mut(&layout_name) {
-                        if hf_style == Some(true) {
-                            page.margin_top_pt += height;
-                        } else {
-                            page.margin_bottom_pt += height;
-                        }
+                    let area = hf_areas.entry(layout_name.clone()).or_insert((0.0, 0.0));
+                    if hf_style == Some(true) {
+                        area.0 += height;
+                    } else {
+                        area.1 += height;
                     }
                 }
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:master-page" => {
@@ -3997,10 +4018,16 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     "style:header" => {
                         in_header = in_master;
                         in_any_header = true;
+                        if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| attr_val(&e, "style:display").as_deref() != Some("false")) {
+                            m.has_header = true;
+                        }
                     }
                     "style:footer" => {
                         in_footer = in_master;
                         in_any_footer = true;
+                        if let Some(m) = cur_master.as_ref().and_then(|n| master_pages.get_mut(n)).filter(|_| attr_val(&e, "style:display").as_deref() != Some("false")) {
+                            m.has_footer = true;
+                        }
                     }
                     "text:p" | "text:h" if in_any_header || in_any_footer => {
                         if (in_header || in_footer) && hf_box_depth == 0 {
@@ -4183,13 +4210,32 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 *t = None;
             }
         }
+        // A master page's header and footer areas sit between its page
+        // layout's margins and the body: each one it shows adds to its
+        // margin. Its page is that layout so grown.
+        let grown = |layout: &str, m: Option<&MasterReading>| -> Option<PageGeometry> {
+            let mut page = layouts.get(layout).copied()?;
+            let (header, footer) = hf_areas.get(layout).copied().unwrap_or((0.0, 0.0));
+            if m.is_some_and(|m| m.has_header) {
+                page.margin_top_pt += header;
+            }
+            if m.is_some_and(|m| m.has_footer) {
+                page.margin_bottom_pt += footer;
+            }
+            Some(page)
+        };
+        let master_geometry: std::collections::HashMap<String, PageGeometry> =
+            master_pages.iter().filter_map(|(n, m)| Some((n.clone(), grown(m.layout.as_deref()?, Some(m))?))).collect();
         // The first page's layout; without a master page naming one that
         // exists, the last one read, as before.
-        doc.page = master_layout.filter(|n| layouts.contains_key(n)).or(last_layout).and_then(|n| layouts.get(&n).copied());
+        doc.page = match master_layout.filter(|n| layouts.contains_key(n)) {
+            Some(layout) => grown(&layout, master.as_ref().and_then(|n| master_pages.get(n))),
+            None => last_layout.and_then(|n| layouts.get(&n).copied()),
+        };
         // A body that changes master page is several sections, the first
         // on the page just read; a list that breaks the contract (a switch
         // where no paragraph starts) leaves the document one section.
-        let mut sections = master_sections(&mut doc, &switches, master.as_deref(), &master_pages, &layouts);
+        let mut sections = master_sections(&mut doc, &switches, master.as_deref(), &master_pages, &master_geometry);
         // A section whose page has one column takes the columns of a
         // `text:section` wrapping its paragraphs: LibreOffice writes a Word
         // section's columns as one, from the section's start to at most
@@ -4429,6 +4475,20 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (d.header.as_deref(), d.footer.as_deref()));
         assert_eq!((&rt.header_lines, &rt.footer_lines), (&d.header_lines, &d.footer_lines));
+    }
+
+    /// A row kept on one page stays so through a save and reopen (its row
+    /// style's `fo:keep-together="always"`), beside a row height.
+    #[test]
+    fn a_row_kept_whole_round_trips() {
+        let mut d = Document::from_plain_text("after");
+        let table = d.insert_table_at(0, 3, 1);
+        d.table_whole_rows.entry(table).or_default().extend([0, 2]);
+        d.table_rows.insert(table, vec![None, None, Some(crate::model::RowHeight { pt: 40.0, exact: false })]);
+        let rt = round_trip(&d);
+        let id = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+        assert_eq!(rt.table_whole_rows.get(&id).map(|r| r.iter().copied().collect::<Vec<_>>()), Some(vec![0, 2]));
+        assert_eq!(rt.table_rows.get(&id).and_then(|r| r.get(2).copied().flatten()).map(|h| h.pt), Some(40.0));
     }
 
     /// A table sized as a share of the text's width stays so through a
@@ -5262,6 +5322,33 @@ mod tests {
         let ordinals = crate::lists::ordinals(d.paragraphs.iter().map(|p| &p.style));
         let shown: Vec<u32> = ordinals.into_iter().filter(|n| *n > 0).collect();
         assert_eq!(shown, [1, 2, 3, 1, 2]);
+    }
+
+    /// A page layout's header and footer areas take room only on a master
+    /// page that shows a header or footer: the social housing dictionary's
+    /// layout declares a 0.5in header area its master never uses, and its
+    /// body starts at the 1in margin, as Writer draws it.
+    #[test]
+    fn a_header_area_takes_room_only_where_the_master_shows_a_header() {
+        let styles = |header: &str| {
+            format!(
+                "<office:document-styles><office:automatic-styles><style:page-layout style:name=\"PL\">\
+                 <style:page-layout-properties fo:page-width=\"8.27in\" fo:page-height=\"11.69in\" fo:margin-top=\"1in\" fo:margin-bottom=\"1in\"/>\
+                 <style:header-style><style:header-footer-properties fo:min-height=\"0.5in\"/></style:header-style>\
+                 <style:footer-style><style:header-footer-properties fo:min-height=\"0.25in\"/></style:footer-style>\
+                 </style:page-layout></office:automatic-styles><office:master-styles>\
+                 <style:master-page style:name=\"Standard\" style:page-layout-name=\"PL\">{header}</style:master-page>\
+                 </office:master-styles></office:document-styles>"
+            )
+        };
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        let margins = |header: &str| {
+            let page = read_package(content, &styles(header)).page.unwrap();
+            (page.margin_top_pt, page.margin_bottom_pt)
+        };
+        assert_eq!(margins("<style:footer><text:p>1</text:p></style:footer>"), (72.0, 90.0), "no header: the footer's area alone");
+        assert_eq!(margins("<style:header><text:p>Report</text:p></style:header>"), (108.0, 72.0), "the header's area alone");
+        assert_eq!(margins("<style:header style:display=\"false\"><text:p>Report</text:p></style:header>"), (72.0, 72.0), "a header turned off takes none");
     }
 
     /// A file with several master pages (a Word conversion gives each

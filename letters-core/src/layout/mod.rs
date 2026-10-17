@@ -1262,6 +1262,14 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         // last piece. Moved whole, a tall row left a page of blank space
         // before it and a row taller than a page ran off its foot.
         let slices: Vec<Vec<Slice>> = row_cells.iter().map(|(_, _, paras)| cell_slices(doc, paras, &pad)).collect();
+        // A row kept on one page that does not fit what is left of this
+        // one starts the next, unless it is taller than a page.
+        if doc.table_whole_rows.get(&first.table).is_some_and(|w| w.contains(&row)) && !flow.column_is_empty() {
+            let need = slices.iter().map(|c| c.iter().map(Slice::height).sum::<f64>()).fold(0.0, f64::max).max(file_h.map_or(0.0, |h| h.pt)) + rule_pt;
+            if flow.y + need > flow.bottom() + 1e-6 && need <= flow.bottom() - flow.top() {
+                flow.next_column();
+            }
+        }
         let mut next = vec![0usize; slices.len()];
         // A merged cell that ends here needs the row to reach the end of
         // its content, when the two are in the same column of one page.

@@ -721,6 +721,12 @@ pub struct Document {
     /// answer box). A table not listed (any made here) is ruled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub table_unruled: std::collections::BTreeSet<u32>,
+    /// Each table's rows kept on one page, by table id (Word's
+    /// `w:cantSplit`, ODF's row `fo:keep-together="always"`): a row that
+    /// does not fit what is left of a page starts the next, unless it is
+    /// taller than a page.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_whole_rows: std::collections::BTreeMap<u32, std::collections::BTreeSet<u32>>,
     /// The tables the file sized as a share of the text's width (Word's
     /// `pct`, ODF's `rel-width` or `margins` alignment), by table id: their
     /// columns fit the text however wide the file gave them. Any other
@@ -951,6 +957,7 @@ impl Document {
             table_fills: Default::default(),
             table_padding: Default::default(),
             table_unruled: Default::default(),
+            table_whole_rows: Default::default(),
             table_relative: Default::default(),
             table_open_edges: Default::default(),
             table_valign: Default::default(),
@@ -1228,6 +1235,7 @@ impl Document {
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
         self.table_unruled.remove(&table);
+        self.table_whole_rows.remove(&table);
         self.table_relative.remove(&table);
         self.table_open_edges.remove(&table);
         self.table_valign.remove(&table);
