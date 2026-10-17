@@ -430,6 +430,30 @@ fn block_quote_survives() {
     let rt = round_trip(&d);
     assert!(rt.paragraphs[0].style.block_quote, "block quote lost");
     assert!(!rt.paragraphs[1].style.block_quote);
+    // It reopens looking as it did: the Quote style written is the
+    // built-in quote's look, 18pt in and italic, now the file's own.
+    let q = &rt.paragraphs[0];
+    assert!(q.style.own_look);
+    assert_eq!(q.style.left_indent_pt, letters_core::layout::QUOTE_INDENT_PT);
+    assert!(q.runs.iter().all(|r| r.style.italic), "{:?}", q.runs);
+}
+
+/// A file's own Quote style is the quote's look: Writer draws the render
+/// lab's block quote at the margin, its Quote style setting italics but no
+/// indent, so none is added to it.
+#[test]
+fn a_files_own_quote_style_is_its_look() {
+    let d = doctor_parts(&Document::from_plain_text("wise words"), |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        *body = body.replacen("<w:p>", "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr>", 1);
+        let styles = parts.get_mut("word/styles.xml").unwrap();
+        let at = styles.find("w:styleId=\"Quote\"").and_then(|i| styles[..i].rfind("<w:style ")).unwrap();
+        let end = at + styles[at..].find("</w:style>").unwrap() + "</w:style>".len();
+        styles.replace_range(at..end, "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:rPr><w:i/></w:rPr></w:style>");
+    });
+    let q = &d.paragraphs[0].style;
+    assert!(q.block_quote && q.own_look, "{q:?}");
+    assert_eq!(letters_core::layout::paragraph_box_x(&d.paragraphs[0]), 0.0, "no indent of its own, none added");
 }
 
 #[test]
@@ -1920,6 +1944,18 @@ fn a_regular_run_in_a_heading_survives() {
     assert!(!rt.paragraphs[0].runs[0].style.bold);
 }
 
+/// A row kept on one page stays so through a save and reopen
+/// (`w:cantSplit`); the others do not become so.
+#[test]
+fn a_row_kept_whole_survives() {
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 3, 1);
+    d.table_whole_rows.entry(table).or_default().insert(1);
+    let rt = round_trip(&d);
+    let id = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+    assert_eq!(rt.table_whole_rows.get(&id).map(|r| r.iter().copied().collect::<Vec<_>>()), Some(vec![1]));
+}
+
 /// A table sized as a share of the text's width stays so through a save
 /// and reopen (`w:tblW w:type="pct"`); one with the file's widths does not
 /// become one.
@@ -1997,6 +2033,35 @@ fn an_inline_pictures_room_beside_it_survives() {
         *body = body.replacen("<wp:inline", "<wp:inline distL=\"114300\" distR=\"114300\"", 1);
     });
     assert_eq!(sides(&given), None);
+}
+
+/// The first page's own header and footer survive a save and reopen as
+/// Word's "different first page" (`w:titlePg` and the `first` parts),
+/// and the running ones stay the others'.
+#[test]
+fn the_first_pages_own_header_and_footer_survive() {
+    use letters_core::{Alignment, HfLine, HfStory};
+    let mut d = Document::from_plain_text("body");
+    d.header = Some("Running title".into());
+    d.footer = Some("{page}".into());
+    d.first_header = Some(HfStory {
+        text: "Letterhead\nDepartment".into(),
+        alignment: Alignment::Center,
+        lines: vec![
+            HfLine { alignment: Alignment::Center, space_after_pt: 12.0, line_height: Some(LineHeight::Exact(10.0)), ..Default::default() },
+            HfLine { alignment: Alignment::Right, space_before_pt: 3.0, line_height: Some(LineHeight::Minimum(14.0)), ..Default::default() },
+        ],
+        ..Default::default()
+    });
+    d.first_footer = Some(HfStory { text: "Page {page}".into(), ..Default::default() });
+    let rt = round_trip(&d);
+    assert_eq!((rt.header.as_deref(), rt.footer.as_deref()), (Some("Running title"), Some("{page}")));
+    let first = rt.first_header.as_ref().expect("the first page's own header");
+    assert_eq!((first.text.as_str(), first.alignment), ("Letterhead\nDepartment", Alignment::Center));
+    assert_eq!(first.lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>(), d.first_header.as_ref().unwrap().lines.iter().map(|l| (l.alignment, l.space_before_pt, l.space_after_pt, l.line_height)).collect::<Vec<_>>());
+    assert_eq!(rt.first_footer.as_ref().map(|s| s.text.as_str()), Some("Page {page}"));
+    // Without a first page of its own, a document reads none.
+    assert_eq!(round_trip(&Document::from_plain_text("body")).first_header, None);
 }
 
 /// A cell's bare sides survive a save and reopen (`w:tcBorders` with

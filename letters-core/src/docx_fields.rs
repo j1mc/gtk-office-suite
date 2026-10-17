@@ -285,6 +285,21 @@ pub fn default_parts(document_xml: &str, rels_xml: &str) -> (Option<String>, Opt
     (part("w:headerReference"), part("w:footerReference"))
 }
 
+/// The package paths of the first page's own header and footer parts,
+/// when the first section gives its first page its own (`w:titlePg`):
+/// `None` for a document whose first page has the others' header and
+/// footer; a part of `None` within is a first page without one.
+pub fn first_page_parts(document_xml: &str, rels_xml: &str) -> Option<(Option<String>, Option<String>)> {
+    let first = section_properties(document_xml).into_iter().next()?;
+    let sect = &document_xml[first];
+    let at = sect.find("<w:titlePg").filter(|&at| matches!(sect.as_bytes().get(at + 10), Some(b' ' | b'/' | b'>')))?;
+    if matches!(attr(sect, at, "w:val").as_deref(), Some("0" | "false" | "off")) {
+        return None;
+    }
+    let part = |element: &str| typed_reference(sect, element, "first").and_then(|id| relationship_target(rels_xml, &id));
+    Some((part("w:headerReference"), part("w:footerReference")))
+}
+
 /// Where each `w:sectPr` element of `document_xml` is, in document order
 /// (the sections' own: paragraph-level ones, then the body's last). The
 /// old value a `w:sectPrChange` holds is inside its section's element and
@@ -324,10 +339,16 @@ pub(crate) fn section_properties(document_xml: &str) -> Vec<std::ops::Range<usiz
 /// The relationship id of the `default` reference `element`
 /// (`w:headerReference`, `w:footerReference`) in a section's properties.
 pub(crate) fn default_reference(sect_xml: &str, element: &str) -> Option<String> {
+    typed_reference(sect_xml, element, "default")
+}
+
+/// The relationship id of the reference `element` of type `kind`
+/// ("default", "first", "even") in a section's properties.
+fn typed_reference(sect_xml: &str, element: &str, kind: &str) -> Option<String> {
     let mut from = 0;
     while let Some(off) = sect_xml[from..].find(&format!("<{element} ")) {
         let at = from + off;
-        if attr(sect_xml, at, "w:type").as_deref() == Some("default") {
+        if attr(sect_xml, at, "w:type").as_deref() == Some(kind) {
             return attr(sect_xml, at, "r:id");
         }
         from = at + 1;
@@ -535,7 +556,37 @@ fn line_of(part_xml: &str, at: usize, styles_xml: &str) -> crate::model::HfLine 
             apply_run_properties(&mut look, &run[p..p + run[p..].find("</w:rPr>").unwrap_or(0)]);
         }
     }
-    HfLine { alignment, look, tab_stops, float: None }
+    let (space_before_pt, space_after_pt, line_height) = line_spacing(ppr_own, if ppr.contains("<w:pStyle ") { chain } else { style_chain(styles_xml, default_paragraph_style(styles_xml)) }, styles_xml);
+    HfLine { alignment, look, tab_stops, space_before_pt, space_after_pt, line_height, ..Default::default() }
+}
+
+/// A header or footer paragraph's space before and after, in points, and
+/// its line height when it is exact or a minimum: each by the nearest of
+/// its own properties (`ppr_own`), its style's (`chain`, the default
+/// paragraph style's for a paragraph that names none) and the document's
+/// defaults that sets it, as Word resolves them.
+fn line_spacing(ppr_own: &str, chain: Vec<&str>, styles_xml: &str) -> (f64, f64, Option<crate::model::LineHeight>) {
+    use crate::model::LineHeight;
+    let defaults = styles_xml.find("<w:pPrDefault>").map_or("", |d| &styles_xml[d..d + styles_xml[d..].find("</w:pPrDefault>").unwrap_or(0)]);
+    let sources: Vec<&str> = std::iter::once(ppr_own).chain(chain).chain(std::iter::once(defaults)).collect();
+    let set = |name: &str| sources.iter().find_map(|x| x.find("<w:spacing ").and_then(|at| Some((attr(x, at, name)?, attr(x, at, "w:lineRule")))));
+    let points = |name: &str| set(name).and_then(|(v, _)| v.parse::<f64>().ok()).map_or(0.0, |tw| tw / 20.0);
+    let line_height = set("w:line").and_then(|(v, rule)| {
+        let pt = v.parse::<f64>().ok()? / 20.0;
+        match rule.as_deref() {
+            Some("exact") => Some(LineHeight::Exact(pt)),
+            Some("atLeast") => Some(LineHeight::Minimum(pt)),
+            _ => None,
+        }
+    });
+    (points("w:before"), points("w:after"), line_height)
+}
+
+/// The id of the document's default paragraph style ("Normal").
+fn default_paragraph_style(styles_xml: &str) -> Option<String> {
+    styles_xml.match_indices("<w:style ").map(|(at, _)| at).find_map(|at| {
+        (attr(styles_xml, at, "w:type").as_deref() == Some("paragraph") && matches!(attr(styles_xml, at, "w:default").as_deref(), Some("1" | "true"))).then(|| attr(styles_xml, at, "w:styleId")).flatten()
+    })
 }
 
 /// Run properties (`w:rPr`'s contents) over `look`: weight, slant, size,

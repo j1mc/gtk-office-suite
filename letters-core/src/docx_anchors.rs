@@ -290,7 +290,7 @@ pub fn header_footer_part(is_header: bool, text: &str, pictures: &[crate::model:
             continue;
         }
         body.push_str("<w:p>");
-        body.push_str(&line_properties(own.map_or(alignment, |l| l.alignment), own.map_or(&[], |l| l.tab_stops.as_slice())));
+        body.push_str(&line_properties(own.map_or(alignment, |l| l.alignment), own.map_or(&[], |l| l.tab_stops.as_slice()), own));
         if std::mem::take(&mut first) {
             body.push_str(&drawings);
         }
@@ -345,14 +345,15 @@ fn text_box(text: &str, line: &crate::model::HfLine, float: crate::model::HfFloa
          <wps:txbx><w:txbxContent><w:p>{props}{runs}</w:p></w:txbxContent></wps:txbx>\
          <wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"0\" tIns=\"{t_ins}\" rIns=\"0\" bIns=\"{b_ins}\" anchor=\"{anchor}\"><a:noAutofit/></wps:bodyPr>\
          </wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>",
-        props = line_properties(line.alignment, &line.tab_stops),
+        props = line_properties(line.alignment, &line.tab_stops, Some(line)),
         runs = line_runs(text, Some(&line.look)),
     )
 }
 
 /// A header's or footer's paragraph properties: its alignment and tab
-/// stops (empty when it has neither).
-fn line_properties(alignment: crate::model::Alignment, tab_stops: &[crate::model::TabStop]) -> String {
+/// stops, and a line of its own's spacing spelled out, so none comes from
+/// the document's styles (empty when it has none of these).
+fn line_properties(alignment: crate::model::Alignment, tab_stops: &[crate::model::TabStop], own: Option<&crate::model::HfLine>) -> String {
     use crate::model::{Alignment, TabAlign, TabLeader};
     let jc = match alignment {
         Alignment::Left => "",
@@ -379,11 +380,20 @@ fn line_properties(alignment: crate::model::Alignment, tab_stops: &[crate::model
         })
         .collect();
     let tabs = if tabs.is_empty() { tabs } else { format!("<w:tabs>{tabs}</w:tabs>") };
-    if jc.is_empty() && tabs.is_empty() {
+    let twips = |pt: f64| (pt * 20.0).round() as i64;
+    let spacing = own.map_or(String::new(), |l| {
+        let line = match l.line_height {
+            Some(crate::model::LineHeight::Exact(pt)) => format!(" w:line=\"{}\" w:lineRule=\"exact\"", twips(pt)),
+            Some(crate::model::LineHeight::Minimum(pt)) => format!(" w:line=\"{}\" w:lineRule=\"atLeast\"", twips(pt)),
+            None => String::new(),
+        };
+        format!("<w:spacing w:before=\"{}\" w:after=\"{}\"{line}/>", twips(l.space_before_pt), twips(l.space_after_pt))
+    });
+    if jc.is_empty() && tabs.is_empty() && spacing.is_empty() {
         return String::new();
     }
-    // `w:tabs` comes before `w:jc` in a paragraph's properties.
-    format!("<w:pPr>{tabs}{jc}</w:pPr>")
+    // `w:tabs`, then `w:spacing`, then `w:jc` in a paragraph's properties.
+    format!("<w:pPr>{tabs}{spacing}{jc}</w:pPr>")
 }
 
 /// A header's or footer's line of text as runs in its look: its tabs as

@@ -316,7 +316,7 @@ fn laid_out(paragraph: &Paragraph) -> bool {
 fn survey(doc: &Document) -> Present {
     let mut present = Present {
         footnote: !doc.footnotes.is_empty(),
-        header_footer: doc.header.is_some() || doc.footer.is_some() || doc.sections.iter().any(|s| s.header.is_some() || s.footer.is_some()),
+        header_footer: doc.header.is_some() || doc.footer.is_some() || doc.first_header.is_some() || doc.first_footer.is_some() || doc.sections.iter().any(|s| s.header.is_some() || s.footer.is_some()),
         page_layout: doc.page.is_some(),
         comment: !doc.comments.is_empty(),
         sections: !doc.sections.is_empty(),

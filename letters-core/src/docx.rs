@@ -683,7 +683,15 @@ fn read_on_this_thread(path: &str) -> Result<Document, String> {
             read.footer = footer;
         }
     }
-    let [header_extras, footer_extras] = header_footer_extras(path);
+    let ([header_extras, footer_extras], first) = header_footer_extras(path);
+    // The first page's own header and footer, read whole from their parts.
+    if let Some([header, footer]) = first {
+        let story = |e: Option<PartExtras>| {
+            let e = e.unwrap_or_else(PartExtras::empty);
+            crate::model::HfStory { text: e.text, pictures: e.pictures, alignment: e.alignment, lines: e.lines }
+        };
+        (read.first_header, read.first_footer) = (Some(story(header)), Some(story(footer)));
+    }
     for (extras, text, pictures, alignment, lines) in [
         (header_extras, &mut read.header, &mut read.header_pictures, &mut read.header_alignment, &mut read.header_lines),
         (footer_extras, &mut read.footer, &mut read.footer_pictures, &mut read.footer_alignment, &mut read.footer_lines),
@@ -711,18 +719,30 @@ struct PartExtras {
     lines: Vec<crate::model::HfLine>,
 }
 
+impl PartExtras {
+    fn empty() -> Self {
+        PartExtras { pictures: Vec::new(), alignment: Alignment::Left, text: String::new(), lines: Vec::new() }
+    }
+}
+
+/// The two parts of a page's header and footer, the first page's own
+/// when it has them (`docx_fields::first_page_parts`).
+type FirstParts = Option<[Option<PartExtras>; 2]>;
+
 /// The pictures of the default header and footer (a letterhead's logo),
 /// each kept in the media cache like a body picture (#455), how each
-/// part's text is aligned, and its lines.
-fn header_footer_extras(path: &str) -> [PartExtras; 2] {
-    let empty = || PartExtras { pictures: Vec::new(), alignment: Alignment::Left, text: String::new(), lines: Vec::new() };
-    let none = || [empty(), empty()];
+/// part's text is aligned, and its lines; and the same of the first
+/// page's own, when it has them.
+fn header_footer_extras(path: &str) -> ([PartExtras; 2], FirstParts) {
+    let empty = PartExtras::empty;
+    let none = || ([empty(), empty()], None);
     let Some(mut zip) = std::fs::File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok()) else { return none() };
     let (Some(document), Some(rels)) = (part_text(&mut zip, "word/document.xml"), part_text(&mut zip, "word/_rels/document.xml.rels")) else {
         return none();
     };
     let styles = part_text(&mut zip, "word/styles.xml").unwrap_or_default();
     let (h, f) = crate::docx_fields::default_parts(&document, &rels);
+    let first = crate::docx_fields::first_page_parts(&document, &rels);
     let mut extras = |part: Option<String>| -> PartExtras {
         let Some(part) = part else { return empty() };
         let Some(xml) = part_text(&mut zip, &part) else { return empty() };
@@ -749,7 +769,9 @@ fn header_footer_extras(path: &str) -> [PartExtras; 2] {
         let (text, lines) = crate::docx_fields::story(&xml, &styles);
         PartExtras { pictures, alignment: crate::docx_fields::alignment(&xml, &styles), text, lines }
     };
-    [extras(h), extras(f)]
+    let defaults = [extras(h), extras(f)];
+    let first = first.map(|(h, f)| [h.map(|p| extras(Some(p))), f.map(|p| extras(Some(p)))]);
+    (defaults, first)
 }
 
 /// A zip part's text, if it is there.
@@ -1305,6 +1327,15 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
     let table_unruled: std::collections::BTreeSet<u32> = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
     let table_valign = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_valign(t)?))).collect();
+    // The rows kept on one page (`w:cantSplit`).
+    let table_whole_rows = tables
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| {
+            let rows: std::collections::BTreeSet<u32> = (0..t.row_count()).filter(|&r| t.row(r).and_then(|row| row.cant_split_value()) == Some(true)).map(|r| r as u32).collect();
+            (!rows.is_empty()).then_some((ti as u32, rows))
+        })
+        .collect();
     // A table sized as a share of the text's width (`w:tblW w:type="pct"`).
     let table_relative = tables.iter().enumerate().filter(|(_, t)| matches!(t.width_mode(), Some(rdocx::TableWidth::Percentage(_)))).map(|(ti, _)| ti as u32).collect();
     let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
@@ -1317,7 +1348,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         header_pictures: Vec::new(),
         footer_pictures: Vec::new(),
         header_alignment: Alignment::Left,
-        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(),
+        footer_alignment: Alignment::Left, header_lines: Vec::new(), footer_lines: Vec::new(), first_header: None, first_footer: None, space_adds: false,
         page: read_page_geometry(&doc),
         base_font: read_base_font(&doc),
         heading_styles: read_heading_styles(&doc),
@@ -1328,6 +1359,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_fills,
         table_padding,
         table_unruled,
+        table_whole_rows,
         table_relative,
         table_open_edges,
         table_valign,
@@ -1968,6 +2000,11 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                     }
                 }
             }
+            for &r in doc.table_whole_rows.get(&tc0.table).into_iter().flatten() {
+                if let Some(mut row) = tbl.row(r as usize) {
+                    row.set_cant_split();
+                }
+            }
             if let Some(heights) = doc.table_rows.get(&tc0.table) {
                 for (r, h) in heights.iter().enumerate().take(rows) {
                     let (Some(h), Some(mut row)) = (h, tbl.row(r)) else { continue };
@@ -2401,6 +2438,29 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             out.set_raw_footer_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::Default);
         }
     }
+    // The first page's own header and footer: Word's "different first
+    // page" gives it both, so the one it does not have of its own is the
+    // others'. A document of several sections keeps its first section's
+    // properties apart (below), and its first page the others' parts.
+    if (doc.first_header.is_some() || doc.first_footer.is_some()) && sections.is_empty() {
+        out.set_different_first_page(true);
+        let page_w = doc.page.unwrap_or_default().width_pt;
+        for (is_header, first, text, pictures, alignment, lines) in [
+            (true, &doc.first_header, &doc.header, &doc.header_pictures, doc.header_alignment, &doc.header_lines),
+            (false, &doc.first_footer, &doc.footer, &doc.footer_pictures, doc.footer_alignment, &doc.footer_lines),
+        ] {
+            let (xml, images) = match first {
+                Some(s) => crate::docx_anchors::header_footer_part(is_header, &s.text, &s.pictures, s.alignment, &s.lines, page_w),
+                None => crate::docx_anchors::header_footer_part(is_header, text.as_deref().unwrap_or(""), pictures, alignment, lines, page_w),
+            };
+            let images: Vec<(&str, &[u8], &str)> = images.iter().map(|(r, b, n)| (r.as_str(), b.as_slice(), n.as_str())).collect();
+            if is_header {
+                out.set_raw_header_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::First);
+            } else {
+                out.set_raw_footer_with_images(xml.into_bytes(), &images, rdocx::HdrFtrType::First);
+            }
+        }
+    }
     if let Some(pg) = &doc.page {
         out.set_page_size(rdocx::Length::pt(pg.width_pt), rdocx::Length::pt(pg.height_pt));
         out.set_margins(
@@ -2599,7 +2659,7 @@ fn patch_styles_xml(xml: &str, defaults: &str, headings: &str) -> String {
     // quote and inline code read back as plain text after a pass through
     // Writer. The names are the ones Writer itself uses for these.
     for (id, def) in [
-        ("Quote", "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"),
+        ("Quote", "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:ind w:left=\"360\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>"),
         ("PreformattedText", "<w:style w:type=\"paragraph\" w:styleId=\"PreformattedText\"><w:name w:val=\"Preformatted Text\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Liberation Mono\" w:hAnsi=\"Liberation Mono\" w:cs=\"Liberation Mono\"/><w:sz w:val=\"20\"/></w:rPr></w:style>"),
         ("SourceText", "<w:style w:type=\"character\" w:styleId=\"SourceText\"><w:name w:val=\"Source Text\"/><w:qFormat/><w:rPr><w:rFonts w:ascii=\"Liberation Mono\" w:hAnsi=\"Liberation Mono\" w:cs=\"Liberation Mono\"/></w:rPr></w:style>"),
     ] {
@@ -3059,7 +3119,9 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
         Some(id @ ("Title" | "Subtitle")) => Some(id.to_string()),
         _ => None,
     };
-    let own_look = named_style.as_deref().is_some_and(style_defined);
+    // A quote style the file defines is its own look too: its indent and
+    // italics are the paragraph's (read below), with none added.
+    let own_look = named_style.as_deref().is_some_and(style_defined) || (block_quote && p.style_id().is_some_and(style_defined));
     // Either spelling counts: the paragraph property, or a run-level
     // break before this paragraph's own text.
     let page_break_before = p.is_page_break_before() || run_page_break(p).leading;
