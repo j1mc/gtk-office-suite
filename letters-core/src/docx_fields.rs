@@ -81,14 +81,56 @@ pub(crate) fn story(part_xml: &str, styles_xml: &str) -> (String, Vec<crate::mod
         .into_iter()
         .map(|at| {
             let mut line = line_of(part_xml, at, styles_xml);
-            // A text box's line sits across the page as the box does.
+            // A text box's line sits across the page as the box does, and
+            // floats where the box is on the page.
             if let Some(a) = box_alignment(part_xml, at) {
                 line.alignment = a;
             }
+            line.float = box_float(part_xml, at);
             line
         })
         .collect();
     (text, lines)
+}
+
+/// The `wp:anchor` element the text box whose paragraph starts at
+/// `part_xml[at..]` is in; `None` for a paragraph not in a box.
+fn box_anchor(part_xml: &str, at: usize) -> Option<&str> {
+    let before = &part_xml[..at];
+    let anchor = before.match_indices("<wp:anchor").map(|(a, _)| a).filter(|&a| matches!(before.as_bytes().get(a + 10), Some(b' ' | b'>'))).last()?;
+    if before[anchor..].contains("</wp:anchor>") || !before[anchor..].contains("<w:txbxContent>") {
+        return None;
+    }
+    let end = part_xml[at..].find("</wp:anchor>").map_or(part_xml.len(), |e| at + e);
+    Some(&part_xml[anchor..end])
+}
+
+/// Where the text box whose paragraph starts at `part_xml[at..]` floats:
+/// set against the page's top or bottom edge (`wp:positionV` from the
+/// page, by alignment or offset), its text inset by the box's
+/// `tIns`/`bIns`. `None` for a box placed against anything else.
+fn box_float(part_xml: &str, at: usize) -> Option<crate::model::HfFloat> {
+    use crate::model::HfFloat;
+    let anchor = box_anchor(part_xml, at)?;
+    let v_at = anchor.find("<wp:positionV")?;
+    let v = &anchor[v_at..v_at + anchor[v_at..].find("</wp:positionV>")?];
+    if attr(v, 0, "relativeFrom").as_deref() != Some("page") {
+        return None;
+    }
+    let inner = |tag: &str| {
+        let open = format!("<{tag}>");
+        let start = v.find(&open)? + open.len();
+        Some(v[start..start + v[start..].find('<')?].trim().to_string())
+    };
+    // The box's insets, Word's 0.05in where it gives none.
+    let body = anchor.find("<wps:bodyPr").map_or("", |b| &anchor[b..]);
+    let inset = |name: &str| attr(body, 0, name).and_then(|v| v.parse::<f64>().ok()).unwrap_or(45_720.0) / 12_700.0;
+    match inner("wp:align").as_deref() {
+        Some("top") => Some(HfFloat::Top(inset("tIns"))),
+        Some("bottom") => Some(HfFloat::Bottom(inset("bIns"))),
+        Some(_) => None,
+        None => inner("wp:posOffset").and_then(|o| o.parse::<f64>().ok()).map(|o| HfFloat::Top(o / 12_700.0 + inset("tIns"))),
+    }
 }
 
 /// How the text box whose paragraph starts at `part_xml[at..]` is
@@ -96,13 +138,7 @@ pub(crate) fn story(part_xml: &str, styles_xml: &str) -> (String, Vec<crate::mod
 /// `None` for a paragraph not in a box, or a box placed by offset.
 fn box_alignment(part_xml: &str, at: usize) -> Option<crate::model::Alignment> {
     use crate::model::Alignment;
-    let before = &part_xml[..at];
-    let anchor = before.match_indices("<wp:anchor").map(|(a, _)| a).filter(|&a| matches!(before.as_bytes().get(a + 10), Some(b' ' | b'>'))).last()?;
-    // In the box only if the anchor is still open here.
-    if before[anchor..].contains("</wp:anchor>") || !before[anchor..].contains("<w:txbxContent>") {
-        return None;
-    }
-    let h = &before[anchor..];
+    let h = box_anchor(part_xml, at)?;
     let h = &h[h.find("<wp:positionH")?..];
     let h = &h[..h.find("</wp:positionH>")?];
     let v = &h[h.find("<wp:align>")? + "<wp:align>".len()..];
@@ -499,7 +535,7 @@ fn line_of(part_xml: &str, at: usize, styles_xml: &str) -> crate::model::HfLine 
             apply_run_properties(&mut look, &run[p..p + run[p..].find("</w:rPr>").unwrap_or(0)]);
         }
     }
-    HfLine { alignment, look, tab_stops }
+    HfLine { alignment, look, tab_stops, float: None }
 }
 
 /// Run properties (`w:rPr`'s contents) over `look`: weight, slant, size,
@@ -579,6 +615,27 @@ mod tests {
         );
         let stops: Vec<(f64, TabAlign)> = ship.tab_stops.iter().map(|t| (t.pos_pt, t.align)).collect();
         assert_eq!(stops, [(451.3, TabAlign::Right), (481.9, TabAlign::Right)]);
+    }
+
+    /// A text box set against the page's top or foot floats there, its
+    /// text inset by the box's own insets (Word's 0.05in where it gives
+    /// none) or placed by its offset; a box against the paragraph does not.
+    #[test]
+    fn a_text_box_against_the_page_floats() {
+        use crate::model::HfFloat;
+        let part = |v: &str, body: &str| {
+            format!(
+                r#"<w:hdr><w:p><w:r><mc:AlternateContent><mc:Choice><w:drawing><wp:anchor distT="0"><wp:positionH relativeFrom="page"><wp:align>center</wp:align></wp:positionH>{v}
+                <wps:txbx><w:txbxContent><w:p><w:r><w:t>OFFICIAL</w:t></w:r></w:p></w:txbxContent></wps:txbx>{body}</wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r><w:r><w:t>Title</w:t></w:r></w:p></w:hdr>"#
+            )
+        };
+        let float = |v: &str, body: &str| story(&part(v, body), "").1.first().and_then(|l| l.float);
+        let page = |inner: &str| format!(r#"<wp:positionV relativeFrom="page">{inner}</wp:positionV>"#);
+        assert_eq!(float(&page("<wp:align>top</wp:align>"), r#"<wps:bodyPr tIns="190500" bIns="0"/>"#), Some(HfFloat::Top(15.0)));
+        assert_eq!(float(&page("<wp:align>bottom</wp:align>"), r#"<wps:bodyPr tIns="0" bIns="190500"/>"#), Some(HfFloat::Bottom(15.0)));
+        assert_eq!(float(&page("<wp:posOffset>127000</wp:posOffset>"), "<wps:bodyPr/>"), Some(HfFloat::Top(10.0 + 3.6)));
+        assert_eq!(float(r#"<wp:positionV relativeFrom="paragraph"><wp:align>top</wp:align></wp:positionV>"#, "<wps:bodyPr/>"), None);
+        assert_eq!(story(&part(&page("<wp:align>top</wp:align>"), "<wps:bodyPr/>"), "").1[1].float, None, "the anchoring line does not");
     }
 
     /// A header's alignment is its first text paragraph's, by its own
