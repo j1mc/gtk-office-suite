@@ -22,6 +22,11 @@ pub struct RunStyle {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub regular: bool,
     pub italic: bool,
+    /// Drawn in capitals, whatever case the text is stored in: OOXML's
+    /// `<w:caps/>`, ODF's `fo:text-transform="uppercase"` (a form's title
+    /// style). The text keeps its own case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caps: bool,
     pub underline: bool,
     pub strikethrough: bool,
     pub highlight: bool,
@@ -677,6 +682,13 @@ pub struct Document {
     /// answer box). A table not listed (any made here) is ruled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub table_unruled: std::collections::BTreeSet<u32>,
+    /// The tables the file sized as a share of the text's width (Word's
+    /// `pct`, ODF's `rel-width` or `margins` alignment), by table id: their
+    /// columns fit the text however wide the file gave them. Any other
+    /// table keeps the file's widths, running on into the right margin as
+    /// Word and Writer draw it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub table_relative: std::collections::BTreeSet<u32>,
     /// Each ruled table's cells that leave a side without a rule, by
     /// table id: a form's header row whose two cells read as one band.
     /// A cell not listed is ruled all round.
@@ -898,6 +910,7 @@ impl Document {
             table_fills: Default::default(),
             table_padding: Default::default(),
             table_unruled: Default::default(),
+            table_relative: Default::default(),
             table_open_edges: Default::default(),
             table_valign: Default::default(),
             sections: Vec::new(),
@@ -1174,6 +1187,7 @@ impl Document {
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
         self.table_unruled.remove(&table);
+        self.table_relative.remove(&table);
         self.table_open_edges.remove(&table);
         self.table_valign.remove(&table);
         if rows == 0 || cols == 0 {

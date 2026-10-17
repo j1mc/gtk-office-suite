@@ -607,7 +607,7 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
                 .iter()
                 .position(|p| p.style.table_cell.is_none_or(|c| c.table != cell.table))
                 .map_or(doc.paragraphs.len(), |n| i + n);
-            layout_table(&mut flow, doc, i..end, shaper);
+            layout_table(&mut flow, doc, i..end, &ordinals, shaper);
             i = end;
             continue;
         }
@@ -723,6 +723,9 @@ struct Shaped {
     box_w: f64,
     /// List marker x, relative to the column's left edge.
     marker_x: f64,
+    /// A list item's number in its list, for its marker: a table sets its
+    /// cells' (the body passes the paragraph's own).
+    ordinal: u32,
 }
 
 /// Left edge of a paragraph's text box, in points from its column's (or
@@ -840,7 +843,7 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
         let size = opts.font_size_pt;
         lines.push(LineBox { start: 0, end: 0, x_pt: 0.0, width_pt: 0.0, ascent_pt: size * 0.9, descent_pt: size * 0.25, objects: Vec::new() });
     }
-    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x) }
+    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x), ordinal: 1 }
 }
 
 /// Place a shaped paragraph in the flow, splitting it across columns and
@@ -1127,7 +1130,7 @@ type CellParagraph = (usize, Shaped, f64);
 /// nothing to that row's height, and makes its last row tall enough for
 /// what is left of it; its box is drawn once that row is placed. The grid
 /// positions a merged cell covers are not drawn.
-fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, shaper: &mut dyn Shaper) {
+fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, ordinals: &[u32], shaper: &mut dyn Shaper) {
     let cells: Vec<(usize, crate::model::TableCell)> =
         range.clone().filter_map(|i| doc.paragraphs[i].style.table_cell.map(|c| (i, c))).collect();
     let Some(&(_, first)) = cells.first() else { return };
@@ -1138,7 +1141,13 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let cols = cells.iter().map(|(_, c)| c.col).max().unwrap_or(0) + 1;
     let rows = cells.iter().map(|(_, c)| c.row).max().unwrap_or(0) + 1;
     let table_w = flow.column_width();
-    let widths = column_widths(doc.table_columns.get(&first.table), cols as usize, table_w);
+    // A table the file made wider than the text runs on into the right
+    // margin, as Word and Writer draw it; only one wider than the page's
+    // edge is narrowed. One sized as a share of the text's width fits it,
+    // and between columns a table keeps to its column.
+    let fits = flow.geometry.columns > 1 || doc.table_relative.contains(&first.table);
+    let room = if fits { table_w } else { table_w + flow.geometry.margin_right_pt.max(0.0) };
+    let widths = column_widths(doc.table_columns.get(&first.table), cols as usize, table_w, room);
     let col_x: Vec<f64> = widths.iter().scan(0.0, |x, w| { let at = *x; *x += w; Some(at) }).collect();
     let spans: &[crate::model::CellSpan] = doc.table_spans.get(&first.table).map_or(&[], Vec::as_slice);
     // The cell at a grid position, as (columns, rows) it spans; `None`
@@ -1173,7 +1182,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             let mut paras = Vec::new();
             for &(i, _) in cells.iter().filter(|(_, c)| c.row == row && c.col == col) {
                 let p = &doc.paragraphs[i];
-                let s = shape_paragraph(p, inner_w, &opts, shaper);
+                let mut s = shape_paragraph(p, inner_w, &opts, shaper);
+                s.ordinal = ordinals.get(i).copied().unwrap_or(1);
                 let ph: f64 = s.lines.iter().map(|l| line_height(p, l.natural_height())).sum::<f64>()
                     + p.style.space_before_pt.max(0.0)
                     + p.style.space_after_pt.max(0.0);
@@ -1429,20 +1439,26 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
             let (i, s, _) = &paras[k];
             let p = &doc.paragraphs[*i];
             let text: Vec<char> = layout_text(&p.runs).chars().collect();
+            // A list item in a cell has its marker, as in the body.
+            if l == 0 && p.style.list != ListKind::None {
+                if let Some(marker) = lists::marker_for(&p.style, s.ordinal) {
+                    flow.push(Item::Marker { para: *i, text: marker, x_pt: text_x + s.marker_x, baseline_pt: y + line_ascent(p, &s.lines[l], h) });
+                }
+            }
             emit_line(flow, *i, p, &text, l, &s.lines[l], text_x + s.box_x, s.box_w, y, h);
         }
         y += slice.height();
     }
 }
 
-/// A table's `cols` column widths: the file's, scaled down to `table_w` if
+/// A table's `cols` column widths: the file's, scaled down to `room` if
 /// they add up to more, or equal columns across `table_w` without them (or
 /// when the table has gained or lost a column since).
-fn column_widths(file: Option<&Vec<f64>>, cols: usize, table_w: f64) -> Vec<f64> {
+fn column_widths(file: Option<&Vec<f64>>, cols: usize, table_w: f64, room: f64) -> Vec<f64> {
     match file.filter(|w| w.len() == cols && w.iter().all(|x| x.is_finite() && *x > 0.0)) {
         Some(w) => {
             let total: f64 = w.iter().sum();
-            let scale = if total > table_w { table_w / total } else { 1.0 };
+            let scale = if total > room { room / total } else { 1.0 };
             w.iter().map(|x| x * scale).collect()
         }
         None => vec![table_w / cols as f64; cols],

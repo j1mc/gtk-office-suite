@@ -1920,6 +1920,46 @@ fn a_regular_run_in_a_heading_survives() {
     assert!(!rt.paragraphs[0].runs[0].style.bold);
 }
 
+/// A table sized as a share of the text's width stays so through a save
+/// and reopen (`w:tblW w:type="pct"`); one with the file's widths does not
+/// become one.
+#[test]
+fn a_table_sized_to_the_text_survives() {
+    let mut d = Document::from_plain_text("after");
+    let shared = d.insert_table_at(0, 1, 2);
+    d.table_columns.insert(shared, vec![200.0, 300.0]);
+    d.table_relative.insert(shared);
+    let rt = round_trip(&d);
+    let table = rt.paragraphs.iter().find_map(|p| p.style.table_cell).unwrap().table;
+    assert_eq!(rt.table_relative.iter().copied().collect::<Vec<_>>(), [table]);
+    d.table_relative.clear();
+    assert!(round_trip(&d).table_relative.is_empty());
+}
+
+/// Capitals survive a save and reopen with the text in its own case, and
+/// a paragraph style's `w:caps` puts its runs in capitals: the crime
+/// supervisor form's title, typed "Crime SUPERVISOR STANDARD and".
+#[test]
+fn capitals_survive_and_come_from_a_style() {
+    use letters_core::RunStyle;
+    let mut d = Document::from_plain_text("Crime supervisor standard\nplain");
+    d.paragraphs[0].runs[0].style = RunStyle { caps: true, ..Default::default() };
+    let rt = round_trip(&d);
+    assert!(rt.paragraphs[0].runs[0].style.caps);
+    assert_eq!(rt.paragraphs[0].text(), "Crime supervisor standard", "the text keeps its case");
+    assert!(!rt.paragraphs[1].runs[0].style.caps);
+    let styled = doctor_parts(&Document::from_plain_text("Crime supervisor standard"), |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        *body = body.replacen("<w:p>", "<w:p><w:pPr><w:pStyle w:val=\"annexatitle\"/></w:pPr>", 1);
+        let styles = parts.get_mut("word/styles.xml").unwrap();
+        *styles = styles.replace(
+            "</w:styles>",
+            "<w:style w:type=\"paragraph\" w:styleId=\"annexatitle\"><w:name w:val=\"annex a title\"/><w:rPr><w:caps/></w:rPr></w:style></w:styles>",
+        );
+    });
+    assert!(styled.paragraphs[0].runs[0].style.caps, "{:?}", styled.paragraphs[0].runs);
+}
+
 /// A floating header or footer line survives a save and reopen as a text
 /// box set against the page, ahead of the line whose paragraph holds it.
 #[test]
