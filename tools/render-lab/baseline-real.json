@@ -152,12 +152,12 @@
     "B": "amber"
   },
   "letters/real-explanatory-note": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-explanatory-note-2": {
     "A": "amber",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-expression-of-interest-form": {
     "A": "amber",
@@ -180,8 +180,8 @@
     "B": "green"
   },
   "letters/real-pre-release-access-to-dcms-sponsored-museums-and": {
-    "A": "amber",
-    "B": "amber"
+    "A": "green",
+    "B": "green"
   },
   "letters/real-provisional-agenda-for-the-sixth-trade-specialis": {
     "A": "green",

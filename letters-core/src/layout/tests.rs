@@ -739,6 +739,24 @@ fn a_floating_image_is_placed_by_its_anchor_not_in_the_line() {
     assert_eq!(heights[0], heights[1], "the line does not grow to hold it");
 }
 
+/// An inline image keeps its room beside it (Word's `distL`/`distR`):
+/// it is drawn that far in from where its line puts it, and what follows
+/// it in the line starts past the room on its right.
+#[test]
+fn an_inline_image_keeps_its_room_beside_it() {
+    let pic = |sides| Run {
+        text: String::new(),
+        style: crate::model::RunStyle { image: Some("x".into()), image_extent_emu: Some((914_400, 914_400)), image_sides_emu: sides, ..Default::default() },
+    };
+    let mut d = doc_of(1, "");
+    d.paragraphs[0].runs = vec![pic(Some((114_300, 114_300))), Run::plain("after")];
+    let t = lay(&d);
+    let x = t.pages[0].items.iter().find_map(|i| match i { Item::Image { x_pt, .. } => Some(*x_pt), _ => None }).unwrap();
+    assert_eq!(x, 72.0 + 9.0, "9pt in from the margin");
+    assert_eq!(inline_size_pt(&pic(Some((114_300, 114_300))), 400.0), (90.0, 72.0), "the line keeps 9pt each side");
+    assert_eq!(inline_size_pt(&pic(None), 400.0), (72.0, 72.0));
+}
+
 #[test]
 fn an_image_wider_than_the_text_box_is_scaled_to_fit() {
     let run = Run {
@@ -772,6 +790,31 @@ fn the_larger_of_space_after_and_space_before_separates_paragraphs() {
     d.paragraphs[2].style.space_before_pt = 4.0;
     let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
     assert_eq!(tops, vec![72.0, 72.0 + LINE + 24.0, 72.0 + 2.0 * LINE + 24.0 + 10.0]);
+}
+
+/// In a document whose spacing adds up (`Document::space_adds`, every
+/// ODF document in Writer), the space after a paragraph and the space
+/// before the next are both kept between them, in the body and in a cell.
+#[test]
+fn spacing_adds_up_where_the_document_says_so() {
+    let mut d = doc_of(3, "x");
+    d.space_adds = true;
+    for p in &mut d.paragraphs {
+        p.style.space_after_pt = 10.0;
+    }
+    d.paragraphs[1].style.space_before_pt = 24.0;
+    d.paragraphs[2].style.space_before_pt = 4.0;
+    let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops, vec![72.0, 72.0 + LINE + 10.0 + 24.0, 72.0 + 2.0 * LINE + 10.0 + 24.0 + 10.0 + 4.0]);
+    let mut d = doc_of(1, "after");
+    d.space_adds = true;
+    let table = d.insert_table_at(0, 1, 1);
+    let at = d.paragraphs.iter().position(|p| p.style.table_cell == Some(TableCell { table, row: 0, col: 0 })).unwrap();
+    let cell = d.paragraphs[at].style.table_cell;
+    let para = |t: &str| Paragraph { style: ParaStyle { table_cell: cell, space_before_pt: 4.5, space_after_pt: 4.5, ..Default::default() }, runs: vec![Run::plain(t)] };
+    d.paragraphs.splice(at..=at, [para("one"), para("two")]);
+    let tops: Vec<f64> = line_items(&lay(&d).pages[0]).iter().map(|l| l.3).collect();
+    assert_eq!(tops[1] - tops[0], LINE + 9.0, "{tops:?}");
 }
 
 /// A shaper that counts the paragraphs it shapes.
@@ -997,6 +1040,9 @@ fn title_subtitle_and_quotes_have_their_own_looks() {
     assert_eq!(xs[2] - xs[4], QUOTE_INDENT_PT);
     assert_eq!(xs[0], xs[4]);
     assert_eq!(paragraph_look(&d.paragraphs[4].style), Look::Body);
+    // A file's own quote style gives the indent; none is added to it.
+    d.paragraphs[2].style.own_look = true;
+    assert_eq!(paragraph_box_x(&d.paragraphs[2]), 0.0);
 }
 
 /// The page stack's lookups (#1282) against the definitions they replace:

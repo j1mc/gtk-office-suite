@@ -273,7 +273,19 @@ fn picture_frame(r: &Run, n: usize, prefix: &str, auto: &mut String) -> Option<S
                 a.y_emu as f64 / EMU_PER_INCH,
             )
         }
-        None => "text:anchor-type=\"as-char\"".to_string(),
+        // The room kept beside it, as the margins of a graphic style.
+        None => match r.style.image_sides_emu {
+            Some((left, right)) => {
+                let style = format!("{prefix}{n}");
+                auto.push_str(&format!(
+                    "<style:style style:name=\"{style}\" style:family=\"graphic\"><style:graphic-properties fo:margin-left=\"{:.2}pt\" fo:margin-right=\"{:.2}pt\"/></style:style>",
+                    left as f64 / 12700.0,
+                    right as f64 / 12700.0,
+                ));
+                format!("draw:style-name=\"{style}\" text:anchor-type=\"as-char\"")
+            }
+            None => "text:anchor-type=\"as-char\"".to_string(),
+        },
     };
     Some(format!(
         "<draw:frame draw:name=\"Picture {n}\" {anchoring} svg:width=\"{:.6}in\" svg:height=\"{:.6}in\">\
@@ -1544,6 +1556,9 @@ struct AutoStyles {
     /// A graphic style's padding above and below its text, in points: a
     /// text box's inset.
     graphic_padding: std::collections::HashMap<String, (f64, f64)>,
+    /// A graphic style's room left and right of its frame, in points
+    /// (`fo:margin-left`, `fo:margin-right`).
+    graphic_sides: std::collections::HashMap<String, (f64, f64)>,
     /// A table-cell style's padding, when it gives one.
     cell_padding: std::collections::HashMap<String, crate::model::CellPadding>,
     /// A paragraph or table style's `style:master-page-name`: the master
@@ -1713,7 +1728,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), graphic_sides: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1748,7 +1763,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                         if let Some(name) = cur_name.clone() {
                             out.graphic.insert(name.clone(), graphic_placement(&e));
                             let pad = |a: &str| attr_val(&e, a).or_else(|| attr_val(&e, "fo:padding")).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
-                            out.graphic_padding.insert(name, (pad("fo:padding-top"), pad("fo:padding-bottom")));
+                            out.graphic_padding.insert(name.clone(), (pad("fo:padding-top"), pad("fo:padding-bottom")));
+                            let side = |a: &str| attr_val(&e, a).and_then(|v| parse_length_pt(&v)).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
+                            out.graphic_sides.insert(name, (side("fo:margin-left"), side("fo:margin-right")));
                         }
                     }
                     "style:table-properties" if cur_family == "table" => {
@@ -2551,6 +2568,8 @@ pub fn read(path: &str) -> Result<Document, String> {
 /// holding a picture frame).
 struct FrameReading {
     extent: Option<(u64, u64)>,
+    /// The room kept beside a frame anchored as a character, in EMU.
+    sides: Option<(u64, u64)>,
     /// Where a frame not anchored as a character floats.
     anchor: Option<crate::model::ImageAnchor>,
     href: Option<String>,
@@ -2866,7 +2885,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default(), first_header: None, first_footer: None };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default(), first_header: None, first_footer: None, space_adds: true };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3251,8 +3270,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                                 ..attr_val(&e, "draw:style-name").and_then(|n| auto.graphic.get(&n).copied()).unwrap_or_default()
                             }
                         });
+                        let sides = (!floating)
+                            .then(|| attr_val(&e, "draw:style-name").and_then(|n| auto.graphic_sides.get(&n).copied()))
+                            .flatten()
+                            .filter(|&(l, r)| l > 0.0 || r > 0.0)
+                            .map(|(l, r)| ((l * 12700.0).round() as u64, (r * 12700.0).round() as u64));
                         frame = Some(FrameReading {
                             anchor,
+                            sides,
                             extent: size("svg:width").zip(size("svg:height")),
                             href: None,
                             alt: String::new(),
@@ -3638,6 +3663,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                                 style: RunStyle {
                                     image: Some(path.to_string_lossy().into_owned()),
                                     image_extent_emu: f.extent,
+                                    image_sides_emu: f.sides,
                                     image_anchor: f.anchor,
                                     ..Default::default()
                                 },
@@ -3957,7 +3983,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             ..attr_val(&e, "draw:style-name").and_then(|n| named.graphic.get(&n).copied()).unwrap_or_default()
                         }
                     });
-                    hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), anchor, href: None, alt: String::new(), in_alt: false, depth: 0 }));
+                    hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), sides: None, anchor, href: None, alt: String::new(), in_alt: false, depth: 0 }));
                     hf_frame_place = hf_box_place(attr_val(&e, "draw:style-name").as_deref(), attr_val(&e, "svg:y").as_deref(), &named);
                 }
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:image" => {
@@ -5468,6 +5494,33 @@ mod tests {
         let path = path.to_str().unwrap();
         write(&d, path).unwrap();
         assert_eq!(read(path).unwrap().header.as_deref(), Some("\nFINANCE BILL\n"));
+    }
+
+    /// An inline picture's room beside it survives a save and reopen, as
+    /// its frame's margins.
+    #[test]
+    fn an_inline_pictures_room_beside_it_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("p.png");
+        std::fs::write(&src, PNG).unwrap();
+        let mut d = Document::from_plain_text("caption");
+        d.paragraphs[0].runs.push(Run {
+            text: String::new(),
+            style: RunStyle { image: Some(src.to_string_lossy().into_owned()), image_extent_emu: Some((914_400, 914_400)), image_sides_emu: Some((114_300, 50_800)), ..Default::default() },
+        });
+        let rt = round_trip(&d);
+        let pic = rt.paragraphs.iter().flat_map(|p| &p.runs).find(|r| r.style.image.is_some()).expect("the picture");
+        assert_eq!(pic.style.image_sides_emu, Some((114_300, 50_800)));
+    }
+
+    /// An ODF document's paragraph spacing adds up between paragraphs, as
+    /// Writer spaces every one (measured: 30pt after and 40pt before stand
+    /// 70pt apart, whatever its settings say); a Word file's does not.
+    #[test]
+    fn an_odf_documents_spacing_adds_up() {
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        assert!(read_package(content, "<office:document-styles/>").space_adds);
+        assert!(round_trip(&Document::from_plain_text("body")).space_adds, "a document saved as ODF is spaced as one");
     }
 
     /// The first page's own header: the screening committee's form has

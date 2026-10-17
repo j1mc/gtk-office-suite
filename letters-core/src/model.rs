@@ -39,6 +39,11 @@ pub struct RunStyle {
     /// inch, OOXML's unit); None = the image's own size.
     #[serde(default)]
     pub image_extent_emu: Option<(u64, u64)>,
+    /// The room kept beside an inline image, left and right, in EMU: an
+    /// ODF frame's margins, or Writer's own 3.19mm a side for a .docx
+    /// picture that leaves out `distL`/`distR`. None is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sides_emu: Option<(u64, u64)>,
     /// A floating image's place on the page; None = inline in the text.
     /// A floating image takes no room in its line: it is drawn where its
     /// anchor puts it, over the text (Word's "in front of text").
@@ -671,6 +676,12 @@ pub struct Document {
     /// over a date at the left).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer_lines: Vec<HfLine>,
+    /// Whether the space after a paragraph and the space before the next
+    /// add up between them, as Writer spaces every ODF document; otherwise
+    /// the larger of the two applies, as Word does and Writer does for a
+    /// Word file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub space_adds: bool,
     /// The first page's own header, when it has one (Word's "different
     /// first page", ODF's `style:header-first`): a title page's letterhead
     /// over a running header. `None` is the first page with the header the
@@ -753,6 +764,10 @@ pub struct Document {
     /// one deleted and undone is still its own.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub next_section_id: u32,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -945,6 +960,7 @@ impl Document {
             footer_alignment: Alignment::Left,
             header_lines: Vec::new(),
             footer_lines: Vec::new(),
+            space_adds: false,
             first_header: None,
             first_footer: None,
             page: None,

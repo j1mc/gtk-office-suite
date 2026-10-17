@@ -2556,6 +2556,74 @@ fn a_list_markers_hanging_survives_writer() {
     }
 }
 
+/// An inline picture's room beside it, through Writer both ways: a .docx
+/// picture that leaves out `distL`/`distR` gets Writer's own frame
+/// margins in an odt. Writer's .docx of a frame with margins writes
+/// `distL="0"` and draws it at the margin (measured), so none comes back
+/// that way: the format cannot carry it out of Writer.
+#[test]
+fn an_inline_pictures_room_beside_it_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0x12, 0x16, 0xf1,
+        0x4d, 0x00, 0x00, 0x00, 0x15, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x3c, 0x21, 0x27, 0xc7,
+        0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc4, 0x00, 0x03, 0x00, 0x13, 0x2e, 0x01, 0x08, 0x6a, 0xc0,
+        0x65, 0x61, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let png_path = dir.path().join("p.png");
+    std::fs::write(&png_path, png).unwrap();
+    let mut d = Document::from_plain_text("caption");
+    d.paragraphs.push(Paragraph {
+        runs: vec![Run {
+            text: String::new(),
+            style: RunStyle { image: Some(png_path.to_string_lossy().into()), image_extent_emu: Some((914_400, 914_400)), image_sides_emu: Some((114_840, 114_840)), ..Default::default() },
+        }],
+        ..Default::default()
+    });
+    let close = |got: &Document, how: &str| {
+        let sides = got.paragraphs.iter().flat_map(|p| &p.runs).find(|r| r.style.image.is_some()).and_then(|r| r.style.image_sides_emu);
+        let (l, r) = sides.unwrap_or_else(|| panic!("{how}: no room beside the picture"));
+        // Writer keeps lengths in hundredths of a millimetre.
+        assert!(l.abs_diff(114_840) <= 360 && r.abs_diff(114_840) <= 360, "{how}: {l} {r}");
+    };
+    let docx_path = dir.path().join("sides.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("sides.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    let Some(rt) = through_lo_to_docx(&d, "sides") else { return };
+    let sides = rt.paragraphs.iter().flat_map(|p| &p.runs).find(|r| r.style.image.is_some()).map(|r| r.style.image_sides_emu);
+    assert_eq!(sides, Some(None), "odt → Writer → docx: Writer's own .docx keeps no room");
+}
+
+/// Paragraph spacing adds up in an ODF document and takes the larger in a
+/// Word one, through Writer both ways: Writer spaces 30pt after and 40pt
+/// before 70pt apart in an odt, whatever its settings, and 40pt in a
+/// docx.
+#[test]
+fn paragraph_spacing_follows_the_format_through_writer() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("First\nSecond");
+    d.paragraphs[0].style.space_after_pt = 30.0;
+    d.paragraphs[1].style.space_before_pt = 40.0;
+    let dir = tempfile::tempdir().unwrap();
+    let docx_path = dir.path().join("spacing.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    assert!(!docx::read(docx_path.to_str().unwrap()).expect("read our docx").space_adds, "a Word file takes the larger");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("spacing.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    let odt = letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt");
+    assert!(odt.space_adds, "docx → Writer → odt adds up");
+    let (after, before) = (odt.paragraphs[0].style.space_after_pt, odt.paragraphs[1].style.space_before_pt);
+    assert!((after - 30.0).abs() < 0.1 && (before - 40.0).abs() < 0.1, "the spacing itself: {after} {before}");
+    let Some(rt) = through_lo_to_docx(&d, "spacing") else { return };
+    assert!(!rt.space_adds, "odt → Writer → docx takes the larger");
+}
+
 /// The first page's own header and footer, and the spacing of a header's
 /// lines, through Writer both ways: the screening committee form's
 /// letterhead over blank lines with Normal's space after, on its first

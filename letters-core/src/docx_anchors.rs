@@ -26,6 +26,66 @@ pub fn placements(document_xml: &str) -> Placements {
     out
 }
 
+/// Each image relationship's inline pictures' room beside them, left and
+/// right in EMU, in document order.
+pub type Sides = HashMap<String, VecDeque<(u64, u64)>>;
+
+/// LibreOffice's own room beside a picture frame, 3.19mm a side, in EMU:
+/// what an inline picture whose file leaves out `distL`/`distR` keeps.
+pub const FRAME_SIDE_EMU: u64 = 114_840;
+
+/// The room each `wp:inline` picture of `document_xml` keeps beside it,
+/// as LibreOffice lays it out. Word and Writer take no room for a value
+/// the file gives (`distL="114300"` draws at the margin, measured), but
+/// a picture whose file leaves `distL`/`distR` out gets Writer's own
+/// frame margins (it sits 9pt in, measured; 3.19mm in Writer's odt).
+pub fn inline_sides(document_xml: &str) -> Sides {
+    let mut out = Sides::new();
+    let mut rest = document_xml;
+    while let Some(at) = rest.find("<wp:inline") {
+        let Some(len) = rest[at..].find("</wp:inline>") else { break };
+        let inline = &rest[at..at + len];
+        rest = &rest[at + len..];
+        let Some(embed) = attr(inline, "<a:blip ", "r:embed") else { continue };
+        let side = |name| if attr(inline, "<wp:inline", name).is_some() { 0 } else { FRAME_SIDE_EMU };
+        out.entry(embed.to_string()).or_default().push_back((side("distL"), side("distR")));
+    }
+    out
+}
+
+/// `document_xml` with its `n`-th `wp:inline` keeping room beside it when
+/// `sides[n]` has any: its `distL`/`distR` left out, which Writer takes
+/// as its own frame margins (`FRAME_SIDE_EMU`), the one room beside an
+/// inline picture a .docx can say. The others are left as they are.
+pub fn sides(document_xml: &str, sides: &[(u64, u64)]) -> String {
+    let mut out = String::with_capacity(document_xml.len());
+    let mut rest = document_xml;
+    let mut n = 0;
+    while let Some(at) = rest.find("<wp:inline") {
+        let Some(end) = rest[at..].find('>').map(|e| at + e + 1) else { break };
+        out.push_str(&rest[..at]);
+        let tag = &rest[at..end];
+        match sides.get(n).filter(|&&s| s != (0, 0)) {
+            Some(_) => {
+                let unset = |tag: String, name: &str| match tag.find(&format!(" {name}=\"")) {
+                    Some(i) => {
+                        let v0 = i + name.len() + 3;
+                        let v1 = v0 + tag[v0..].find('"').map_or(0, |q| q + 1);
+                        format!("{}{}", &tag[..i], &tag[v1..])
+                    }
+                    None => tag,
+                };
+                out.push_str(&unset(unset(tag.to_string(), "distL"), "distR"));
+            }
+            None => out.push_str(tag),
+        }
+        rest = &rest[end..];
+        n += 1;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A picture found in raw markup: its image relationship, alt text,
 /// displayed size in EMU, and whether it floats.
 pub type RawPicture = (String, Option<String>, Option<(u64, u64)>, bool);
