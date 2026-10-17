@@ -22,6 +22,11 @@ pub struct RunStyle {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub regular: bool,
     pub italic: bool,
+    /// Drawn in capitals, whatever case the text is stored in: OOXML's
+    /// `<w:caps/>`, ODF's `fo:text-transform="uppercase"` (a form's title
+    /// style). The text keeps its own case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caps: bool,
     pub underline: bool,
     pub strikethrough: bool,
     pub highlight: bool,

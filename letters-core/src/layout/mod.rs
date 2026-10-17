@@ -607,7 +607,7 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
                 .iter()
                 .position(|p| p.style.table_cell.is_none_or(|c| c.table != cell.table))
                 .map_or(doc.paragraphs.len(), |n| i + n);
-            layout_table(&mut flow, doc, i..end, shaper);
+            layout_table(&mut flow, doc, i..end, &ordinals, shaper);
             i = end;
             continue;
         }
@@ -723,6 +723,9 @@ struct Shaped {
     box_w: f64,
     /// List marker x, relative to the column's left edge.
     marker_x: f64,
+    /// A list item's number in its list, for its marker: a table sets its
+    /// cells' (the body passes the paragraph's own).
+    ordinal: u32,
 }
 
 /// Left edge of a paragraph's text box, in points from its column's (or
@@ -840,7 +843,7 @@ fn shape_paragraph(p: &Paragraph, avail_w: f64, opts: &LayoutOptions, shaper: &m
         let size = opts.font_size_pt;
         lines.push(LineBox { start: 0, end: 0, x_pt: 0.0, width_pt: 0.0, ascent_pt: size * 0.9, descent_pt: size * 0.25, objects: Vec::new() });
     }
-    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x) }
+    Shaped { lines, box_x, box_w, marker_x: box_x - p.style.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x), ordinal: 1 }
 }
 
 /// Place a shaped paragraph in the flow, splitting it across columns and
@@ -1127,7 +1130,7 @@ type CellParagraph = (usize, Shaped, f64);
 /// nothing to that row's height, and makes its last row tall enough for
 /// what is left of it; its box is drawn once that row is placed. The grid
 /// positions a merged cell covers are not drawn.
-fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, shaper: &mut dyn Shaper) {
+fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, ordinals: &[u32], shaper: &mut dyn Shaper) {
     let cells: Vec<(usize, crate::model::TableCell)> =
         range.clone().filter_map(|i| doc.paragraphs[i].style.table_cell.map(|c| (i, c))).collect();
     let Some(&(_, first)) = cells.first() else { return };
@@ -1179,7 +1182,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
             let mut paras = Vec::new();
             for &(i, _) in cells.iter().filter(|(_, c)| c.row == row && c.col == col) {
                 let p = &doc.paragraphs[i];
-                let s = shape_paragraph(p, inner_w, &opts, shaper);
+                let mut s = shape_paragraph(p, inner_w, &opts, shaper);
+                s.ordinal = ordinals.get(i).copied().unwrap_or(1);
                 let ph: f64 = s.lines.iter().map(|l| line_height(p, l.natural_height())).sum::<f64>()
                     + p.style.space_before_pt.max(0.0)
                     + p.style.space_after_pt.max(0.0);
@@ -1435,6 +1439,12 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
             let (i, s, _) = &paras[k];
             let p = &doc.paragraphs[*i];
             let text: Vec<char> = layout_text(&p.runs).chars().collect();
+            // A list item in a cell has its marker, as in the body.
+            if l == 0 && p.style.list != ListKind::None {
+                if let Some(marker) = lists::marker_for(&p.style, s.ordinal) {
+                    flow.push(Item::Marker { para: *i, text: marker, x_pt: text_x + s.marker_x, baseline_pt: y + line_ascent(p, &s.lines[l], h) });
+                }
+            }
             emit_line(flow, *i, p, &text, l, &s.lines[l], text_x + s.box_x, s.box_w, y, h);
         }
         y += slice.height();

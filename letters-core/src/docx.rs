@@ -2038,6 +2038,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                         let mut r = cp.add_run(&run.text);
                         if run.style.bold { r = r.bold(true); } else if run.style.regular { r = r.bold(false); }
                         if run.style.italic { r = r.italic(true); }
+                        if run.style.caps { r = r.all_caps(true); }
                         if run.style.underline { r = r.underline(true); }
                         if run.style.strikethrough { r = r.strike(true); }
                         if run.style.highlight { r = r.highlight("yellow"); }
@@ -2341,6 +2342,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             let mut r = p.add_run(&text);
             if run.style.bold { r = r.bold(true); } else if run.style.regular { r = r.bold(false); }
             if run.style.italic { r = r.italic(true); }
+            if run.style.caps { r = r.all_caps(true); }
             if run.style.underline { r = r.underline(true); }
             if run.style.strikethrough { r = r.strike(true); }
             if run.style.highlight { r = r.highlight("yellow"); }
@@ -3186,6 +3188,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 // Not bold in a heading, which is drawn bold.
                 regular: heading.is_some() && r.bold_value().or(eff.bold) == Some(false),
                 italic: r.italic_value().unwrap_or(eff.italic == Some(true)),
+                caps: r.all_caps_value().unwrap_or(eff.caps == Some(true)),
                 underline: r.is_underline(),
                 strikethrough: r.is_strike(),
                 highlight: run_is_highlighted(&r),
