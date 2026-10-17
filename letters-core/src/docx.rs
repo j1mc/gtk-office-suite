@@ -1304,6 +1304,8 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     let table_padding = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_padding(t)?))).collect();
     let table_unruled: std::collections::BTreeSet<u32> = tables.iter().enumerate().filter(|(_, t)| !table_ruled(t)).map(|(ti, _)| ti as u32).collect();
     let table_valign = tables.iter().enumerate().filter_map(|(ti, t)| Some((ti as u32, cell_valign(t)?))).collect();
+    // A table sized as a share of the text's width (`w:tblW w:type="pct"`).
+    let table_relative = tables.iter().enumerate().filter(|(_, t)| matches!(t.width_mode(), Some(rdocx::TableWidth::Percentage(_)))).map(|(ti, _)| ti as u32).collect();
     let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
 
     let mut read = Document {
@@ -1325,6 +1327,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_fills,
         table_padding,
         table_unruled,
+        table_relative,
         table_open_edges,
         table_valign,
         sections: Vec::new(),
@@ -1921,6 +1924,11 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                 for (c, w) in widths.iter().enumerate() {
                     tbl.set_column_width(c, rdocx::Length::pt(*w));
                 }
+            }
+            // A table sized as a share of the text's width is written so:
+            // all of it, its columns in proportion.
+            if doc.table_relative.contains(&tc0.table) {
+                tbl.set_width_pct(100.0);
             }
             if let Some(pad) = doc.table_padding.get(&tc0.table) {
                 tbl.set_cell_margins(rdocx::Length::pt(pad.top_pt), rdocx::Length::pt(pad.right_pt), rdocx::Length::pt(pad.bottom_pt), rdocx::Length::pt(pad.left_pt));

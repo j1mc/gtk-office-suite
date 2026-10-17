@@ -309,8 +309,10 @@ fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
 
 /// A table is drawn with the file's column widths: a narrow number column
 /// beside a wide text one, as Word and LibreOffice draw an agenda. Widths
-/// wider than the column box are scaled to fit, and a table whose column
-/// count changed since it was read falls back to equal columns.
+/// wider than the text run on into the right margin and are scaled only
+/// past the page's edge; a table sized as a share of the text's width is
+/// scaled to it; and a table whose column count changed since it was read
+/// falls back to equal columns.
 #[test]
 fn a_table_takes_the_files_column_widths() {
     let cells_x_w = |d: &Document| -> Vec<(f64, f64)> {
@@ -330,9 +332,16 @@ fn a_table_takes_the_files_column_widths() {
     assert_eq!(cells_x_w(&d), [(x0, 36.0), (x0 + 36.0, 400.0)]);
 
     let box_w = 595.3 - 144.0;
+    d.table_columns.insert(table, vec![240.0, 240.0]);
+    assert_eq!(cells_x_w(&d), [(x0, 240.0), (x0 + 240.0, 240.0)], "into the right margin, as the file has it");
     d.table_columns.insert(table, vec![box_w, box_w]);
     let got = cells_x_w(&d);
-    assert!((got[0].1 - box_w / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + box_w / 2.0)).abs() < 1e-9, "scaled to fit: {got:?}");
+    let room = box_w + 72.0;
+    assert!((got[0].1 - room / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + room / 2.0)).abs() < 1e-9, "scaled to the page's edge: {got:?}");
+    d.table_relative.insert(table);
+    let got = cells_x_w(&d);
+    assert!((got[0].1 - box_w / 2.0).abs() < 1e-9 && (got[1].0 - (x0 + box_w / 2.0)).abs() < 1e-9, "a share of the text fits it: {got:?}");
+    d.table_relative.clear();
 
     d.table_columns.insert(table, vec![36.0, 200.0, 100.0]);
     let got = cells_x_w(&d);
