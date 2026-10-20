@@ -70,3 +70,6 @@ fn render_text(
     let (_, h) = layout.pixel_size();
     *cy += h as f64 + 2.0;
 }
+
+#[cfg(test)]
+mod tests;
