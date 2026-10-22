@@ -2282,3 +2282,31 @@ fn a_line_break_within_a_paragraph_survives() {
     d.paragraphs[0].runs = vec![Run::plain("Statistical Release\nOctober 2020")];
     assert_eq!(round_trip(&d).paragraphs[0].runs, d.paragraphs[0].runs);
 }
+
+/// A list item's own indent, a zero one too, is kept over its level's: the
+/// business appointment rules' bullets set `w:left="0" w:hanging="2"` over
+/// a 0.5in level, and stand at the margin. Read as no indent at all, they
+/// were drawn at the level's.
+#[test]
+fn a_list_items_own_zero_indent_is_kept() {
+    let mut d = Document::from_plain_text("item");
+    d.paragraphs[0].style.list = ListKind::Bullet;
+    let doctored = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        let at = body.find("</w:numPr>").expect("a list item") + "</w:numPr>".len();
+        let tail = &body[at..];
+        // Our writer's own indent, replaced by the file's.
+        let end = tail.find("/>").map(|e| at + e + 2).filter(|_| tail.starts_with("<w:ind"));
+        match end {
+            Some(e) => body.replace_range(at..e, "<w:ind w:left=\"0\" w:hanging=\"2\"/>"),
+            None => body.insert_str(at, "<w:ind w:left=\"0\" w:hanging=\"2\"/>"),
+        }
+    });
+    let st = &doctored.paragraphs[0].style;
+    assert_eq!(st.list, ListKind::Bullet);
+    assert!((st.left_indent_pt + letters_core::lists::text_indent_pt(0)).abs() < 0.01, "at the margin: {}", st.left_indent_pt);
+    assert_eq!(st.list_hanging_pt, Some(0.1));
+    // And as we write it back.
+    let rt = round_trip(&doctored);
+    assert_eq!((rt.paragraphs[0].style.left_indent_pt, rt.paragraphs[0].style.list_hanging_pt), (st.left_indent_pt, st.list_hanging_pt));
+}

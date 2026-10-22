@@ -2238,7 +2238,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             // LibreOffice and Word drew our lists twice as deep as we do;
             // the edit-render journey's bullet showed it (#1201). The reader
             // takes the list's own indent back off.
-            let text = para.style.left_indent_pt.max(0.0) + crate::lists::text_indent_pt(para.style.list_level);
+            let text = (para.style.left_indent_pt + crate::lists::text_indent_pt(para.style.list_level)).max(0.0);
             let hanging = para.style.list_hanging_pt.unwrap_or(crate::lists::HANGING_PT);
             p = p.indent_left(rdocx::Length::pt(text)).hanging_indent(rdocx::Length::pt(hanging));
         } else if para.style.left_indent_pt != 0.0 {
@@ -2406,6 +2406,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             if let Some(hp) = run.style.font_size_hp { r = r.size(hp as f64 / 2.0); }
             if let Some(c) = &run.style.color { r = r.color(c); }
             if let Some(tw) = run.style.letter_spacing_tw { r = r.character_spacing(rdocx::Length::pt(f64::from(tw) / 20.0)); }
+            if let Some(hp) = run.style.position_hp { r = r.position(hp); }
             match run.style.vert_align {
                 Some(crate::model::VertAlign::Superscript) => { r = r.superscript(); }
                 Some(crate::model::VertAlign::Subscript) => { r = r.subscript(); }
@@ -3051,12 +3052,17 @@ fn list_indent_from_declared(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>,
     }
     let Some((num_id, level)) = p.numbering().filter(|&(id, _)| id != 0) else { return };
     let text = crate::lists::text_indent_pt(style.list_level);
-    let declared = if style.left_indent_pt != 0.0 {
-        style.left_indent_pt
-    } else {
-        doc.numbering_level(num_id, level).and_then(|l| l.indent_left).map(twips_pt).unwrap_or(text)
+    // The paragraph's own indent, a zero one too: the business appointment
+    // rules' items set `w:left="0"` over their level's 0.5in, and stand at
+    // the margin.
+    let own = p.indent_left().or_else(|| p.indent_start()).map(|l| l.to_pt());
+    let declared = match own {
+        Some(v) => v,
+        None if style.left_indent_pt != 0.0 => style.left_indent_pt,
+        None => doc.numbering_level(num_id, level).and_then(|l| l.indent_left).map(twips_pt).unwrap_or(text),
     };
-    style.left_indent_pt = (declared - text).max(0.0);
+    // Left of the list's own indent as far as the margin.
+    style.left_indent_pt = (declared - text).max(-text);
     // The marker hangs as far as the paragraph says, else its level.
     let hanging = if style.first_line_indent_pt < 0.0 {
         Some(-style.first_line_indent_pt)
@@ -3269,6 +3275,15 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
             .map(|c| c.trim_start_matches('#').to_uppercase())
             .or_else(|| (auto && heading.is_some()).then(|| "000000".to_string()))
             .or_else(|| eff.color.as_deref().filter(|c| !c.eq_ignore_ascii_case("auto")).map(|c| c.to_uppercase()));
+        // LibreOffice writes a superscript or subscript as the run's own
+        // position at a smaller size than the text around it (HTML's
+        // `<sup>` as `w:position="8"` at 9.5pt in 12pt text), not as
+        // `w:vertAlign`.
+        let around = eff.sz.map(|s| s.0).or(base.size_hp.map(u32::from)).unwrap_or(24);
+        let script = r
+            .position()
+            .filter(|&p| p != 0 && r.size().is_some_and(|pt| ((pt * 2.0).round() as u32) < around))
+            .map(|p| if p > 0 { crate::model::VertAlign::Superscript } else { crate::model::VertAlign::Subscript });
         runs.push(Run {
             text,
             style: RunStyle {
@@ -3295,16 +3310,14 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 font_size_hp: size_hp,
                 color,
                 letter_spacing_tw: r.character_spacing().or(eff.spacing).map(|t| t.0).filter(|&t| t != 0),
+                // Raised or lowered at its own size: the business
+                // appointment rules' Normal lowers every run half a point,
+                // which LibreOffice makes room for on every line.
+                position_hp: if script.is_some() { None } else { r.position().or(eff.position).filter(|&p| p != 0) },
                 vert_align: match r.vert_align() {
                     Some("superscript") => Some(crate::model::VertAlign::Superscript),
                     Some("subscript") => Some(crate::model::VertAlign::Subscript),
-                    // LibreOffice encodes super/subscript as raised/lowered
-                    // position instead of vertAlign.
-                    _ => match r.position() {
-                        Some(p) if p > 0 => Some(crate::model::VertAlign::Superscript),
-                        Some(p) if p < 0 => Some(crate::model::VertAlign::Subscript),
-                        _ => None,
-                    },
+                    _ => script,
                 },
             },
         });

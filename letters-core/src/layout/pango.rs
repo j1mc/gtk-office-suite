@@ -211,6 +211,10 @@ impl PangoShaper {
             if let Some(tw) = st.letter_spacing_tw {
                 add(pango::AttrInt::new_letter_spacing(to_units(f64::from(tw) / 20.0)).into());
             }
+            // Pango grows the line by the rise, as LibreOffice does.
+            if let Some(hp) = st.position_hp {
+                add(pango::AttrInt::new_rise(to_units(f64::from(hp) / 2.0)).into());
+            }
             if let Some((r, g, b)) = st.color.as_deref().and_then(parse_hex) {
                 add(pango::AttrColor::new_foreground(r, g, b).into());
             } else if st.link.is_some() {
@@ -382,6 +386,26 @@ impl Shaper for PangoShaper {
             for l in &mut lines {
                 l.descent_pt += gap;
             }
+        }
+        // Raised or lowered text (`position_hp`) grows its line by as much,
+        // as LibreOffice draws it; Pango (since 1.50) sizes a line by its
+        // fonts alone.
+        let mut at = 0;
+        let shifts: Vec<(usize, usize, f64)> = req
+            .runs
+            .iter()
+            .map(|r| {
+                let n = r.text.chars().count();
+                at += n;
+                (at - n, at, r.style.position_hp.map_or(0.0, |hp| f64::from(hp) / 2.0))
+            })
+            .filter(|&(_, _, pt)| pt != 0.0)
+            .collect();
+        for l in &mut lines {
+            let on = shifts.iter().filter(|&&(s, e, _)| s < l.end.max(l.start + 1) && e > l.start);
+            let (up, down) = on.fold((0.0f64, 0.0f64), |(u, d), &(_, _, pt)| (u.max(pt), d.max(-pt)));
+            l.ascent_pt += up;
+            l.descent_pt += down;
         }
         lines
     }
@@ -1337,6 +1361,24 @@ mod tests {
         for x in &xs[1..] {
             assert!((x - (margin + 72.0)).abs() < 0.5, "wrapped lines at the 72pt indent: {xs:?}");
         }
+    }
+
+    /// Text lowered from its baseline (`w:position`) grows its line by as
+    /// much, as LibreOffice draws it: the business appointment rules'
+    /// Normal lowers every run half a point, and its lines stand 14.3pt
+    /// apart where plain 12pt Arial's stand 13.8pt.
+    #[test]
+    fn lowered_text_grows_its_line() {
+        let opts = LayoutOptions::default();
+        let height = |position_hp: Option<i32>| {
+            let mut d = doc(1, "Lowered");
+            d.paragraphs[0].runs[0].style.position_hp = position_hp;
+            let t = layout(&d, &opts, &mut PangoShaper::new());
+            let line = t.pages[0].lines().next().map(|l| match l { Item::Line { height_pt, .. } => *height_pt, _ => 0.0 }).unwrap();
+            line
+        };
+        let (plain, lowered) = (height(None), height(Some(-2)));
+        assert!((lowered - plain - 1.0).abs() < 0.1, "{plain} {lowered}");
     }
 
     #[test]
