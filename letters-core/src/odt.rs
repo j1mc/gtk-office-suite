@@ -185,9 +185,22 @@ fn para_style_props(st: &ParaStyle) -> String {
     // spacing was silently gone the moment the file reached Writer.
     if st.space_before_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-top=\"{:.2}pt\"", st.space_before_pt)); }
     if st.space_after_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-bottom=\"{:.2}pt\"", st.space_after_pt)); }
-    if st.left_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-left=\"{:.2}pt\"", st.left_indent_pt)); }
+    // A list item placed off its level writes where its text and marker
+    // stand, which replace its list level's (label-alignment) in Writer
+    // and in the reader.
+    let own_list_place = st.list != ListKind::None && (st.left_indent_pt.abs() > 0.01 || st.list_hanging_pt.is_some());
+    if own_list_place {
+        let hanging = st.list_hanging_pt.unwrap_or(crate::lists::HANGING_PT);
+        props.push_str(&format!(
+            " fo:margin-left=\"{:.2}pt\" fo:text-indent=\"{:.2}pt\"",
+            st.left_indent_pt + crate::lists::text_indent_pt(st.list_level),
+            -hanging
+        ));
+    } else {
+        if st.left_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-left=\"{:.2}pt\"", st.left_indent_pt)); }
+        if st.first_line_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:text-indent=\"{:.2}pt\"", st.first_line_indent_pt)); }
+    }
     if st.right_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:margin-right=\"{:.2}pt\"", st.right_indent_pt)); }
-    if st.first_line_indent_pt.abs() > 0.01 { props.push_str(&format!(" fo:text-indent=\"{:.2}pt\"", st.first_line_indent_pt)); }
     props
 }
 
@@ -3467,15 +3480,29 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     // that less the list indent the layout adds (as for a
                     // Word list, `docx::list_indent_from_declared`). A
                     // Word-made .odt's 0.5in level is drawn at 0.5in.
-                    if kind != ListKind::None && style.left_indent_pt == 0.0 {
+                    if kind != ListKind::None {
                         let own = item_styles.get(usize::from(list_level.max(1) - 1)).cloned().flatten();
                         let name = own.as_ref().or_else(|| list_style_names.last().and_then(Option::as_ref));
                         let declared = name.and_then(|n| list_indents.get(n)).and_then(|l| l.get(usize::from(list_level.max(1) - 1)).copied().flatten());
-                        if let Some(declared) = declared {
-                            style.left_indent_pt = (declared - crate::lists::text_indent_pt(style.list_level)).max(0.0);
-                            if style.first_line_indent_pt < 0.0 {
-                                style.first_line_indent_pt = 0.0;
+                        let text = crate::lists::text_indent_pt(style.list_level);
+                        if style.left_indent_pt == 0.0 {
+                            if let Some(declared) = declared {
+                                style.left_indent_pt = (declared - text).max(0.0);
+                                if style.first_line_indent_pt < 0.0 {
+                                    style.first_line_indent_pt = 0.0;
+                                }
                             }
+                        } else if declared.is_some() {
+                            // A label-aligned list's paragraph that sets its
+                            // own indents replaces the level's, as Writer
+                            // draws it: its text at the paragraph's left
+                            // margin, the marker hanging by its first-line
+                            // indent (a Word-made list's 0.2958in items
+                            // stand their bullets at the page margin).
+                            style.left_indent_pt = (style.left_indent_pt - text).max(-text);
+                            let hanging = (-style.first_line_indent_pt).max(0.0);
+                            style.list_hanging_pt = Some(hanging).filter(|h| (h - crate::lists::HANGING_PT).abs() > 0.5);
+                            style.first_line_indent_pt = 0.0;
                         }
                     }
                     if in_toc && !in_index_title {
@@ -5036,6 +5063,34 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!(rt.paragraphs[0].style.left_indent_pt, 0.0);
         assert_eq!(rt.paragraphs[1].style.left_indent_pt, 0.0);
+    }
+
+    /// A label-aligned list's item whose paragraph sets its own indents
+    /// stands where the paragraph says, as Writer draws it: the W1 notes'
+    /// bullets (items at 0.2958in hanging 0.2958in, over a 0.5in level)
+    /// sit at the page margin, their text at 0.2958in. Such an item
+    /// writes its place back as Writer reads it.
+    #[test]
+    fn a_list_items_own_indents_replace_its_levels() {
+        let content = "<office:document-content><office:automatic-styles>\
+            <style:style style:name=\"P1\" style:family=\"paragraph\" style:list-style-name=\"L1\"><style:paragraph-properties fo:margin-left=\"0.2958in\" fo:text-indent=\"-0.2958in\"/></style:style>\
+            <text:list-style style:name=\"L1\"><text:list-level-style-bullet text:level=\"1\" text:bullet-char=\"•\">\
+              <style:list-level-properties text:list-level-position-and-space-mode=\"label-alignment\">\
+              <style:list-level-label-alignment text:label-followed-by=\"listtab\" fo:margin-left=\"0.5in\" fo:text-indent=\"-0.25in\"/>\
+              </style:list-level-properties></text:list-level-style-bullet></text:list-style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:list text:style-name=\"L1\"><text:list-item><text:p text:style-name=\"P1\">a director</text:p></text:list-item></text:list>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let item = &d.paragraphs[0];
+        assert_eq!(item.style.list, ListKind::Bullet);
+        let text_x = crate::layout::paragraph_box_x(item);
+        assert!((text_x - 21.2976).abs() < 0.01, "text at 0.2958in: {text_x}");
+        let hanging = item.style.list_hanging_pt.expect("the paragraph's hanging");
+        assert!((text_x - hanging).abs() < 0.01, "the bullet at the margin: {hanging}");
+        assert_eq!(item.style.first_line_indent_pt, 0.0);
+        let rt = round_trip(&d).paragraphs[0].style.clone();
+        assert!((rt.left_indent_pt - item.style.left_indent_pt).abs() < 0.01 && rt.list_hanging_pt.is_some_and(|h| (h - hanging).abs() < 0.01), "{rt:?}");
     }
 
     /// Writer's default paragraph style is the root of every style chain

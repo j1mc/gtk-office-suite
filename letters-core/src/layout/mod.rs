@@ -659,7 +659,13 @@ fn keep_chain(doc: &Document, n: usize, section_end: usize, col_w: f64, opts: &L
         let p = doc.paragraphs.get(i).filter(|p| p.style.table_cell.is_none())?;
         let s = shape_paragraph(p, col_w, opts, shaper);
         let chained = keeps_with_next(p) && i + 1 < section_end && k < 10 && doc.paragraphs.get(i + 1).is_some_and(|n| n.style.table_cell.is_none());
-        let lines = if chained { s.lines.len() } else { s.lines.len().min(orphan_widow(&p.style, opts).0.max(1)) };
+        // Its first lines, or all of it when it is too short to leave its
+        // orphans here and its widows over, as `place_paragraph` breaks
+        // it: a three-line paragraph after a heading moves whole, the
+        // heading with it (Writer's W1 notes, "Warehouse name").
+        let (orphans, widows) = orphan_widow(&p.style, opts);
+        let whole = chained || s.lines.len() < orphans.max(1) + widows.max(1);
+        let lines = if whole { s.lines.len() } else { orphans.max(1) };
         total += p.style.space_before_pt + s.lines[..lines].iter().map(|l| line_height(p, l.natural_height())).sum::<f64>();
         if !chained {
             return Some(total);

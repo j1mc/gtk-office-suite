@@ -125,6 +125,22 @@ fn a_heading_is_kept_with_what_follows_it() {
     assert_eq!(t.page_of_paragraph(45), Some(1));
 }
 
+/// A paragraph too short to split (three lines, two orphans and two
+/// widows) moves whole, and the heading before it goes with it rather
+/// than being left at the foot of the page, as Writer pages the W1 notes'
+/// "Warehouse name".
+#[test]
+fn a_heading_goes_with_a_paragraph_too_short_to_split() {
+    // 42 lines used; the heading (24pt) and two lines would fit, three
+    // would not.
+    let mut d = doc_of(42, "x");
+    d.paragraphs.push(Paragraph { style: ParaStyle { heading: Some(1), ..Default::default() }, runs: vec![Run::plain("Chapter")] });
+    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain(&"word ".repeat(40))] });
+    let t = lay(&d);
+    assert_eq!(t.pages[1].items.iter().filter(|i| matches!(i, Item::Line { source: Source::Paragraph(43), .. })).count(), 3);
+    assert_eq!(t.page_of_paragraph(42), Some(1), "the heading moved with its body");
+}
+
 #[test]
 fn list_items_hang_their_marker_before_indented_text() {
     let mut d = doc_of(4, "item");
