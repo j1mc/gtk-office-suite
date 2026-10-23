@@ -688,6 +688,42 @@ fn page_numbers_are_saved_as_fields() {
 
 // ── Page geometry & font family round-trip (PARITY stragglers) ───────
 
+/// A page border survives a save and reopen, measured from the text
+/// (`w:offsetFrom="text"`), the margins untouched.
+#[test]
+fn a_page_border_round_trips() {
+    use letters_core::model::{PageBorder, PageGeometry};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("border.docx");
+    let mut d = Document::from_plain_text("body");
+    let border = PageBorder { width_pt: 0.75, color: 0x80_00_00, padding_pt: [1.0, 4.0, 2.0, 4.0] };
+    d.page = Some(PageGeometry { border: Some(border), ..PageGeometry::default() });
+    docx::write(&d, path.to_str().unwrap()).expect("write");
+    let pg = docx::read(path.to_str().unwrap()).expect("read").page.expect("page geometry lost");
+    assert!(pg.approx_eq(&d.page.unwrap()), "geometry drifted: {pg:?}");
+    assert_eq!(pg.border, Some(border));
+}
+
+/// A border measured from the page's edge (`w:offsetFrom="page"`, as
+/// Word's own dialog writes it) is as far from the text as the margin
+/// leaves.
+#[test]
+fn a_page_border_from_the_page_edge_is_read_against_the_margin() {
+    let mut d = Document::from_plain_text("body");
+    d.page = Some(letters_core::model::PageGeometry::default());
+    let d = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        let at = body.find("<w:pgMar").expect("the section's margins");
+        let at = at + body[at..].find("/>").unwrap() + 2;
+        let edge = |side: &str| format!(r#"<w:{side} w:val="single" w:sz="8" w:space="24" w:color="auto"/>"#);
+        let borders = format!(r#"<w:pgBorders w:offsetFrom="page">{}{}{}{}</w:pgBorders>"#, edge("top"), edge("left"), edge("bottom"), edge("right"));
+        body.insert_str(at, &borders);
+    });
+    let b = d.page.and_then(|p| p.border).expect("the page's border");
+    assert_eq!((b.width_pt, b.color), (1.0, 0));
+    assert_eq!(b.padding_pt, [72.0 - 24.0 - 1.0; 4]);
+}
+
 #[test]
 fn docx_page_geometry_round_trips() {
     use letters_core::model::PageGeometry;
@@ -705,6 +741,7 @@ fn docx_page_geometry_round_trips() {
         column_gap_pt: 18.0,
         header_pt: Some(18.0),
         footer_pt: Some(27.5),
+        border: None,
     });
     docx::write(&d, path.to_str().unwrap()).expect("write");
     let rt = docx::read(path.to_str().unwrap()).expect("read");
@@ -2183,6 +2220,7 @@ fn multi_section_docx_round_trips_geometry_and_headers() {
         column_gap_pt: 24.0,
         header_pt: Some(20.0),
         footer_pt: Some(22.0),
+        border: None,
     };
     d.sections = vec![
         DocSection { id: 0, range: ParagraphRange::new(0, 1), geometry: portrait, header: None, footer: None },

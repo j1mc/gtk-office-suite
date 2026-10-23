@@ -1162,6 +1162,18 @@ impl Typeset {
                         pangocairo::functions::show_layout_line(cr, &l);
                     }
                 }
+                Item::PageBorder { x_pt, y_pt, width_pt, height_pt, line_pt, color } => {
+                    let _ = cr.save();
+                    let channel = |shift: u32| f64::from((color >> shift) & 0xFF) / 255.0;
+                    cr.set_source_rgb(channel(16), channel(8), channel(0));
+                    cr.set_line_width(*line_pt);
+                    // The box is the rule's outer edge; cairo strokes
+                    // centred on the path.
+                    let half = line_pt / 2.0;
+                    cr.rectangle(x_pt + half, y_pt + half, width_pt - line_pt, height_pt - line_pt);
+                    let _ = cr.stroke();
+                    let _ = cr.restore();
+                }
                 Item::Rule { x_pt, y_pt, width_pt } => {
                     let _ = cr.save();
                     cr.set_line_width(0.5);

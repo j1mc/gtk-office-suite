@@ -284,6 +284,10 @@ pub enum Item {
     /// page: `top_edge` only on its first box, `bottom_edge` only on its
     /// last, so a border opens where the paragraph continues.
     ParaBox { para: usize, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, borders: crate::model::ParaBorders, top_edge: bool, bottom_edge: bool },
+    /// The page's border (`PageGeometry::border`): a rule `line_pt` wide
+    /// in `color` (0xRRGGBB) whose outer edge is this box, around the
+    /// page's text and the header and footer it shows.
+    PageBorder { x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, line_pt: f64, color: u32 },
 }
 
 /// One page of the render tree.
@@ -1361,9 +1365,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         let mut min_left = file_h.map_or(0.0, |h| h.pt).max(tall_need);
         let mut first_piece = true;
         loop {
-            let room = flow.bottom() - flow.y - rule_pt;
             // How many of each cell's remaining slices fit in `room`.
-            let fit = |cell: &[Slice], from: usize| -> (usize, f64) {
+            let fit = |cell: &[Slice], from: usize, room: f64| -> (usize, f64) {
                 let mut h = 0.0;
                 let mut n = from;
                 while n < cell.len() && h + cell[n].height() <= room + 1e-6 {
@@ -1372,7 +1375,24 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 }
                 (n, h)
             };
-            let takes: Vec<(usize, f64)> = slices.iter().zip(&next).map(|(c, &from)| fit(c, from)).collect();
+            // The lines a piece takes leave room at the foot of the page for
+            // the footnotes they reference: take less until they fit.
+            let mut notes_h = 0.0;
+            let takes: Vec<(usize, f64)> = loop {
+                let room = flow.bottom() - flow.y - rule_pt - notes_h;
+                let takes: Vec<(usize, f64)> = slices.iter().zip(&next).map(|(c, &from)| fit(c, from, room)).collect();
+                let notes: Vec<usize> = row_cells
+                    .iter()
+                    .zip(&slices)
+                    .zip(next.iter().zip(&takes))
+                    .flat_map(|(((_, _, paras), cell), (&from, &(to, _)))| slice_notes(doc, paras, &cell[from..to]))
+                    .collect();
+                let need = flow.notes_room(&notes);
+                if need <= notes_h + 1e-6 {
+                    break takes;
+                }
+                notes_h = need;
+            };
             let done = takes.iter().zip(&slices).all(|((n, _), c)| *n == c.len());
             let placed_any = takes.iter().zip(&next).any(|((n, _), from)| n > from);
             if !done && !placed_any && !flow.column_is_empty() {
@@ -1558,9 +1578,27 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
                 }
             }
             emit_line(flow, *i, p, &text, l, &s.lines[l], text_x + s.box_x, s.box_w, y, h);
+            // A footnote referenced in a cell goes to the foot of the page
+            // the line is on, as one in the body does.
+            flow.add_notes(line_notes(p, &s.lines[l]));
         }
         y += slice.height();
     }
+}
+
+/// The footnotes referenced by a cell's slices.
+fn slice_notes(doc: &Document, paras: &[CellParagraph], slices: &[Slice]) -> Vec<usize> {
+    slices
+        .iter()
+        .filter_map(|slice| match *slice {
+            Slice::Line(k, l, _) => {
+                let (i, s, _) = &paras[k];
+                Some(line_notes(&doc.paragraphs[*i], &s.lines[l]))
+            }
+            Slice::Gap(_) => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// A table's `cols` column widths: the file's, scaled down to `room` if
@@ -1786,6 +1824,20 @@ impl<'o> Flow<'o> {
         Some(carry)
     }
 
+    /// Room the notes `notes` would add at this page's foot: those not
+    /// already on it, whole, and the separator if they are its first.
+    fn notes_room(&self, notes: &[usize]) -> f64 {
+        let here = self.current_notes();
+        let mut new: Vec<usize> = notes.iter().copied().filter(|n| !here.iter().any(|p| p.note == *n)).collect();
+        new.sort_unstable();
+        new.dedup();
+        if new.is_empty() {
+            return 0.0;
+        }
+        let sep = if here.is_empty() { NOTE_SEPARATOR_PT } else { 0.0 };
+        sep + new.iter().map(|&n| self.piece_height(&self.whole(n))).sum::<f64>()
+    }
+
     /// Put the notes referenced by a placed line at this page's foot.
     fn add_notes(&mut self, notes: Vec<usize>) {
         self.add_notes_split(notes, Vec::new());
@@ -1948,6 +2000,9 @@ impl<'o> Flow<'o> {
             let g = page.geometry;
             let (left, width, height) = (g.margin_left_pt, content_width(&g), page.height_pt);
             let section = page_sections.get(page.index).copied().unwrap_or(0);
+            // How far up the page's header reaches and down its footer:
+            // the border runs around them as well as the body.
+            let (mut text_top, mut text_bottom) = (g.margin_top_pt, height - g.margin_bottom_pt);
             for source in [Source::Header, Source::Footer] {
                 let PageStory { text: template, pictures, alignment, lines: story } = page_story(doc, section, page.index == 0, source == Source::Header);
                 let row_h = picture_row_height(pictures, width);
@@ -1960,6 +2015,12 @@ impl<'o> Flow<'o> {
                     _ => height - g.footer_pt.unwrap_or(opts.footer_distance_pt) - row_h - text_h,
                 };
                 place_header_footer_pictures(page, pictures, left, width, top, height);
+                if !pictures.is_empty() || template.is_some_and(|t| !t.is_empty()) {
+                    match source {
+                        Source::Header => text_top = text_top.min(top),
+                        _ => text_bottom = text_bottom.max(top + row_h + text_h),
+                    }
+                }
                 let Some(template) = template.filter(|t| !t.is_empty()) else { continue };
                 let text = page_field_text(template, page.index + 1, total);
                 let lines = header_footer_lines(&text, alignment, story, pictures, width, opts, shaper);
@@ -2006,6 +2067,20 @@ impl<'o> Flow<'o> {
                         story_line,
                     });
                 }
+            }
+            if let Some(b) = g.border {
+                let [pad_top, pad_right, pad_bottom, pad_left] = b.padding_pt;
+                let x = left - pad_left - b.width_pt;
+                let y = text_top - pad_top - b.width_pt;
+                // Under the other items, as Writer paints it.
+                page.items.insert(0, Item::PageBorder {
+                    x_pt: x.max(0.0),
+                    y_pt: y.max(0.0),
+                    width_pt: (left + width + pad_right + b.width_pt).min(page.width_pt) - x.max(0.0),
+                    height_pt: (text_bottom + pad_bottom + b.width_pt).min(height) - y.max(0.0),
+                    line_pt: b.width_pt,
+                    color: b.color,
+                });
             }
         }
         RenderTree { pages: self.pages }

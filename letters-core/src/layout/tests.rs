@@ -643,6 +643,45 @@ fn a_pages_own_header_distance_places_its_header() {
     assert_eq!(top(Source::Paragraph(0)), Some(40.0), "the header's 20pt and a line fit above the 40pt margin");
 }
 
+/// A page border is drawn padding and rule outside the text: around the
+/// body alone without a header or footer, around the header and footer
+/// a page shows too, on every page.
+#[test]
+fn a_page_border_surrounds_the_text_and_its_header_and_footer() {
+    use crate::model::{PageBorder, PageGeometry};
+    let border = |t: &RenderTree, page: usize| {
+        t.pages[page].items.iter().find_map(|i| match i {
+            Item::PageBorder { x_pt, y_pt, width_pt, height_pt, line_pt, color } => Some((*x_pt, *y_pt, *width_pt, *height_pt, *line_pt, *color)),
+            _ => None,
+        })
+    };
+    let mut d = doc_of(LINES_PER_PAGE + 1, "x");
+    let rule = PageBorder { width_pt: 1.0, color: 0x12_34_56, padding_pt: [2.0, 3.0, 4.0, 5.0] };
+    d.page = Some(PageGeometry { border: Some(rule), ..PageGeometry::default() });
+    let g = d.page.unwrap();
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    let (x, y, w, h, line, color) = border(&t, 0).expect("the page's border");
+    assert_eq!((line, color), (1.0, 0x12_34_56));
+    assert_eq!(x, g.margin_left_pt - 5.0 - 1.0);
+    assert_eq!(y, g.margin_top_pt - 2.0 - 1.0);
+    assert_eq!(x + w, g.width_pt - g.margin_right_pt + 3.0 + 1.0);
+    assert_eq!(y + h, g.height_pt - g.margin_bottom_pt + 4.0 + 1.0);
+    assert!(border(&t, 1).is_some(), "every page has its border");
+    assert_eq!(line_items(&t.pages[0])[0].3, g.margin_top_pt, "the body stays where the margin puts it");
+
+    d.header = Some("Head".into());
+    d.footer = Some("Foot".into());
+    d.page = Some(PageGeometry { header_pt: Some(20.0), footer_pt: Some(25.0), border: Some(rule), ..g });
+    let t = lay(&d);
+    let (_, y, _, h, _, _) = border(&t, 0).unwrap();
+    assert_eq!(y, 20.0 - 2.0 - 1.0, "the border runs above the header");
+    assert_eq!(y + h, g.height_pt - 25.0 + 4.0 + 1.0, "and below the footer");
+
+    d.page = Some(PageGeometry { border: None, ..g });
+    assert!(border(&lay(&d), 0).is_none(), "no border unless the page has one");
+}
+
 /// A header at the right ends at the right margin, a footer centred sits
 /// mid-page.
 #[test]
@@ -1000,6 +1039,43 @@ fn footnotes_sit_at_the_foot_of_the_page_that_references_them() {
     let rule = page.items.iter().find_map(|i| match i { Item::Rule { y_pt, width_pt, .. } => Some((*y_pt, *width_pt)), _ => None }).unwrap();
     assert!((rule.0 - (note[0].0 - NOTE_RULE_GAP_PT)).abs() < 1e-9);
     assert!((rule.1 - (595.3 - 144.0) * NOTE_RULE_FRACTION).abs() < 0.1);
+}
+
+/// A footnote referenced in a table cell sits at the foot of the page
+/// the cell's line is on, and the row leaves it room: annex-a's
+/// "Landlord¹" cell had its note dropped, so the rows under it ran into
+/// the space Writer keeps for it.
+#[test]
+fn a_note_referenced_in_a_cell_sits_at_the_foot_of_its_page() {
+    let notes = |t: &RenderTree, k: usize| -> Vec<(f64, f64)> {
+        t.pages[k].items.iter().filter_map(|i| match i { Item::Line { source: Source::Footnote(0), top_pt, height_pt, .. } => Some((*top_pt, *height_pt)), _ => None }).collect()
+    };
+    let cell_line = |t: &RenderTree, k: usize, para: usize| -> Option<(f64, f64)> {
+        t.pages[k].items.iter().find_map(|i| match i { Item::Line { source: Source::Paragraph(p), top_pt, height_pt, .. } if *p == para => Some((*top_pt, *height_pt)), _ => None })
+    };
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.paragraphs[0] = Paragraph { style: d.paragraphs[0].style.clone(), ..with_note("noted", 0) };
+    assert_eq!(d.paragraphs[0].style.table_cell.map(|c| c.table), Some(table));
+    d.footnotes = vec!["The note.".into()];
+    let t = lay(&d);
+    let foot = 841.9 - 72.0;
+    let note = notes(&t, 0);
+    assert_eq!(note.len(), 1, "the cell's note is on its page");
+    assert!((note[0].0 + note[0].1 - foot).abs() < 1e-6, "{note:?}");
+
+    // Body lines fill the page to just above where the cell's line and
+    // its note could both fit: the row goes to the next page with its note.
+    let mut d = doc_of(45, "body");
+    let at = d.paragraphs.len();
+    d.insert_table_at(at, 1, 1);
+    d.paragraphs[at] = Paragraph { style: d.paragraphs[at].style.clone(), ..with_note("noted", 0) };
+    d.footnotes = vec!["The note.".into()];
+    let t = lay(&d);
+    let (page, line) = (0..t.pages.len()).find_map(|k| cell_line(&t, k, at).map(|l| (k, l))).expect("the cell's line");
+    let note = notes(&t, page);
+    assert_eq!(note.len(), 1, "the note is on the page of its reference (page {page})");
+    assert!(line.0 + line.1 <= note[0].0 - NOTE_RULE_GAP_PT + 1e-6, "the line ends above the note's rule: {line:?} {note:?}");
 }
 
 #[test]

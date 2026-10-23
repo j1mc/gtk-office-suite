@@ -1201,16 +1201,29 @@ fn section_layout(k: usize) -> String {
 /// none (the application's page).
 fn page_layout_properties(page: Option<&PageGeometry>) -> String {
     match page {
-        Some(pg) => format!(
-            "<style:page-layout-properties \
-             fo:page-width=\"{:.2}pt\" fo:page-height=\"{:.2}pt\" \
-             fo:margin-top=\"{:.2}pt\" fo:margin-bottom=\"{:.2}pt\" \
-             fo:margin-left=\"{:.2}pt\" fo:margin-right=\"{:.2}pt\">\
-             <style:columns fo:column-count=\"{}\" fo:column-gap=\"{:.2}pt\"/>\
-             </style:page-layout-properties>",
-            pg.width_pt, pg.height_pt, pg.margin_top_pt, pg.margin_bottom_pt,
-            pg.margin_left_pt, pg.margin_right_pt, pg.columns.max(1), pg.column_gap_pt
-        ),
+        Some(pg) => {
+            // The model's margins run to the text; ODF's run to a page
+            // border, with its rule and padding inside them.
+            let inset = |side: usize| pg.border.map_or(0.0, |b| b.width_pt + b.padding_pt[side]);
+            let border = pg.border.map_or(String::new(), |b| {
+                format!(
+                    " fo:border=\"{:.2}pt solid #{:06X}\" fo:padding-top=\"{:.2}pt\" fo:padding-right=\"{:.2}pt\" fo:padding-bottom=\"{:.2}pt\" fo:padding-left=\"{:.2}pt\"",
+                    b.width_pt, b.color & 0xFF_FFFF, b.padding_pt[0], b.padding_pt[1], b.padding_pt[2], b.padding_pt[3]
+                )
+            });
+            format!(
+                "<style:page-layout-properties \
+                 fo:page-width=\"{:.2}pt\" fo:page-height=\"{:.2}pt\" \
+                 fo:margin-top=\"{:.2}pt\" fo:margin-bottom=\"{:.2}pt\" \
+                 fo:margin-left=\"{:.2}pt\" fo:margin-right=\"{:.2}pt\"{border}>\
+                 <style:columns fo:column-count=\"{}\" fo:column-gap=\"{:.2}pt\"/>\
+                 </style:page-layout-properties>",
+                pg.width_pt, pg.height_pt,
+                (pg.margin_top_pt - inset(0)).max(0.0), (pg.margin_bottom_pt - inset(2)).max(0.0),
+                (pg.margin_left_pt - inset(3)).max(0.0), (pg.margin_right_pt - inset(1)).max(0.0),
+                pg.columns.max(1), pg.column_gap_pt
+            )
+        }
         None => "<style:page-layout-properties/>".to_string(),
     }
 }
@@ -3938,15 +3951,30 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
             let m = |name: &str, fallback: f64| {
                 attr_val(e, name).and_then(|v| parse_length_pt(&v)).unwrap_or(fallback)
             };
+            // A page border sits on the margin, its padding inside it:
+            // the text starts past both, which is where the model's
+            // margins put it.
+            let border = ["fo:border", "fo:border-top", "fo:border-right", "fo:border-bottom", "fo:border-left"]
+                .iter()
+                .find_map(|a| attr_val(e, a).as_deref().and_then(parse_para_border))
+                .filter(|b| b.style != BorderStyle::None && b.width_pt > 0.0)
+                .map(|b| PageBorder {
+                    width_pt: b.width_pt,
+                    color: u32::from_str_radix(&b.color, 16).unwrap_or(0),
+                    padding_pt: ["fo:padding-top", "fo:padding-right", "fo:padding-bottom", "fo:padding-left"]
+                        .map(|a| m(a, m("fo:padding", 0.0))),
+                });
+            let inset = |side: usize| border.map_or(0.0, |b| b.width_pt + b.padding_pt[side]);
             Some(PageGeometry {
                 width_pt,
                 height_pt,
-                margin_top_pt: m("fo:margin-top", d.margin_top_pt),
-                margin_bottom_pt: m("fo:margin-bottom", d.margin_bottom_pt),
-                margin_left_pt: m("fo:margin-left", d.margin_left_pt),
-                margin_right_pt: m("fo:margin-right", d.margin_right_pt),
+                margin_top_pt: m("fo:margin-top", d.margin_top_pt) + inset(0),
+                margin_bottom_pt: m("fo:margin-bottom", d.margin_bottom_pt) + inset(2),
+                margin_left_pt: m("fo:margin-left", d.margin_left_pt) + inset(3),
+                margin_right_pt: m("fo:margin-right", d.margin_right_pt) + inset(1),
                 columns: d.columns,
                 column_gap_pt: d.column_gap_pt,
+                border,
                 ..d
             })
         };
@@ -5855,6 +5883,38 @@ mod tests {
         assert!((st.space_after_pt - 9.0).abs() < 0.01);
         assert!((st.left_indent_pt - 24.0).abs() < 0.01);
         assert!((st.first_line_indent_pt + 12.0).abs() < 0.01);
+    }
+
+    /// A page border survives a save and reopen, the margins still
+    /// running to the text: ODF's run to the border, its rule and padding
+    /// inside them.
+    #[test]
+    fn a_page_border_round_trips() {
+        let mut d = Document::from_plain_text("body");
+        let border = PageBorder { width_pt: 0.5, color: 0x00_00_80, padding_pt: [1.0, 4.0, 1.0, 4.0] };
+        d.page = Some(PageGeometry { margin_top_pt: 30.0, margin_left_pt: 40.0, border: Some(border), ..PageGeometry::default() });
+        let pg = round_trip(&d).page.expect("page geometry lost");
+        assert!(pg.approx_eq(&d.page.unwrap()), "geometry drifted: {pg:?}");
+        assert_eq!(pg.border, Some(border));
+    }
+
+    /// Writer's page border, read from the declaration of vessel
+    /// operation: the text starts past the margin, the rule and the
+    /// padding.
+    #[test]
+    fn a_page_borders_rule_and_padding_move_the_text_in() {
+        let styles = "<office:document-styles><office:automatic-styles><style:page-layout style:name=\"PL0\">\
+             <style:page-layout-properties fo:page-width=\"8.268in\" fo:page-height=\"11.693in\" fo:margin-top=\"0.2944in\" fo:margin-left=\"0.4375in\" fo:margin-bottom=\"0.2944in\" fo:margin-right=\"0.4375in\" \
+             fo:border=\"0.0069in solid #000000\" fo:padding-top=\"0.0138in\" fo:padding-left=\"0.0555in\" fo:padding-bottom=\"0.0138in\" fo:padding-right=\"0.0555in\"/>\
+             </style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name=\"Standard\" style:page-layout-name=\"PL0\"/></office:master-styles></office:document-styles>";
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        let pg = read_package(content, styles).page.expect("the page");
+        let b = pg.border.expect("the page's border");
+        let close = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(close(b.width_pt, 0.4968) && b.color == 0, "{b:?}");
+        assert!(close(b.padding_pt[0], 0.9936) && close(b.padding_pt[3], 3.996), "{b:?}");
+        assert!(close(pg.margin_top_pt, 0.2944 * 72.0 + 0.4968 + 0.9936), "{pg:?}");
+        assert!(close(pg.margin_left_pt, 0.4375 * 72.0 + 0.4968 + 3.996), "{pg:?}");
     }
 
     #[test]

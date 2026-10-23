@@ -929,6 +929,19 @@ pub struct PageGeometry {
     pub header_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footer_pt: Option<f64>,
+    /// A rule around the page's text (ODF's page `fo:border`, Word's
+    /// `w:pgBorders`), its headers and footers included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<PageBorder>,
+}
+
+/// A page border: a rule `width_pt` wide in `color` (0xRRGGBB), set
+/// `padding_pt` (top, right, bottom, left) outside the text it surrounds.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PageBorder {
+    pub width_pt: f64,
+    pub color: u32,
+    pub padding_pt: [f64; 4],
 }
 
 fn default_columns() -> u8 { 1 }
@@ -948,6 +961,7 @@ impl Default for PageGeometry {
             column_gap_pt: 18.0,
             header_pt: None,
             footer_pt: None,
+            border: None,
         }
     }
 }
