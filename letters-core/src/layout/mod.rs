@@ -1943,7 +1943,7 @@ impl<'o> Flow<'o> {
             for source in [Source::Header, Source::Footer] {
                 let PageStory { text: template, pictures, alignment, lines: story } = page_story(doc, section, page.index == 0, source == Source::Header);
                 let row_h = picture_row_height(pictures, width);
-                let text_h = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
+                let text_h = flowing_text(template, story).map_or(0.0, |t| {
                     let text = page_field_text(t, page.index + 1, total);
                     flow_height(&text, &header_footer_lines(&text, alignment, story, pictures, width, opts, shaper), story)
                 });
@@ -2051,8 +2051,17 @@ fn picture_row_height(pictures: &[Run], width: f64) -> f64 {
 
 /// How tall a header or footer is: its pictures' row and its text, laid
 /// out for page 1.
+/// A header's or footer's text as it takes room on the page: none without
+/// one, and an empty paragraph's line where the file has one. The business
+/// appointment rules' header is one empty paragraph, which Writer gives a
+/// line's height: from 35.4pt down it ends below the 45pt top margin and
+/// moves the body down.
+fn flowing_text<'a>(template: Option<&'a str>, story: &[HfLine]) -> Option<&'a str> {
+    template.filter(|t| !t.is_empty() || !story.is_empty())
+}
+
 fn header_footer_height(pictures: &[Run], template: Option<&str>, alignment: crate::model::Alignment, story: &[HfLine], width: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> f64 {
-    let text = template.filter(|t| !t.is_empty()).map_or(0.0, |t| {
+    let text = flowing_text(template, story).map_or(0.0, |t| {
         let text = page_field_text(t, 1, 1);
         flow_height(&text, &header_footer_lines(&text, alignment, story, pictures, width, opts, shaper), story)
     });
