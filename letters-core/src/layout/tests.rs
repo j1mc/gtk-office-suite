@@ -668,6 +668,21 @@ fn a_tables_cell_padding_sizes_its_rows_and_insets_its_text() {
     assert_eq!((x, top), (72.0, padded.1 + 6.0), "text inside the padding, at the margin");
 }
 
+/// A table's indent moves the whole table right: its text that far from
+/// the margin, its edge its left padding further left.
+#[test]
+fn a_tables_indent_moves_it_right() {
+    let mut d = doc_of(1, "after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.paragraphs[0].runs = vec![Run::plain("cell")];
+    d.table_padding.insert(table, CellPadding { left_pt: 9.0, ..CellPadding::default() });
+    d.table_indent.insert(table, 20.0);
+    let page = &lay(&d).pages[0];
+    let cell = page.items.iter().find_map(|i| match i { Item::Cell { x_pt, .. } => Some(*x_pt), _ => None });
+    let text = page.lines().find_map(|l| match l { Item::Line { text, x_pt, .. } if text == "cell" => Some(*x_pt), _ => None });
+    assert_eq!((cell, text), (Some(72.0 + 20.0 - 9.0), Some(72.0 + 20.0)));
+}
+
 #[test]
 fn headers_and_footers_repeat_with_page_numbers() {
     let mut d = doc_of(60, "x");

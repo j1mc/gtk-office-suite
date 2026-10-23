@@ -1245,7 +1245,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     let fits = flow.geometry.columns > 1 || doc.table_relative.contains(&first.table);
     let room = if fits { table_w } else { table_w + flow.geometry.margin_right_pt.max(0.0) };
     let widths = column_widths(doc.table_columns.get(&first.table), cols as usize, table_w, room);
-    let col_x: Vec<f64> = widths.iter().scan(0.0, |x, w| { let at = *x; *x += w; Some(at) }).collect();
+    let indent = doc.table_indent.get(&first.table).copied().unwrap_or(0.0);
+    let col_x: Vec<f64> = widths.iter().scan(indent, |x, w| { let at = *x; *x += w; Some(at) }).collect();
     let spans: &[crate::model::CellSpan] = doc.table_spans.get(&first.table).map_or(&[], Vec::as_slice);
     // The cell at a grid position, as (columns, rows) it spans; `None`
     // where a merged cell covers the position.
@@ -1258,7 +1259,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
     };
     let span_w = |col: u32, n: u32| -> f64 { widths[col as usize..(col + n) as usize].iter().sum() };
     // The room inside each cell around its text. The table sits out to
-    // the left by its left padding, so cell text lines up with the margin.
+    // the left by its left padding, so cell text lines up with the margin
+    // (or its indent).
     let pad = doc.table_padding.get(&first.table).copied().unwrap_or_default();
     // A table without rules has no rule in its rows' height either.
     let ruled = !doc.table_unruled.contains(&first.table);

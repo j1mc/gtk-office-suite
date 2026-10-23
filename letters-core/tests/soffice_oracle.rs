@@ -2746,3 +2746,31 @@ fn a_pages_header_and_footer_distances_survive_writer_both_ways() {
     close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
     close(&writer_rewrites_docx(bin, &d, "distance"), "docx → Writer → docx");
 }
+
+/// A table's indent crosses Writer both ways: Word's `w:tblInd` under
+/// the 2013 rules our writer names, ODF's table `fo:margin-left`, each
+/// with the left padding between the table's edge and its text.
+#[test]
+fn a_tables_indent_survives_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 1, 2);
+    d.paragraphs[0].runs = vec![Run::plain("indented")];
+    d.table_indent.insert(table, 30.0);
+    let close = |got: &Document, want: f64, how: &str| {
+        let indent: Vec<f64> = got.table_indent.values().copied().collect();
+        assert!(indent.len() == 1 && (indent[0] - want).abs() < 0.5, "{how}: {indent:?}");
+    };
+    let docx_path = dir.path().join("indent.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("indent.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), 30.0, "docx → Writer → odt");
+    // Writer saves a docx as compatibility mode 12 but writes the table's
+    // edge as `w:tblInd`, which that mode reads as its text's: Writer's own
+    // layout of its file has the table a padding further left, and so
+    // does ours.
+    close(&writer_rewrites_docx(bin, &d, "indent"), 30.0 - 5.4, "docx → Writer → docx");
+}
