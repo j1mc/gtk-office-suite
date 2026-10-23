@@ -185,7 +185,7 @@
   },
   "letters/real-provisional-agenda-for-the-sixth-trade-specialis": {
     "A": "green",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-questionnaire": {
     "A": "amber",
@@ -209,7 +209,7 @@
   },
   "letters/real-sma-post-telephone-call-email-template": {
     "A": "green",
-    "B": "amber"
+    "B": "green"
   },
   "letters/real-social-housing-sales-data-dictionary": {
     "A": "amber",
