@@ -870,6 +870,36 @@ fn a_floating_image_is_placed_by_its_anchor_not_in_the_line() {
     assert_eq!(heights[0], heights[1], "the line does not grow to hold it");
 }
 
+/// A text box floats where its anchor puts it, as a picture does, with its
+/// own size and text; its paragraph's line does not hold it.
+#[test]
+fn a_text_box_is_placed_by_its_anchor_not_in_the_line() {
+    use crate::model::{AnchorAlign, AnchorFrame, ImageAnchor, TextBox};
+    let tb = TextBox { extent_emu: (2 * 914_400, 457_200), text: "answer".into(), ..Default::default() };
+    let mut d = doc_of(2, "text");
+    d.paragraphs[1].runs.push(Run {
+        text: String::new(),
+        style: crate::model::RunStyle {
+            text_box: Some(Box::new(tb.clone())),
+            image_anchor: Some(ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: 12 * 12_700, ..Default::default() }),
+            ..Default::default()
+        },
+    });
+    let t = lay(&d);
+    let boxes: Vec<(f64, f64, f64, f64, &TextBox)> = t.pages[0]
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::TextBox { x_pt, y_pt, width_pt, height_pt, text_box, .. } => Some((*x_pt, *y_pt, *width_pt, *height_pt, text_box.as_ref())),
+            _ => None,
+        })
+        .collect();
+    let right = t.pages[0].width_pt - 72.0;
+    assert_eq!(boxes, vec![(right - 144.0, 72.0 + LINE + 12.0, 144.0, 36.0, &tb)], "2in by 0.5in at the right margin, 12pt below the second line's top");
+    let heights: Vec<f64> = t.pages[0].lines().map(|l| match l { Item::Line { height_pt, .. } => *height_pt, _ => 0.0 }).collect();
+    assert_eq!(heights[0], heights[1], "the line does not grow to hold it");
+}
+
 /// An inline image keeps its room beside it (Word's `distL`/`distR`):
 /// it is drawn that far in from where its line puts it, and what follows
 /// it in the line starts past the room on its right.

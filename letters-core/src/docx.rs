@@ -3392,6 +3392,7 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
                 image_extent_emu: None,
                 image_sides_emu: None,
                 image_anchor: None,
+                text_box: None,
                 footnote: None,
                 html: false,
                 chip: None,

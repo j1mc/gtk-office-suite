@@ -309,6 +309,47 @@ fn picture_frame(r: &Run, n: usize, prefix: &str, auto: &mut String) -> Option<S
     ))
 }
 
+/// A text box run as a frame (text box number `n`) holding a
+/// `draw:text-box`, anchored to its paragraph and placed, framed, filled
+/// and padded by a graphic style of its own (`tb{n}`, added to `auto`).
+/// Its text is a paragraph per line.
+fn text_box_frame(r: &Run, n: usize, auto: &mut String) -> Option<String> {
+    let tb = r.style.text_box.as_deref()?;
+    let anchor = r.style.image_anchor.unwrap_or_default();
+    let style = format!("tb{n}");
+    let emu_pt = |v: u32| v as f64 / 12700.0;
+    let mut look = String::new();
+    match &tb.border {
+        Some(b) => look.push_str(&format!(" fo:border=\"{:.2}pt solid #{}\"", emu_pt(b.width_emu), b.color)),
+        None => look.push_str(" fo:border=\"none\""),
+    }
+    match &tb.fill {
+        Some(c) => look.push_str(&format!(" draw:fill=\"solid\" draw:fill-color=\"#{c}\"")),
+        None => look.push_str(" draw:fill=\"none\""),
+    }
+    let [top, right, bottom, left] = tb.padding_emu;
+    look.push_str(&format!(
+        " fo:padding-top=\"{:.2}pt\" fo:padding-right=\"{:.2}pt\" fo:padding-bottom=\"{:.2}pt\" fo:padding-left=\"{:.2}pt\"",
+        emu_pt(top), emu_pt(right), emu_pt(bottom), emu_pt(left)
+    ));
+    // Under Writer's "Frame" style it is a text frame to Writer, which
+    // keeps its rule; without a parent Writer reads it as a drawing shape
+    // and drops the rule.
+    let frame_style = floating_style(&style, &anchor)
+        .replacen("style:family=\"graphic\"", "style:family=\"graphic\" style:parent-style-name=\"Frame\"", 1)
+        .replacen("/></style:style>", &format!("{look}/></style:style>"), 1);
+    auto.push_str(&frame_style);
+    let text: String = tb.text.split('\n').map(|line| format!("<text:p>{}</text:p>", esc(line))).collect();
+    Some(format!(
+        "<draw:frame draw:style-name=\"{style}\" draw:name=\"Text Box {n}\" text:anchor-type=\"paragraph\" \
+         svg:x=\"{:.6}in\" svg:y=\"{:.6}in\" svg:width=\"{:.6}in\" svg:height=\"{:.6}in\"><draw:text-box>{text}</draw:text-box></draw:frame>",
+        anchor.x_emu as f64 / EMU_PER_INCH,
+        anchor.y_emu as f64 / EMU_PER_INCH,
+        tb.extent_emu.0 as f64 / EMU_PER_INCH,
+        tb.extent_emu.1 as f64 / EMU_PER_INCH,
+    ))
+}
+
 /// EMU per inch (OOXML's unit, which the model keeps image sizes in).
 const EMU_PER_INCH: f64 = 914_400.0;
 
@@ -569,6 +610,7 @@ fn odf_number_format(format: NumberFormat) -> &'static str {
 fn content_xml(doc: &Document) -> String {
     let run_styles = collect_run_styles(doc);
     let mut pictures_written = 0usize;
+    let mut text_boxes_written = 0usize;
 
     let mut auto = String::new();
     for (i, st) in run_styles.iter().enumerate() {
@@ -936,6 +978,11 @@ fn content_xml(doc: &Document) -> String {
             }
             // A picture is a frame anchored as a character, so it stays
             // where it is in the line; its bytes are in Pictures/ (#1292).
+            if r.style.text_box.is_some() {
+                text_boxes_written += 1;
+                inner.push_str(&text_box_frame(r, text_boxes_written, &mut auto).unwrap_or_default());
+                continue;
+            }
             if r.style.image.is_some() {
                 match picture_frame(r, pictures_written + 1, "fr", &mut auto) {
                     Some(frame) => {
@@ -1601,6 +1648,9 @@ struct AutoStyles {
     /// A graphic style's room left and right of its frame, in points
     /// (`fo:margin-left`, `fo:margin-right`).
     graphic_sides: std::collections::HashMap<String, (f64, f64)>,
+    /// A graphic style's frame for a text box: its rule, its fill (a
+    /// solid `draw:fill`) and its padding, in EMU.
+    graphic_box: std::collections::HashMap<String, BoxLook>,
     /// A table-cell style's padding, when it gives one.
     cell_padding: std::collections::HashMap<String, crate::model::CellPadding>,
     /// A paragraph or table style's `style:master-page-name`: the master
@@ -1770,7 +1820,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), contextual: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), graphic_sides: Default::default(), table_relative: Default::default(), table_margin: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), contextual: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), graphic_sides: Default::default(), graphic_box: Default::default(), table_relative: Default::default(), table_margin: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1807,7 +1857,8 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                             let pad = |a: &str| attr_val(&e, a).or_else(|| attr_val(&e, "fo:padding")).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
                             out.graphic_padding.insert(name.clone(), (pad("fo:padding-top"), pad("fo:padding-bottom")));
                             let side = |a: &str| attr_val(&e, a).and_then(|v| parse_length_pt(&v)).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
-                            out.graphic_sides.insert(name, (side("fo:margin-left"), side("fo:margin-right")));
+                            out.graphic_sides.insert(name.clone(), (side("fo:margin-left"), side("fo:margin-right")));
+                            out.graphic_box.insert(name, box_look(&e));
                         }
                     }
                     "style:table-properties" if cur_family == "table" => {
@@ -2629,6 +2680,38 @@ struct FrameReading {
     alt: String,
     in_alt: bool,
     depth: usize,
+    /// A text box's frame and its text so far: Some once its
+    /// `draw:text-box` opens.
+    text_box: Option<String>,
+    look: BoxLook,
+}
+
+/// How a text box's frame is drawn: its rule, its fill and its padding
+/// (top, right, bottom, left) in EMU.
+type BoxLook = (Option<crate::model::BoxRule>, Option<String>, [u32; 4]);
+
+/// A graphic style's text-box frame. The fill is `draw:fill`'s: Writer
+/// draws a frame whose style gives only `fo:background-color` unfilled
+/// (the opt-out form's answer boxes are white in it).
+fn box_look(e: &quick_xml::events::BytesStart) -> BoxLook {
+    let rule = ["fo:border", "fo:border-top", "fo:border-left"]
+        .iter()
+        .find_map(|a| attr_val(e, a).as_deref().and_then(parse_para_border))
+        .filter(|b| b.style != BorderStyle::None && b.width_pt > 0.0)
+        .map(|b| crate::model::BoxRule { width_emu: (b.width_pt * 12700.0).round() as u32, color: b.color });
+    let fill = (attr_val(e, "draw:fill").as_deref() == Some("solid"))
+        .then(|| attr_val(e, "draw:fill-color"))
+        .flatten()
+        .map(|c| c.trim_start_matches('#').to_uppercase())
+        .filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit()));
+    let pad = |a: &str| {
+        attr_val(e, a)
+            .or_else(|| attr_val(e, "fo:padding"))
+            .and_then(|v| parse_length_pt(&v))
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map_or(0, |v| (v * 12700.0).round() as u32)
+    };
+    (rule, fill, ["fo:padding-top", "fo:padding-right", "fo:padding-bottom", "fo:padding-left"].map(pad))
 }
 
 /// How headings 1-6 look, from styles.xml's `Heading_20_N` (#1297), each
@@ -3027,6 +3110,10 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     let mut annotation: Option<Reading> = None;
     let mut frame: Option<FrameReading> = None;
     let mut frame_depth = 0usize;
+    // Inside a body frame's `draw:text-box`, and how many of its
+    // paragraphs have been read.
+    let mut in_text_box = false;
+    let mut box_paragraphs = 0usize;
     // The outermost table being read (#1296): its id, the current row and
     // column (-1 before the first), its element depth, and whether the
     // current cell has had a paragraph. A table nested in a cell belongs
@@ -3102,6 +3189,41 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
             }
             other => other,
         };
+        // A text box's own paragraphs are its text, not the body's: they
+        // must not close the paragraph that anchors it.
+        if let Some(f) = frame.as_mut().filter(|f| f.depth == frame_depth) {
+            if let Some(text) = f.text_box.as_mut() {
+                match &event {
+                    Ok(Event::End(e)) if e.name().as_ref() == "draw:text-box" => in_text_box = false,
+                    _ if !in_text_box => {}
+                    Ok(Event::Start(e)) if matches!(e.name().as_ref(), "text:p" | "text:h") => {
+                        if box_paragraphs > 0 {
+                            text.push('\n');
+                        }
+                        box_paragraphs += 1;
+                    }
+                    Ok(Event::Text(t)) => text.push_str(&unescape_text(t)),
+                    Ok(Event::GeneralRef(r)) => text.push_str(&resolve_general_ref(r)),
+                    Ok(Event::Empty(e)) => match e.name().as_ref() {
+                        "text:s" => text.push_str(&" ".repeat(attr_val(e, "text:c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(1024))),
+                        "text:tab" => text.push('\t'),
+                        "text:line-break" => text.push('\n'),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+                if in_text_box || matches!(&event, Ok(Event::End(e)) if e.name().as_ref() == "draw:text-box") {
+                    continue;
+                }
+            } else if let Ok(Event::Start(e)) | Ok(Event::Empty(e)) = &event {
+                if e.name().as_ref() == "draw:text-box" {
+                    f.text_box = Some(String::new());
+                    in_text_box = matches!(&event, Ok(Event::Start(_)));
+                    box_paragraphs = 0;
+                    continue;
+                }
+            }
+        }
         if let Some((c, _, field, paras)) = annotation.as_mut() {
             let field_now = *field;
             let mut text = |t: &str| match field_now {
@@ -3344,6 +3466,8 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             alt: String::new(),
                             in_alt: false,
                             depth: frame_depth,
+                            text_box: None,
+                            look: attr_val(&e, "draw:style-name").and_then(|n| auto.graphic_box.get(&n).cloned()).unwrap_or_default(),
                         });
                     }
                 }
@@ -3727,7 +3851,28 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     }
                 }
                 "draw:frame" => {
-                    if frame.as_ref().is_some_and(|f| f.depth == frame_depth) {
+                    if frame.as_ref().is_some_and(|f| f.depth == frame_depth && f.text_box.is_some()) {
+                        let f = frame.take().expect("the frame just checked");
+                        let (border, fill, padding_emu) = f.look;
+                        if let Some(p) = para.as_mut() {
+                            p.runs.push(Run {
+                                text: String::new(),
+                                style: RunStyle {
+                                    text_box: Some(Box::new(crate::model::TextBox {
+                                        extent_emu: f.extent.unwrap_or((0, 0)),
+                                        border,
+                                        fill,
+                                        padding_emu,
+                                        text: f.text_box.unwrap_or_default(),
+                                    })),
+                                    // One placed as a character floats at its
+                                    // paragraph.
+                                    image_anchor: Some(f.anchor.unwrap_or_default()),
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                    } else if frame.as_ref().is_some_and(|f| f.depth == frame_depth) {
                         let f = frame.take().expect("the frame just checked");
                         // A picture whose bytes are in the package: kept in
                         // the media cache, like a docx's (#455), so the
@@ -4080,7 +4225,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             ..attr_val(&e, "draw:style-name").and_then(|n| named.graphic.get(&n).copied()).unwrap_or_default()
                         }
                     });
-                    hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), sides: None, anchor, href: None, alt: String::new(), in_alt: false, depth: 0 }));
+                    hf_frame = Some((in_header, FrameReading { extent: size("svg:width").zip(size("svg:height")), sides: None, anchor, href: None, alt: String::new(), in_alt: false, depth: 0, text_box: None, look: Default::default() }));
                     hf_frame_place = hf_box_place(attr_val(&e, "draw:style-name").as_deref(), attr_val(&e, "svg:y").as_deref(), &named);
                 }
                 Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:image" => {
@@ -6176,5 +6321,77 @@ mod tests {
         assert!(xml.contains("<style:master-page style:name=\"Standard\" style:page-layout-name=\"pm1\"><style:header><text:p>H</text:p></style:header></style:master-page>"));
         assert!(!content_xml(&one).contains("master-page-name"));
         assert!(round_trip(&one).sections.is_empty());
+    }
+
+    /// A text box (a frame holding a `draw:text-box`) is read as one
+    /// floating object at its anchoring paragraph, with its size, rule,
+    /// fill, padding and text, as the opt-out form's answer boxes are
+    /// drawn in Writer. Its paragraphs used to be read as the body's: they
+    /// replaced the paragraph that anchors the box.
+    #[test]
+    fn a_text_box_is_read_as_one_floating_box() {
+        use crate::model::{AnchorAlign, AnchorFrame, BoxRule};
+        let content = "<office:document-content><office:automatic-styles>\
+            <style:style style:name=\"a1\" style:family=\"graphic\"><style:graphic-properties fo:border=\"0.75pt solid #000000\" \
+              fo:padding-top=\"0.05in\" fo:padding-bottom=\"0.05in\" fo:padding-left=\"0.1in\" fo:padding-right=\"0.1in\" \
+              draw:fill=\"solid\" draw:fill-color=\"#ffff00\" style:wrap=\"parallel\" \
+              style:horizontal-pos=\"right\" style:horizontal-rel=\"page-content\" style:vertical-pos=\"from-top\" style:vertical-rel=\"paragraph\"/></style:style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:p>Your name<draw:frame draw:style-name=\"a1\" text:anchor-type=\"paragraph\" svg:y=\"0.1in\" svg:width=\"2in\" svg:height=\"0.5in\">\
+              <draw:text-box><text:p>first<text:s text:c=\"2\"/>line</text:p><text:p>second</text:p></draw:text-box></draw:frame> here</text:p>\
+            <text:p>after</text:p>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let texts: Vec<String> = d.paragraphs.iter().map(|p| p.runs.iter().map(|r| r.text.as_str()).collect()).collect();
+        assert_eq!(texts, ["Your name here", "after"], "the box's text is not the body's");
+        let boxes: Vec<&Run> = d.paragraphs[0].runs.iter().filter(|r| r.style.text_box.is_some()).collect();
+        assert_eq!(boxes.len(), 1);
+        let tb = boxes[0].style.text_box.as_deref().unwrap();
+        assert_eq!(tb.extent_emu, (1_828_800, 457_200));
+        assert_eq!(tb.text, "first  line\nsecond");
+        assert_eq!(tb.border, Some(BoxRule { width_emu: 9525, color: "000000".into() }));
+        assert_eq!(tb.fill.as_deref(), Some("FFFF00"));
+        assert_eq!(tb.padding_emu, [45_720, 91_440, 45_720, 91_440]);
+        let a = boxes[0].style.image_anchor.unwrap();
+        assert_eq!((a.h_from, a.h_align, a.v_from, a.y_emu), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text, 91_440));
+    }
+
+    /// A frame whose style fills it only with `fo:background-color` is
+    /// unfilled, as Writer draws it.
+    #[test]
+    fn a_text_box_without_a_solid_fill_is_unfilled() {
+        let content = "<office:document-content><office:automatic-styles>\
+            <style:style style:name=\"a1\" style:family=\"graphic\"><style:graphic-properties fo:background-color=\"#ff0000\" fo:border=\"none\"/></style:style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:p><draw:frame draw:style-name=\"a1\" text:anchor-type=\"paragraph\" svg:width=\"1in\" svg:height=\"1in\"><draw:text-box/></draw:frame></text:p>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let tb = d.paragraphs[0].runs.iter().find_map(|r| r.style.text_box.as_deref()).expect("the empty box");
+        assert_eq!((tb.border.as_ref(), tb.fill.as_ref(), tb.text.as_str()), (None, None, ""));
+    }
+
+    /// A text box keeps its place, size, look and text through a save.
+    #[test]
+    fn text_boxes_round_trip() {
+        use crate::model::{AnchorAlign, AnchorFrame, BoxRule, ImageAnchor, TextBox};
+        let anchor = ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: 91_440, ..Default::default() };
+        let tb = TextBox {
+            extent_emu: (1_828_800, 457_200),
+            border: Some(BoxRule { width_emu: 12_700, color: "1F3864".into() }),
+            fill: Some("DEEAF6".into()),
+            padding_emu: [45_720, 91_440, 45_720, 91_440],
+            text: "Name & date\n<signed>".into(),
+        };
+        let mut d = Document::from_plain_text("");
+        d.paragraphs = vec![Paragraph {
+            style: ParaStyle::default(),
+            runs: vec![Run::plain("Sign "), Run { text: String::new(), style: RunStyle { text_box: Some(Box::new(tb.clone())), image_anchor: Some(anchor), ..Default::default() } }, Run::plain("here")],
+        }];
+        let rt = round_trip(&d);
+        let runs = &rt.paragraphs[0].runs;
+        let got = runs.iter().find(|r| r.style.text_box.is_some()).expect("the box");
+        assert_eq!(got.style.text_box.as_deref(), Some(&tb));
+        assert_eq!(got.style.image_anchor, Some(anchor));
+        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "Sign here");
     }
 }

@@ -288,6 +288,9 @@ pub enum Item {
     /// in `color` (0xRRGGBB) whose outer edge is this box, around the
     /// page's text and the header and footer it shows.
     PageBorder { x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, line_pt: f64, color: u32 },
+    /// A text box of paragraph `para`: its outer box, drawn with its fill,
+    /// its rule and its text inside its padding (`crate::model::TextBox`).
+    TextBox { para: usize, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, text_box: Box<crate::model::TextBox> },
 }
 
 /// One page of the render tree.
@@ -440,11 +443,11 @@ impl RenderTree {
 /// layout text.
 pub const OBJECT: char = '\u{FFFC}';
 
-/// Whether a run is an inline object (an image, a footnote reference or a
-/// smart chip): one `OBJECT` char in the layout and edit sequence, whatever
-/// its text.
+/// Whether a run is an inline object (an image, a text box, a footnote
+/// reference or a smart chip): one `OBJECT` char in the layout and edit
+/// sequence, whatever its text.
 pub fn is_object(run: &Run) -> bool {
-    run.style.image.is_some() || run.style.footnote.is_some() || run.style.chip.is_some()
+    run.style.image.is_some() || run.style.text_box.is_some() || run.style.footnote.is_some() || run.style.chip.is_some()
 }
 
 /// Space around a smart chip's label, in points: horizontal padding inside
@@ -461,7 +464,7 @@ pub fn layout_text(runs: &[Run]) -> String {
 }
 
 /// EMU per point (914400 per inch).
-const EMU_PER_PT: f64 = 12700.0;
+pub(crate) const EMU_PER_PT: f64 = 12700.0;
 
 /// Displayed size of an image run in points, shrunk to fit `max_width_pt`
 /// with its aspect kept: the document's extent if it has one, else the
@@ -1196,11 +1199,14 @@ fn place_floating(flow: &mut Flow, idx: usize, para: &Paragraph, top: f64, behin
     use crate::model::{AnchorAlign, AnchorFrame};
     let g = flow.geometry;
     for run in &para.runs {
-        let (Some(src), Some(anchor)) = (&run.style.image, run.style.image_anchor) else { continue };
-        if anchor.behind != behind {
+        let Some(anchor) = run.style.image_anchor else { continue };
+        if anchor.behind != behind || (run.style.image.is_none() && run.style.text_box.is_none()) {
             continue;
         }
-        let (w, h) = image_size_pt(run, g.width_pt);
+        let (w, h) = match &run.style.text_box {
+            Some(tb) => (tb.extent_emu.0 as f64 / EMU_PER_PT, tb.extent_emu.1 as f64 / EMU_PER_PT),
+            None => image_size_pt(run, g.width_pt),
+        };
         let (left, width) = match anchor.h_from {
             AnchorFrame::Page => (0.0, g.width_pt),
             AnchorFrame::Margin => (g.margin_left_pt, flow.content_width()),
@@ -1220,7 +1226,11 @@ fn place_floating(flow: &mut Flow, idx: usize, para: &Paragraph, top: f64, behin
         let x = place(left, width, w, anchor.x_emu, anchor.h_align);
         // Kept on the page: Word moves a picture that would hang off it.
         let y = place(upper, height, h, anchor.y_emu, anchor.v_align).clamp(0.0, (g.height_pt - h).max(0.0));
-        flow.push(Item::Image { para: idx, src: src.clone(), x_pt: x, y_pt: y, width_pt: w, height_pt: h });
+        match (&run.style.image, &run.style.text_box) {
+            (Some(src), _) => flow.push(Item::Image { para: idx, src: src.clone(), x_pt: x, y_pt: y, width_pt: w, height_pt: h }),
+            (None, Some(tb)) => flow.push(Item::TextBox { para: idx, x_pt: x, y_pt: y, width_pt: w, height_pt: h, text_box: tb.clone() }),
+            (None, None) => {}
+        }
     }
 }
 
@@ -2275,6 +2285,8 @@ impl Shaper for MonoShaper {
                 if r.style.image.is_some() {
                     let (w, h) = inline_size_pt(r, req.width_pt);
                     vec![(OBJECT, w, h)]
+                } else if r.style.text_box.is_some() {
+                    vec![(OBJECT, 0.0, 0.0)]
                 } else if let Some(n) = r.style.footnote {
                     let digits = (n + 1).to_string().len() as f64;
                     vec![(OBJECT, digits * s * NOTE_REF_SCALE * 0.5, 0.0)]
