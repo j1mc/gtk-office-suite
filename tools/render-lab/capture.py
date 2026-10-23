@@ -14,6 +14,7 @@ GSettings schemas (made on the fly from flatpak/*.gschema.xml).
 import argparse
 import glob
 import json
+import math
 import os
 import shutil
 import signal
@@ -332,7 +333,13 @@ def tier_b(app, doc, dest, env, browser):
                 return 0
             for i, (x, y, w, h) in enumerate(geoms, start=1):
                 left, top = found[0] + (x - x0), found[1] + (y - y0)
-                box = tuple(round(v) for v in (left, top, left + w, top + h))
+                # The page's whole-pixel size, as the app's own render
+                # (A-<n>.png) has it, wherever it sits: rounding each edge
+                # rounds a half pixel to even, so a 1122.5 px page came out
+                # 1122 or 1123 tall by where the screen put it, and the
+                # resample onto LibreOffice's 1123 cost OCR a table header.
+                pw, ph = math.ceil(w - 1e-6), math.ceil(h - 1e-6)
+                box = (round(left), round(top), round(left) + pw, round(top) + ph)
                 if box[2] > img.width + 1 or box[3] > img.height + 1:
                     # Scrolled out of view: a browser shows only what is on
                     # screen, so Tier B scores the visible pages and Tier A
