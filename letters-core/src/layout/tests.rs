@@ -627,6 +627,45 @@ fn a_pages_own_header_distance_places_its_header() {
     assert_eq!(top(Source::Paragraph(0)), Some(40.0), "the header's 20pt and a line fit above the 40pt margin");
 }
 
+/// A page border is drawn padding and rule outside the text: around the
+/// body alone without a header or footer, around the header and footer
+/// a page shows too, on every page.
+#[test]
+fn a_page_border_surrounds_the_text_and_its_header_and_footer() {
+    use crate::model::{PageBorder, PageGeometry};
+    let border = |t: &RenderTree, page: usize| {
+        t.pages[page].items.iter().find_map(|i| match i {
+            Item::PageBorder { x_pt, y_pt, width_pt, height_pt, line_pt, color } => Some((*x_pt, *y_pt, *width_pt, *height_pt, *line_pt, *color)),
+            _ => None,
+        })
+    };
+    let mut d = doc_of(LINES_PER_PAGE + 1, "x");
+    let rule = PageBorder { width_pt: 1.0, color: 0x12_34_56, padding_pt: [2.0, 3.0, 4.0, 5.0] };
+    d.page = Some(PageGeometry { border: Some(rule), ..PageGeometry::default() });
+    let g = d.page.unwrap();
+    let t = lay(&d);
+    assert_eq!(t.pages.len(), 2);
+    let (x, y, w, h, line, color) = border(&t, 0).expect("the page's border");
+    assert_eq!((line, color), (1.0, 0x12_34_56));
+    assert_eq!(x, g.margin_left_pt - 5.0 - 1.0);
+    assert_eq!(y, g.margin_top_pt - 2.0 - 1.0);
+    assert_eq!(x + w, g.width_pt - g.margin_right_pt + 3.0 + 1.0);
+    assert_eq!(y + h, g.height_pt - g.margin_bottom_pt + 4.0 + 1.0);
+    assert!(border(&t, 1).is_some(), "every page has its border");
+    assert_eq!(line_items(&t.pages[0])[0].3, g.margin_top_pt, "the body stays where the margin puts it");
+
+    d.header = Some("Head".into());
+    d.footer = Some("Foot".into());
+    d.page = Some(PageGeometry { header_pt: Some(20.0), footer_pt: Some(25.0), border: Some(rule), ..g });
+    let t = lay(&d);
+    let (_, y, _, h, _, _) = border(&t, 0).unwrap();
+    assert_eq!(y, 20.0 - 2.0 - 1.0, "the border runs above the header");
+    assert_eq!(y + h, g.height_pt - 25.0 + 4.0 + 1.0, "and below the footer");
+
+    d.page = Some(PageGeometry { border: None, ..g });
+    assert!(border(&lay(&d), 0).is_none(), "no border unless the page has one");
+}
+
 /// A header at the right ends at the right margin, a footer centred sits
 /// mid-page.
 #[test]

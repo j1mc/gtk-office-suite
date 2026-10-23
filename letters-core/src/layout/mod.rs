@@ -284,6 +284,10 @@ pub enum Item {
     /// page: `top_edge` only on its first box, `bottom_edge` only on its
     /// last, so a border opens where the paragraph continues.
     ParaBox { para: usize, x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, fill: Option<String>, borders: crate::model::ParaBorders, top_edge: bool, bottom_edge: bool },
+    /// The page's border (`PageGeometry::border`): a rule `line_pt` wide
+    /// in `color` (0xRRGGBB) whose outer edge is this box, around the
+    /// page's text and the header and footer it shows.
+    PageBorder { x_pt: f64, y_pt: f64, width_pt: f64, height_pt: f64, line_pt: f64, color: u32 },
 }
 
 /// One page of the render tree.
@@ -1942,6 +1946,9 @@ impl<'o> Flow<'o> {
             let g = page.geometry;
             let (left, width, height) = (g.margin_left_pt, content_width(&g), page.height_pt);
             let section = page_sections.get(page.index).copied().unwrap_or(0);
+            // How far up the page's header reaches and down its footer:
+            // the border runs around them as well as the body.
+            let (mut text_top, mut text_bottom) = (g.margin_top_pt, height - g.margin_bottom_pt);
             for source in [Source::Header, Source::Footer] {
                 let PageStory { text: template, pictures, alignment, lines: story } = page_story(doc, section, page.index == 0, source == Source::Header);
                 let row_h = picture_row_height(pictures, width);
@@ -1954,6 +1961,12 @@ impl<'o> Flow<'o> {
                     _ => height - g.footer_pt.unwrap_or(opts.footer_distance_pt) - row_h - text_h,
                 };
                 place_header_footer_pictures(page, pictures, left, width, top, height);
+                if !pictures.is_empty() || template.is_some_and(|t| !t.is_empty()) {
+                    match source {
+                        Source::Header => text_top = text_top.min(top),
+                        _ => text_bottom = text_bottom.max(top + row_h + text_h),
+                    }
+                }
                 let Some(template) = template.filter(|t| !t.is_empty()) else { continue };
                 let text = page_field_text(template, page.index + 1, total);
                 let lines = header_footer_lines(&text, alignment, story, pictures, width, opts, shaper);
@@ -2000,6 +2013,20 @@ impl<'o> Flow<'o> {
                         story_line,
                     });
                 }
+            }
+            if let Some(b) = g.border {
+                let [pad_top, pad_right, pad_bottom, pad_left] = b.padding_pt;
+                let x = left - pad_left - b.width_pt;
+                let y = text_top - pad_top - b.width_pt;
+                // Under the other items, as Writer paints it.
+                page.items.insert(0, Item::PageBorder {
+                    x_pt: x.max(0.0),
+                    y_pt: y.max(0.0),
+                    width_pt: (left + width + pad_right + b.width_pt).min(page.width_pt) - x.max(0.0),
+                    height_pt: (text_bottom + pad_bottom + b.width_pt).min(height) - y.max(0.0),
+                    line_pt: b.width_pt,
+                    color: b.color,
+                });
             }
         }
         RenderTree { pages: self.pages }

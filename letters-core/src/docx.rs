@@ -6,7 +6,7 @@
 // flattened (see read()). Fidelity is measured by tests/docx.rs and the
 // LO-authored corpus in tests/lo_parity.rs.
 
-use crate::model::{Alignment, BorderStyle, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageGeometry, Paragraph, ParaBorder, ParaBorders, ParaStyle, Run, RunStyle, TabAlign, TabLeader, TabStop};
+use crate::model::{Alignment, BorderStyle, Document, LineHeight, ListKind, ListLabel, NumberFormat, PageBorder, PageGeometry, Paragraph, ParaBorder, ParaBorders, ParaStyle, Run, RunStyle, TabAlign, TabLeader, TabStop};
 use rdocx_oxml::shared::ST_Jc;
 
 /// The body-paragraph properties rdocx does not hand back, in twips.
@@ -1491,6 +1491,7 @@ fn read_sections(
             column_gap_pt: twips(s.column_gap, 18.0),
             header_pt: s.header_footer[0].map(|t| t / 20.0).or(previous.header_pt),
             footer_pt: s.header_footer[1].map(|t| t / 20.0).or(previous.footer_pt),
+            border: previous.border,
         };
         previous = geometry;
         let (carried_header, carried_footer) = std::mem::take(&mut carried);
@@ -1886,7 +1887,63 @@ fn read_page_geometry(doc: &rdocx::Document) -> Option<PageGeometry> {
             .unwrap_or(default.column_gap_pt),
         header_pt: sect.header_distance.map(|v| v.0 as f64 / 20.0),
         footer_pt: sect.footer_distance.map(|v| v.0 as f64 / 20.0),
+        border: None,
     })
+    .map(|mut g| {
+        g.border = sect.page_borders.as_deref().and_then(|b| page_border(b, &g));
+        g
+    })
+}
+
+/// A section's `w:pgBorders` as a page border, when it draws one. The
+/// model keeps one rule for the four sides, the first visible edge's;
+/// each side keeps its own distance from the text. `w:space` is that
+/// distance when the border is measured from the text (the default),
+/// and the distance from the page's edge when `w:offsetFrom="page"`,
+/// which leaves what the margin has to spare.
+fn page_border(b: &rdocx_oxml::document::CT_PageBorders, g: &PageGeometry) -> Option<PageBorder> {
+    use rdocx_oxml::shared::ST_Border;
+    let edges = [&b.top, &b.right, &b.bottom, &b.left];
+    let rule = edges
+        .iter()
+        .filter_map(|e| e.as_ref())
+        .find(|e| !matches!(e.val, ST_Border::None | ST_Border::Nil))?;
+    let width_pt = rule.sz.map_or(0.5, |s| f64::from(s) / 8.0);
+    let color = rule
+        .color
+        .as_deref()
+        .filter(|c| c.len() == 6)
+        .and_then(|c| u32::from_str_radix(c, 16).ok())
+        .unwrap_or(0);
+    let from_page = matches!(b.offset_from, Some(rdocx_oxml::document::ST_PageBorderOffset::Page));
+    let margins = [g.margin_top_pt, g.margin_right_pt, g.margin_bottom_pt, g.margin_left_pt];
+    let mut padding_pt = [0.0; 4];
+    for (i, e) in edges.iter().enumerate() {
+        let space = e.as_ref().and_then(|e| e.space).map_or(0.0, f64::from);
+        padding_pt[i] = if from_page { (margins[i] - space - width_pt).max(0.0) } else { space };
+    }
+    Some(PageBorder { width_pt, color, padding_pt })
+}
+
+/// `w:pgBorders` for a page border, measured from the text as
+/// `page_border` reads it. Word caps `w:space` at 31pt and `w:sz` at
+/// 12pt (96 eighths).
+fn page_borders(b: &PageBorder) -> rdocx_oxml::document::CT_PageBorders {
+    let edge = |padding: f64| {
+        let mut e = rdocx_oxml::borders::CT_BorderEdge::new(rdocx_oxml::shared::ST_Border::Single);
+        e.sz = Some(((b.width_pt * 8.0).round() as u32).clamp(2, 96));
+        e.space = Some(padding.round().clamp(0.0, 31.0) as u32);
+        e.color = Some(format!("{:06X}", b.color & 0xFF_FFFF));
+        Some(e)
+    };
+    rdocx_oxml::document::CT_PageBorders {
+        offset_from: Some(rdocx_oxml::document::ST_PageBorderOffset::Text),
+        top: edge(b.padding_pt[0]),
+        right: edge(b.padding_pt[1]),
+        bottom: edge(b.padding_pt[2]),
+        left: edge(b.padding_pt[3]),
+        ..Default::default()
+    }
 }
 
 /// The text of a paragraph marking a table cell that a merged cell
@@ -2520,6 +2577,9 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         // two-column document saves as one.
         if pg.columns > 1 {
             out.set_columns(pg.columns as u32, rdocx::Length::pt(pg.column_gap_pt));
+        }
+        if let Some(b) = pg.border {
+            out.section_properties_mut().page_borders = Some(Box::new(page_borders(&b)));
         }
     }
     let bytes = out
