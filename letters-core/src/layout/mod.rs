@@ -1359,9 +1359,8 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
         let mut min_left = file_h.map_or(0.0, |h| h.pt).max(tall_need);
         let mut first_piece = true;
         loop {
-            let room = flow.bottom() - flow.y - rule_pt;
             // How many of each cell's remaining slices fit in `room`.
-            let fit = |cell: &[Slice], from: usize| -> (usize, f64) {
+            let fit = |cell: &[Slice], from: usize, room: f64| -> (usize, f64) {
                 let mut h = 0.0;
                 let mut n = from;
                 while n < cell.len() && h + cell[n].height() <= room + 1e-6 {
@@ -1370,7 +1369,24 @@ fn layout_table(flow: &mut Flow, doc: &Document, range: std::ops::Range<usize>, 
                 }
                 (n, h)
             };
-            let takes: Vec<(usize, f64)> = slices.iter().zip(&next).map(|(c, &from)| fit(c, from)).collect();
+            // The lines a piece takes leave room at the foot of the page for
+            // the footnotes they reference: take less until they fit.
+            let mut notes_h = 0.0;
+            let takes: Vec<(usize, f64)> = loop {
+                let room = flow.bottom() - flow.y - rule_pt - notes_h;
+                let takes: Vec<(usize, f64)> = slices.iter().zip(&next).map(|(c, &from)| fit(c, from, room)).collect();
+                let notes: Vec<usize> = row_cells
+                    .iter()
+                    .zip(&slices)
+                    .zip(next.iter().zip(&takes))
+                    .flat_map(|(((_, _, paras), cell), (&from, &(to, _)))| slice_notes(doc, paras, &cell[from..to]))
+                    .collect();
+                let need = flow.notes_room(&notes);
+                if need <= notes_h + 1e-6 {
+                    break takes;
+                }
+                notes_h = need;
+            };
             let done = takes.iter().zip(&slices).all(|((n, _), c)| *n == c.len());
             let placed_any = takes.iter().zip(&next).any(|((n, _), from)| n > from);
             if !done && !placed_any && !flow.column_is_empty() {
@@ -1556,9 +1572,27 @@ fn place_slices(flow: &mut Flow, doc: &Document, paras: &[CellParagraph], slices
                 }
             }
             emit_line(flow, *i, p, &text, l, &s.lines[l], text_x + s.box_x, s.box_w, y, h);
+            // A footnote referenced in a cell goes to the foot of the page
+            // the line is on, as one in the body does.
+            flow.add_notes(line_notes(p, &s.lines[l]));
         }
         y += slice.height();
     }
+}
+
+/// The footnotes referenced by a cell's slices.
+fn slice_notes(doc: &Document, paras: &[CellParagraph], slices: &[Slice]) -> Vec<usize> {
+    slices
+        .iter()
+        .filter_map(|slice| match *slice {
+            Slice::Line(k, l, _) => {
+                let (i, s, _) = &paras[k];
+                Some(line_notes(&doc.paragraphs[*i], &s.lines[l]))
+            }
+            Slice::Gap(_) => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// A table's `cols` column widths: the file's, scaled down to `room` if
@@ -1782,6 +1816,20 @@ impl<'o> Flow<'o> {
             placed_any |= k > 0;
         }
         Some(carry)
+    }
+
+    /// Room the notes `notes` would add at this page's foot: those not
+    /// already on it, whole, and the separator if they are its first.
+    fn notes_room(&self, notes: &[usize]) -> f64 {
+        let here = self.current_notes();
+        let mut new: Vec<usize> = notes.iter().copied().filter(|n| !here.iter().any(|p| p.note == *n)).collect();
+        new.sort_unstable();
+        new.dedup();
+        if new.is_empty() {
+            return 0.0;
+        }
+        let sep = if here.is_empty() { NOTE_SEPARATOR_PT } else { 0.0 };
+        sep + new.iter().map(|&n| self.piece_height(&self.whole(n))).sum::<f64>()
     }
 
     /// Put the notes referenced by a placed line at this page's foot.
