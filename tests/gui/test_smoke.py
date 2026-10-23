@@ -69,6 +69,145 @@ class LettersSnapshotSmoke(BaseGUITestCase):
         self.assertIsNone(self.process.poll(), "letters crashed writing a snapshot")
 
 
+class LettersTextIsDrawnMixin:
+    """The page on screen shows the document's text: dark ink on the white
+    page, read from a screenshot of the real window.
+
+    A user saw a blank page. Nothing in CI looked for that: these smoke
+    tests read the text through AT-SPI and the snapshot, which hold the
+    text whether or not it is drawn; the render lab reads the app's own
+    render dump, drawn apart from the window; and the journeys that look
+    at the window ask a vision model, skipped without its API key. So this
+    counts the ink pixels themselves, on the page alone (the toolbar and
+    status bar have text of their own), under the default renderer, in the
+    colour schemes and the dark style a user can pick.
+    """
+
+    app_name = "letters"
+    # Ink is a pixel with no channel above this (the page is white, the
+    # text near black: Letters keeps the page white in dark mode).
+    INK = 100
+    # "the quick brown fox jumps over the lazy dog" at the default 12pt is
+    # about 800 ink pixels; a caret is under 50.
+    TYPED_INK = 250
+
+    def _page_ink(self):
+        """Ink pixels on the white page in the page view, from a screenshot
+        of the screen."""
+        import mss
+        from PIL import Image
+
+        view = self.app.child(name="Print Layout", roleName="text")
+        # The view is as tall as every page; what shows is its viewport's.
+        v = view.queryComponent().getExtents(0)  # screen coordinates
+        port = view.parent.queryComponent().getExtents(0)
+        left, top = max(v.x, port.x), max(v.y, port.y)
+        right = min(v.x + v.width, port.x + port.width)
+        bottom = min(v.y + v.height, port.y + port.height)
+        if right <= left or bottom <= top:
+            return 0
+        with mss.mss() as sct:
+            shot = sct.grab({"left": left, "top": top, "width": right - left, "height": bottom - top})
+        img = Image.frombytes("RGB", shot.size, shot.rgb)
+        px = img.load()
+        w, h = img.size
+        # The page is the pure white (Adwaita's bars are off-white) that
+        # fills most of a column, and of a row across those columns.
+        def white(x, y):
+            return min(px[x, y]) >= 250
+        def longest_run(flags):
+            best, start = (0, -1), None
+            for i, f in enumerate(flags + [False]):
+                if f and start is None:
+                    start = i
+                elif not f and start is not None:
+                    best = max(best, (i - start, start))
+                    start = None
+            return best[1], best[1] + best[0] - 1
+        x0, x1 = longest_run([sum(white(x, y) for y in range(0, h, 4)) * 4 >= h // 2 for x in range(w)])
+        if x1 < x0:
+            return 0
+        y0, y1 = longest_run([sum(white(x, y) for x in range(x0, x1 + 1, 4)) * 4 >= (x1 - x0) // 2 for y in range(h)])
+        if y1 < y0:
+            return 0
+        return sum(1 for y in range(y0, y1 + 1) for x in range(x0, x1 + 1) if max(px[x, y]) <= self.INK)
+
+    def _assert_typed_text_is_drawn(self):
+        from dogtail import rawinput
+
+        self.new_letters_document()
+        blank = self._page_ink()
+        rawinput.typeText("the quick brown fox jumps over the lazy dog")
+        self.wait_for_node(name="9 words", roleName="label")
+        ink = self.wait_until(self._page_ink, lambda n: n - blank >= self.TYPED_INK, timeout=15.0,
+                              description="the typed text to be drawn on the page")
+        print(f"page ink: {blank} blank, {ink} typed", flush=True)
+
+
+class LettersTextIsDrawnSmoke(LettersTextIsDrawnMixin, BaseGUITestCase):
+    def test_typed_text_is_drawn_on_the_page(self):
+        self._assert_typed_text_is_drawn()
+
+
+class LettersTextIsDrawnDarkSystemSmoke(LettersTextIsDrawnMixin, BaseGUITestCase):
+    """The system prefers dark: the page stays white and its text dark."""
+
+    def setUp(self):
+        self.launch_env = {**getattr(self, "launch_env", {}), "ADW_DEBUG_COLOR_SCHEME": "prefer-dark"}
+        super().setUp()
+
+    def test_typed_text_is_drawn_on_the_page_in_dark_mode(self):
+        self._assert_typed_text_is_drawn()
+
+
+class LettersTextIsDrawnDarkStyleSmoke(LettersTextIsDrawnMixin, BaseGUITestCase):
+    """Letters' own Toggle Dark Mode, as a user who chose it relaunches
+    with it (`style` "dark")."""
+
+    def setUp(self):
+        config = self.isolate_gsettings(prefix="letters-dark-style-")
+        os.makedirs(os.path.join(config, "glib-2.0", "settings"), exist_ok=True)
+        with open(os.path.join(config, "glib-2.0", "settings", "keyfile"), "w") as f:
+            f.write("[org/tunaos/letters]\nstyle='dark'\n")
+        super().setUp()
+
+    def test_typed_text_is_drawn_on_the_page_in_the_dark_style(self):
+        self._assert_typed_text_is_drawn()
+
+
+class LettersOpenedTextIsDrawnSmoke(LettersTextIsDrawnMixin, BaseGUITestCase):
+    """A .docx opened from the command line shows its text."""
+
+    def setUp(self):
+        import zipfile
+
+        path = os.path.join(self.temp_dir(prefix="letters-opened-ink-"), "letter.docx")
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        body = "".join(f"<w:p><w:r><w:t>{t}</w:t></w:r></w:p>" for t in (
+            "Dear reader,",
+            "This letter was opened from a file and its text must be drawn on the page.",
+            "Yours sincerely,",
+        ))
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("[Content_Types].xml",
+                       '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                       '<Default Extension="xml" ContentType="application/xml"/>'
+                       '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+            z.writestr("_rels/.rels",
+                       '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                       '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+            z.writestr("word/document.xml", f'<?xml version="1.0" encoding="UTF-8"?><w:document {w}><w:body>{body}</w:body></w:document>')
+        self.launch_args = [path]
+        super().setUp()
+
+    def test_an_opened_documents_text_is_drawn_on_the_page(self):
+        self.wait_for_node(name="Print Layout", roleName="text")
+        ink = self.wait_until(self._page_ink, lambda n: n >= 2 * self.TYPED_INK, timeout=15.0,
+                              description="the opened letter's text to be drawn on the page")
+        print(f"page ink: {ink}", flush=True)
+
+
 class LettersAccessibleGeometrySmoke(BaseGUITestCase):
     """The page view's accessible node follows zoom and scrolling (#1283).
     Letters shows a document as one text box (Print Layout's page view,
