@@ -915,6 +915,13 @@ pub struct PageGeometry {
     pub columns: u8,
     #[serde(default = "default_column_gap")]
     pub column_gap_pt: f64,
+    /// The distance from the page's top edge to its header (`w:pgMar
+    /// w:header`), and from its bottom edge to its footer; `None` takes
+    /// the layout's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_pt: Option<f64>,
 }
 
 fn default_columns() -> u8 { 1 }
@@ -932,6 +939,8 @@ impl Default for PageGeometry {
             margin_right_pt: 72.0,
             columns: 1,
             column_gap_pt: 18.0,
+            header_pt: None,
+            footer_pt: None,
         }
     }
 }

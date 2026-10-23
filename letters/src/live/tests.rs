@@ -452,7 +452,7 @@ fn every_field() -> Document {
     d.header = Some("The header".into());
     d.footer = Some("Page {page}".into());
     d.page = Some(PageGeometry { width_pt: 612.0, height_pt: 792.0, margin_top_pt: 36.0, margin_bottom_pt: 54.0,
-        margin_left_pt: 90.0, margin_right_pt: 45.0, columns: 2, column_gap_pt: 18.0 });
+        margin_left_pt: 90.0, margin_right_pt: 45.0, columns: 2, column_gap_pt: 18.0, ..Default::default() });
     d.base_font = BaseFont { family: Some("Liberation Sans".into()), size_hp: Some(22) };
     d.heading_styles = vec![RunStyle { color: Some("1a5fb4".into()), bold: true, ..Default::default() }];
     d.comments = vec![

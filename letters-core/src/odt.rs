@@ -1240,27 +1240,28 @@ fn styles_xml(doc: &Document) -> String {
     // keeps the body where the section's margin (Word's, the model's)
     // puts it; the reader adds it back. A document of one section writes
     // its page as before.
-    let distance = crate::layout::LayoutOptions::default().header_distance_pt;
+    // The page's own distance to its header or footer, else the layout's.
+    let defaults = crate::layout::LayoutOptions::default();
     let layouts: String = masters
         .iter()
         .map(|m| {
-            let room = |shown: bool, margin: f64| (!doc.sections.is_empty() && shown && margin > distance).then_some(margin - distance);
-            let header = m.page.and_then(|p| room(shows(m.header, &doc.header_pictures), p.margin_top_pt));
-            let footer = m.page.and_then(|p| room(shows(m.footer, &doc.footer_pictures), p.margin_bottom_pt));
+            let room = |shown: bool, margin: f64, distance: f64| (!doc.sections.is_empty() && shown && margin > distance).then_some((margin - distance, distance));
+            let header = m.page.and_then(|p| room(shows(m.header, &doc.header_pictures), p.margin_top_pt, p.header_pt.unwrap_or(defaults.header_distance_pt)));
+            let footer = m.page.and_then(|p| room(shows(m.footer, &doc.footer_pictures), p.margin_bottom_pt, p.footer_pt.unwrap_or(defaults.footer_distance_pt)));
             let page = m.page.map(|mut p| {
-                if header.is_some() {
+                if let Some((_, distance)) = header {
                     p.margin_top_pt = distance;
                 }
-                if footer.is_some() {
+                if let Some((_, distance)) = footer {
                     p.margin_bottom_pt = distance;
                 }
                 p
             });
             let mut out = format!("<style:page-layout style:name=\"{}\">{}", m.layout, page_layout_properties(page.as_ref()));
-            if let Some(h) = header {
+            if let Some((h, _)) = header {
                 out.push_str(&format!("<style:header-style><style:header-footer-properties fo:min-height=\"{h:.2}pt\" fo:margin-bottom=\"0pt\"/></style:header-style>"));
             }
-            if let Some(h) = footer {
+            if let Some((h, _)) = footer {
                 out.push_str(&format!("<style:footer-style><style:header-footer-properties fo:min-height=\"{h:.2}pt\" fo:margin-top=\"0pt\"/></style:footer-style>"));
             }
             out.push_str("</style:page-layout>");
@@ -3839,7 +3840,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         let mut master_layout: Option<String> = None;
         // Each page layout's header and footer areas, which take room only
         // on a master page that has a header or footer.
-        let mut hf_areas: std::collections::HashMap<String, (f64, f64)> = Default::default();
+        let mut hf_areas: std::collections::HashMap<String, (Option<f64>, Option<f64>)> = Default::default();
         let mut last_layout: Option<String> = None;
         // Inside a page layout's `style:header-style` (true) or
         // `style:footer-style` (false).
@@ -3900,6 +3901,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 margin_right_pt: m("fo:margin-right", d.margin_right_pt),
                 columns: d.columns,
                 column_gap_pt: d.column_gap_pt,
+                ..d
             })
         };
         loop {
@@ -3933,12 +3935,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 Ok(Event::Empty(e)) | Ok(Event::Start(e)) if hf_style.is_some() && e.name().as_ref() == "style:header-footer-properties" => {
                     let len = |name: &str| attr_val(&e, name).and_then(|v| parse_length_pt(&v)).unwrap_or(0.0);
                     let height = len("fo:min-height").max(len("svg:height"));
-                    let area = hf_areas.entry(layout_name.clone()).or_insert((0.0, 0.0));
-                    if hf_style == Some(true) {
-                        area.0 += height;
-                    } else {
-                        area.1 += height;
-                    }
+                    let area = hf_areas.entry(layout_name.clone()).or_default();
+                    let side = if hf_style == Some(true) { &mut area.0 } else { &mut area.1 };
+                    *side = Some(side.unwrap_or(0.0) + height);
                 }
                 Ok(Event::Start(e)) if e.name().as_ref() == "style:master-page" => {
                     cur_master = attr_val(&e, "style:name");
@@ -4265,11 +4264,15 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
         // margin. Its page is that layout so grown.
         let grown = |layout: &str, m: Option<&MasterReading>| -> Option<PageGeometry> {
             let mut page = layouts.get(layout).copied()?;
-            let (header, footer) = hf_areas.get(layout).copied().unwrap_or((0.0, 0.0));
-            if m.is_some_and(|m| m.has_header) {
+            let (header, footer) = hf_areas.get(layout).copied().unwrap_or_default();
+            // The page margin a header or footer area grows is how far it
+            // sits from the page's edge.
+            if let Some(header) = header.filter(|_| m.is_some_and(|m| m.has_header)) {
+                page.header_pt = Some(page.margin_top_pt);
                 page.margin_top_pt += header;
             }
-            if m.is_some_and(|m| m.has_footer) {
+            if let Some(footer) = footer.filter(|_| m.is_some_and(|m| m.has_footer)) {
+                page.footer_pt = Some(page.margin_bottom_pt);
                 page.margin_bottom_pt += footer;
             }
             Some(page)
@@ -5718,6 +5721,7 @@ mod tests {
             margin_right_pt: 45.0,
             columns: 1,
             column_gap_pt: 18.0,
+            ..PageGeometry::default()
         });
         let rt = round_trip(&d);
         let pg = rt.page.expect("page geometry lost");
@@ -5855,6 +5859,7 @@ mod tests {
             margin_right_pt: 36.0,
             columns: 2,
             column_gap_pt: 24.0,
+            ..PageGeometry::default()
         };
         let last = PageGeometry { margin_left_pt: 50.0, margin_right_pt: 50.0, ..PageGeometry::default() };
         let section = |id: u32, start, end, geometry, header: Option<&str>, footer: Option<&str>| DocSection {
