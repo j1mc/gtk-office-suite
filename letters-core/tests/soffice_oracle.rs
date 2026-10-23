@@ -2699,3 +2699,22 @@ fn a_line_break_and_a_spans_face_survive_writer_both_ways() {
     let Some(rt) = through_lo_to_docx(&d, "brk") else { return };
     close(&rt, "odt → Writer → docx");
 }
+
+/// Text raised or lowered at its own size (`w:position`) survives Writer
+/// rewriting the .docx, and is not read as a superscript or subscript:
+/// the business appointment rules' Normal lowers every run half a point.
+#[test]
+fn a_runs_raised_or_lowered_position_survives_writer() {
+    let Some(bin) = require_or_skip() else { return };
+    let mut d = Document::from_plain_text("");
+    d.paragraphs[0].runs = vec![
+        Run::plain("level "),
+        Run { text: "lowered".into(), style: RunStyle { position_hp: Some(-2), ..Default::default() } },
+        Run { text: " raised".into(), style: RunStyle { position_hp: Some(6), ..Default::default() } },
+    ];
+    let rt = writer_rewrites_docx(bin, &d, "position");
+    let of = |t: &str| rt.paragraphs.iter().flat_map(|p| &p.runs).find(|r| r.text.contains(t)).map(|r| (r.style.position_hp, r.style.vert_align));
+    assert_eq!(of("lowered"), Some((Some(-2), None)));
+    assert_eq!(of("raised"), Some((Some(6), None)));
+    assert_eq!(of("level"), Some((None, None)));
+}

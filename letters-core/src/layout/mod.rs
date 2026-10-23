@@ -800,7 +800,34 @@ pub fn paragraph_box_x(p: &Paragraph) -> f64 {
     let list_indent = if st.list == ListKind::None { 0.0 } else { lists::text_indent_pt(st.list_level) };
     // A file's own quote style gives its indent in `left_indent_pt`.
     let quote_indent = if st.block_quote && !st.own_look { QUOTE_INDENT_PT } else { 0.0 };
-    st.left_indent_pt.max(0.0) + list_indent + quote_indent
+    (st.left_indent_pt + list_indent).max(0.0) + quote_indent
+}
+
+/// Where a list item's first line starts, from its text box's left edge.
+/// The marker hangs in front of the text; a marker wider than its hanging
+/// is followed by a tab, as Word and Writer draw it, to the next tab stop
+/// past it: the business appointment rules' bullets hang 2 twips at the
+/// margin, and their text starts at the 0.5in default stop, with the
+/// lines below back at the margin.
+fn list_first_line_pt(p: &Paragraph, box_x: f64, opts: &LayoutOptions) -> f64 {
+    let st = &p.style;
+    let Some(marker) = lists::marker_for(st, 1) else { return 0.0 };
+    let hanging = st.list_hanging_pt.unwrap_or(lists::HANGING_PT).max(0.0).min(box_x);
+    // Measured without a shaper, as every renderer rebuilds this request:
+    // a body-text glyph is about 0.6em wide.
+    let size = p.runs.first().and_then(|r| r.style.font_size_hp).map_or(opts.font_size_pt, |hp| f64::from(hp) / 2.0);
+    let label_end = box_x - hanging + marker.chars().count() as f64 * size * 0.6;
+    if label_end <= box_x {
+        return 0.0;
+    }
+    let stop = st
+        .tab_stops_pt
+        .iter()
+        .map(|t| t.pos_pt)
+        .filter(|&x| x > label_end)
+        .fold(f64::INFINITY, f64::min)
+        .min(((label_end / DEFAULT_TAB_PT).floor() + 1.0) * DEFAULT_TAB_PT);
+    stop - box_x
 }
 
 /// How far a block quote is indented from the left, in points (the Draft
@@ -888,7 +915,7 @@ pub fn paragraph_request<'a>(p: &'a Paragraph, box_w: f64, opts: &'a LayoutOptio
         width_pt: box_w,
         // A list item's first line starts at its text indent; the marker
         // hangs in front of it.
-        first_line_indent_pt: if st.list == ListKind::None { st.first_line_indent_pt } else { 0.0 },
+        first_line_indent_pt: if st.list == ListKind::None { st.first_line_indent_pt } else { list_first_line_pt(p, box_x, opts) },
         tab_stops: if st.toc.is_some() { Vec::new() } else { request_tabs(st, box_x, box_w) },
         right_tab: st.toc.is_some(),
         defaults: opts,

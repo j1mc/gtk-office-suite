@@ -286,6 +286,27 @@ fn a_list_marker_hangs_as_far_as_the_file_says() {
     assert!((markers[0] - markers[1] - (36.0 - crate::lists::HANGING_PT)).abs() < 1e-6, "{markers:?}");
 }
 
+/// A list item may stand left of its level's own indent, as far as the
+/// margin; a marker wider than its hanging is followed by a tab to the
+/// next default stop, as Word and Writer draw it. The business
+/// appointment rules' bullets hang 2 twips at the margin: the text starts
+/// at 0.5in, and the lines below it at the margin.
+#[test]
+fn a_marker_wider_than_its_hanging_tabs_its_text_to_the_next_stop() {
+    let mut d = doc_of(1, &"word ".repeat(60));
+    let st = &mut d.paragraphs[0].style;
+    st.list = crate::model::ListKind::Bullet;
+    st.left_indent_pt = -crate::lists::text_indent_pt(0);
+    st.list_hanging_pt = Some(0.1);
+    let t = lay(&d);
+    let marker = t.pages[0].items.iter().find_map(|i| match i { Item::Marker { x_pt, .. } => Some(*x_pt), _ => None }).unwrap();
+    let lines: Vec<f64> = t.pages[0].items.iter().filter_map(|i| match i { Item::Line { x_pt, .. } => Some(*x_pt), _ => None }).collect();
+    assert!(lines.len() > 1, "{lines:?}");
+    let margin = lines[1];
+    assert!((marker - margin).abs() < 1e-6, "the marker at the margin: {marker} {margin}");
+    assert!((lines[0] - margin - DEFAULT_TAB_PT).abs() < 1e-6, "the first line at the first stop: {lines:?}");
+}
+
 #[test]
 fn a_table_is_a_grid_of_cells_with_rows_as_tall_as_their_tallest_cell() {
     let mut d = doc_of(1, "after");

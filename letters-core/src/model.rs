@@ -63,6 +63,12 @@ pub struct RunStyle {
     /// condenses. None = normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub letter_spacing_tw: Option<i32>,
+    /// Raised (positive) or lowered (negative) from the baseline by this
+    /// many half-points, at the run's own size (OOXML `w:position`); the
+    /// line grows to hold it, as LibreOffice draws it. None = on the
+    /// baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_hp: Option<i32>,
     /// Footnote reference: index into `Document::footnotes`. The run's
     /// text is the visible marker (usually empty; renderers number it).
     #[serde(default)]
@@ -475,6 +481,9 @@ pub struct ParaStyle {
     pub space_before_pt: f64,
     #[serde(default)]
     pub space_after_pt: f64,
+    /// A list item's is from its level's own text indent
+    /// (`lists::text_indent_pt`), and may stand left of it as far as the
+    /// margin.
     #[serde(default)]
     pub left_indent_pt: f64,
     #[serde(default)]
