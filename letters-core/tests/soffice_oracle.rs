@@ -2774,3 +2774,35 @@ fn a_tables_indent_survives_writer_both_ways() {
     // does ours.
     close(&writer_rewrites_docx(bin, &d, "indent"), 30.0 - 5.4, "docx → Writer → docx");
 }
+
+/// A page border crosses Writer both ways, the text staying where the
+/// margins put it: Word's `w:pgBorders` and ODF's page `fo:border`, each
+/// with the padding between the rule and the text.
+#[test]
+fn a_page_border_survives_writer_both_ways() {
+    use letters_core::model::{PageBorder, PageGeometry};
+    let Some(bin) = require_or_skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = Document::from_plain_text("bordered");
+    let want = PageGeometry {
+        border: Some(PageBorder { width_pt: 0.5, color: 0x00_00_80, padding_pt: [2.0, 4.0, 2.0, 4.0] }),
+        ..PageGeometry::default()
+    };
+    d.page = Some(want);
+    let check = |got: &Document, how: &str| {
+        let pg = got.page.unwrap_or_else(|| panic!("{how}: the page geometry is lost"));
+        let b = pg.border.unwrap_or_else(|| panic!("{how}: the page border is lost: {pg:?}"));
+        let w = want.border.unwrap();
+        let close = |a: f64, b: f64| (a - b).abs() < 0.6;
+        assert!(close(b.width_pt, w.width_pt) && b.color == w.color, "{how}: {b:?}");
+        assert!(b.padding_pt.iter().zip(w.padding_pt).all(|(a, b)| close(*a, b)), "{how}: {b:?}");
+        assert!(pg.approx_eq(&want), "{how}: the text moved: {pg:?}");
+    };
+    let docx_path = dir.path().join("border.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("border.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    check(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    check(&through_lo_to_docx(&d, "border").expect("Writer"), "odt → Writer → docx");
+}
