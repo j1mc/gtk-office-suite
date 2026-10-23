@@ -152,6 +152,13 @@ jobs:
           name: reproducible-build-${{ matrix.run }}
           path: repro/${{ matrix.run }}.sha256
           retention-days: 90
+      # The Tables binary itself, briefly: when the two builds differ
+      # (#1671) the compare job diffs them to say where.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: reproducible-tables-${{ matrix.run }}
+          path: target/release/tables
+          retention-days: 7
 
   reproducible-compare:
     name: Reproducible build (compare)
@@ -163,6 +170,33 @@ jobs:
           pattern: reproducible-build-*
           path: repro
           merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: reproducible-tables-first
+          path: tables-first
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: reproducible-tables-second
+          path: tables-second
+      # Where two Tables builds differ (#1671): the ELF sections whose
+      # bytes changed, and the strings only one build holds, which name
+      # a timestamp, a path or a reordered table when that is the cause.
+      - name: Where the two Tables builds differ
+        if: always()
+        run: |
+          a=tables-first/tables b=tables-second/tables
+          if cmp -s "$a" "$b"; then echo "identical"; exit 0; fi
+          echo "sizes: $(stat -c %s "$a") $(stat -c %s "$b")"
+          for s in $(objdump -h "$a" | awk '$1 ~ /^[0-9]+$/ {print $2}'); do
+            objcopy -O binary --only-section="$s" "$a" sa.bin 2>/dev/null || true
+            objcopy -O binary --only-section="$s" "$b" sb.bin 2>/dev/null || true
+            cmp -s sa.bin sb.bin || echo "section $s differs"
+          done
+          echo "first differing bytes (offset, octal a, octal b):"
+          cmp -l "$a" "$b" | head -20 || true
+          echo "differing bytes: $(cmp -l "$a" "$b" | wc -l)"
+          echo "strings only in one build:"
+          diff <(strings -n 8 "$a" | sort -u) <(strings -n 8 "$b" | sort -u) | head -60 || true
       - name: The two clean builds are byte-identical
         run: |
           cat repro/first.sha256 repro/second.sha256
