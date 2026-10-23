@@ -135,7 +135,7 @@ fn a_heading_goes_with_a_paragraph_too_short_to_split() {
     // would not.
     let mut d = doc_of(42, "x");
     d.paragraphs.push(Paragraph { style: ParaStyle { heading: Some(1), ..Default::default() }, runs: vec![Run::plain("Chapter")] });
-    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain(&"word ".repeat(40))] });
+    d.paragraphs.push(Paragraph { style: ParaStyle::default(), runs: vec![Run::plain("word ".repeat(40))] });
     let t = lay(&d);
     assert_eq!(t.pages[1].items.iter().filter(|i| matches!(i, Item::Line { source: Source::Paragraph(43), .. })).count(), 3);
     assert_eq!(t.page_of_paragraph(42), Some(1), "the heading moved with its body");
