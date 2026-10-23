@@ -4273,8 +4273,16 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                 _ => {}
             }
         }
-        // A header or footer of blank paragraphs only shows nothing.
-        for t in [&mut doc.header, &mut doc.footer].into_iter().chain(master_pages.values_mut().flat_map(|m| [&mut m.header, &mut m.footer])) {
+        // A header or footer of blank paragraphs shows nothing, but Writer
+        // still gives the document's own its lines' room (a section's ""
+        // is no header at all). Its pictures' row is the room of one that
+        // holds pictures.
+        for (t, lines, pictures) in [(&mut doc.header, &doc.header_lines, &doc.header_pictures), (&mut doc.footer, &doc.footer_lines, &doc.footer_pictures)] {
+            if blank(t) {
+                *t = (t.is_some() && !lines.is_empty() && pictures.is_empty()).then(|| "\n".repeat(lines.len() - 1));
+            }
+        }
+        for t in master_pages.values_mut().flat_map(|m| [&mut m.header, &mut m.footer]) {
             if blank(t) {
                 *t = None;
             }
@@ -5579,12 +5587,33 @@ mod tests {
         let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
         let d = read_package(content, styles);
         assert_eq!(d.header.as_deref(), Some("\nFINANCE BILL\n"));
-        assert_eq!(d.footer, None, "a footer of a blank paragraph shows nothing");
+        assert_eq!((d.footer.as_deref(), d.footer_lines.len()), (Some(""), 1), "a footer of a blank paragraph shows nothing but takes its line's room");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h.odt");
         let path = path.to_str().unwrap();
         write(&d, path).unwrap();
         assert_eq!(read(path).unwrap().header.as_deref(), Some("\nFINANCE BILL\n"));
+    }
+
+    /// A header of a blank paragraph takes its line's room, as Writer
+    /// gives it: the statistical release's empty header puts its body a
+    /// 14pt line under the page margin, not the header area's 7pt minimum.
+    /// (One whose paragraph holds a picture is the picture's row:
+    /// `header_and_footer_pictures_round_trip`.)
+    #[test]
+    fn a_blank_header_takes_its_lines_room() {
+        let layout = "<office:automatic-styles><style:page-layout style:name=\"PL0\"><style:page-layout-properties fo:margin-top=\"0.5in\"/>\
+             <style:header-style><style:header-footer-properties style:dynamic-spacing=\"true\" fo:min-height=\"0.1in\"/></style:header-style></style:page-layout>\
+             <style:style style:name=\"H\" style:family=\"paragraph\"><style:paragraph-properties fo:line-height=\"14pt\"/></style:style></office:automatic-styles>";
+        let styles = |header: &str| format!(
+            "<office:document-styles>{layout}<office:master-styles><style:master-page style:name=\"MP0\" style:page-layout-name=\"PL0\"><style:header>{header}</style:header></style:master-page></office:master-styles></office:document-styles>"
+        );
+        let content = "<office:document-content><office:body><office:text><text:p>body</text:p></office:text></office:body></office:document-content>";
+        let d = read_package(content, &styles("<text:p text:style-name=\"H\"/>"));
+        assert_eq!((d.header.as_deref(), d.header_lines.len()), (Some(""), 1));
+        let page = crate::layout::layout(&d, &crate::layout::LayoutOptions::default(), &mut crate::layout::MonoShaper);
+        let body = page.pages[0].items.iter().find_map(|i| match i { crate::layout::Item::Line { source: crate::layout::Source::Paragraph(0), top_pt, .. } => Some(*top_pt), _ => None });
+        assert!(body.is_some_and(|y| y > 36.0 + 7.2), "the body under the header's line, not its 7.2pt minimum: {body:?}");
     }
 
     /// An inline picture's room beside it survives a save and reopen, as
