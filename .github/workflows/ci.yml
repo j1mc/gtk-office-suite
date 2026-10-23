@@ -109,6 +109,7 @@ jobs:
             tests/test_render_lab_rules.py \
             tests/test_pixel_scoreboard.py \
             tests/test_render_lab_locate.py \
+            tests/test_render_lab_gtk_icon_race.py \
             tests/test_office_bench.py \
             tests/test_render_real_scope.py \
             tests/test_installed_check.py \
@@ -189,6 +190,7 @@ jobs:
             tests/test_render_lab_rules.py \
             tests/test_pixel_scoreboard.py \
             tests/test_render_lab_locate.py \
+            tests/test_render_lab_gtk_icon_race.py \
             tests/test_office_bench.py \
             tests/test_render_real_scope.py \
             tests/test_installed_check.py \
