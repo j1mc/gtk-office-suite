@@ -900,6 +900,71 @@ fn a_text_box_is_placed_by_its_anchor_not_in_the_line() {
     assert_eq!(heights[0], heights[1], "the line does not grow to hold it");
 }
 
+/// A document whose first paragraph floats a `w`-by-`h` inch picture at
+/// the left margin, wrapped as `wrap` says, with `n` one-line paragraphs
+/// after it: each paragraph's first line's (x, top).
+fn beside_a_picture(wrap: crate::model::Wrap, w: u64, h: u64, n: usize) -> Vec<(f64, f64)> {
+    use crate::model::{AnchorFrame, ImageAnchor};
+    let mut d = doc_of(n + 1, "text");
+    d.paragraphs[0].runs.push(Run {
+        text: String::new(),
+        style: crate::model::RunStyle {
+            image: Some("/nonexistent.png".into()),
+            image_extent_emu: Some((w * 914_400, h * 914_400)),
+            image_anchor: Some(ImageAnchor { h_from: AnchorFrame::Margin, v_from: AnchorFrame::Text, wrap, ..Default::default() }),
+            ..Default::default()
+        },
+    });
+    let t = lay(&d);
+    line_items(&t.pages[0]).iter().filter(|l| l.1 == 0).map(|l| (l.2, l.3)).collect()
+}
+
+/// Text flows beside a picture set to wrap parallel, on its wider side
+/// and 9pt clear of it, and back across the column below it.
+#[test]
+fn paragraphs_beside_a_parallel_picture_are_set_beside_it() {
+    let lines = beside_a_picture(crate::model::Wrap::Parallel, 2, 1, 8);
+    // The picture spans 72pt from the first line's top: five lines.
+    let beside = lines.iter().filter(|l| l.1 < 72.0 + 72.0).count();
+    assert_eq!(beside, (72.0 / LINE).ceil() as usize);
+    for (x, top) in &lines {
+        let want = if *top < 72.0 + 72.0 { 72.0 + 144.0 + 9.0 } else { 72.0 };
+        assert_eq!(*x, want, "line at {top}");
+    }
+}
+
+/// Text wrapped top and bottom starts below the picture, and so does text
+/// with too little room beside one set to wrap parallel: the anchoring
+/// paragraph's own text too, as Writer moves it, while the picture stays
+/// where the paragraph's top put it.
+#[test]
+fn a_paragraph_that_may_not_sit_beside_a_picture_starts_below_it() {
+    use crate::model::Wrap;
+    for (wrap, w) in [(Wrap::TopBottom, 2), (Wrap::Parallel, 6)] {
+        let lines = beside_a_picture(wrap, w, 1, 2);
+        assert_eq!(lines, vec![(72.0, 144.0), (72.0, 144.0 + LINE), (72.0, 144.0 + 2.0 * LINE)], "{wrap:?}");
+        let mut d = doc_of(1, "text");
+        d.paragraphs[0].runs.push(Run {
+            text: String::new(),
+            style: crate::model::RunStyle {
+                image: Some("/nonexistent.png".into()),
+                image_extent_emu: Some((w * 914_400, 914_400)),
+                image_anchor: Some(crate::model::ImageAnchor { h_from: crate::model::AnchorFrame::Margin, v_from: crate::model::AnchorFrame::Text, wrap, ..Default::default() }),
+                ..Default::default()
+            },
+        });
+        let y = lay(&d).pages[0].items.iter().find_map(|i| match i { Item::Image { y_pt, .. } => Some(*y_pt), _ => None });
+        assert_eq!(y, Some(72.0), "{wrap:?}: the picture is not moved with its text");
+    }
+}
+
+/// A picture over the text (Word's "in front of text") moves nothing.
+#[test]
+fn text_runs_over_a_picture_that_does_not_wrap() {
+    let lines = beside_a_picture(crate::model::Wrap::None, 2, 1, 2);
+    assert_eq!(lines, vec![(72.0, 72.0), (72.0, 72.0 + LINE), (72.0, 72.0 + 2.0 * LINE)]);
+}
+
 /// An inline image keeps its room beside it (Word's `distL`/`distR`):
 /// it is drawn that far in from where its line puts it, and what follows
 /// it in the line starts past the room on its right.

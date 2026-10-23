@@ -1932,7 +1932,7 @@ fn table_cell_fills_survive_writer_both_ways() {
 /// page's edge and centred down it.
 #[test]
 fn floating_pictures_keep_their_placement_through_writer_both_ways() {
-    use letters_core::model::{AnchorAlign, AnchorFrame, ImageAnchor};
+    use letters_core::model::{AnchorAlign, AnchorFrame, ImageAnchor, Wrap};
     let Some(bin) = require_or_skip() else { return };
     let dir = tempfile::tempdir().unwrap();
     let png: &[u8] = &[
@@ -1945,7 +1945,9 @@ fn floating_pictures_keep_their_placement_through_writer_both_ways() {
     let png_path = dir.path().join("logo.png");
     std::fs::write(&png_path, png).unwrap();
     let want = [
-        ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: -660_400, ..Default::default() },
+        // Text beside it, text above and below it, and text over it.
+        ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: -660_400, wrap: Wrap::Parallel, ..Default::default() },
+        ImageAnchor { h_from: AnchorFrame::Margin, x_emu: 457_200, v_from: AnchorFrame::Text, y_emu: 127_000, wrap: Wrap::TopBottom, ..Default::default() },
         ImageAnchor { h_from: AnchorFrame::Page, x_emu: 914_400, v_from: AnchorFrame::Page, v_align: Some(AnchorAlign::Center), behind: true, ..Default::default() },
     ];
     let mut d = Document::from_plain_text("");

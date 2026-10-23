@@ -15,7 +15,7 @@
 // A sentinel is private-use characters (not the chips' own) around an index
 // into the list of boxes.
 
-use crate::docx_anchors::{attr, frame, placement, position, xml_attr};
+use crate::docx_anchors::{attr, frame, placement, position, wrap_element, xml_attr};
 use crate::model::{BoxRule, Document, ImageAnchor, Run, RunStyle, TextBox};
 
 const OPEN: char = '\u{E002}';
@@ -285,7 +285,7 @@ fn drawing(tb: &TextBox, anchor: &ImageAnchor, id: u32) -> String {
         "<mc:AlternateContent xmlns:mc=\"{MC}\"><mc:Choice xmlns:wps=\"{WPS}\" Requires=\"wps\"><w:drawing>\
          <wp:anchor distT=\"0\" distB=\"0\" distL=\"114300\" distR=\"114300\" simplePos=\"0\" relativeHeight=\"{id}\" behindDoc=\"{}\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">\
          <wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"{}\">{}</wp:positionH><wp:positionV relativeFrom=\"{}\">{}</wp:positionV>\
-         <wp:extent cx=\"{w}\" cy=\"{h}\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/><wp:wrapNone/><wp:docPr id=\"{id}\" name=\"Text Box {id}\"/><wp:cNvGraphicFramePr/>\
+         <wp:extent cx=\"{w}\" cy=\"{h}\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>{}<wp:docPr id=\"{id}\" name=\"Text Box {id}\"/><wp:cNvGraphicFramePr/>\
          <a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:graphicData uri=\"{WPS}\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>\
          <wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{fill}{ln}</wps:spPr>\
          <wps:txbx><w:txbxContent>{paras}</w:txbxContent></wps:txbx>\
@@ -296,6 +296,7 @@ fn drawing(tb: &TextBox, anchor: &ImageAnchor, id: u32) -> String {
         position(anchor.x_emu, anchor.h_align, ["left", "center", "right"]),
         frame(anchor.v_from, "paragraph"),
         position(anchor.y_emu, anchor.v_align, ["top", "center", "bottom"]),
+        wrap_element(anchor.wrap),
     )
 }
 
@@ -338,7 +339,7 @@ mod tests {
                 text: "Tom & Ann\t1\nsecond".into(),
             }
         );
-        assert_eq!((a.h_from, a.h_align, a.v_from, a.y_emu), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text, 91_440));
+        assert_eq!((a.h_from, a.h_align, a.v_from, a.y_emu, a.wrap), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text, 91_440, crate::model::Wrap::Parallel));
     }
 
     /// A picture's drawing is not a text box and is left as it is.
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn a_written_text_box_reads_back() {
         let tb = TextBox { extent_emu: (914_400, 457_200), border: None, fill: Some("FFFFFF".into()), padding_emu: [1, 2, 3, 4], text: "a\tb <c>\n\nd".into() };
-        let anchor = ImageAnchor { h_from: AnchorFrame::Page, x_emu: 12_700, v_from: AnchorFrame::Margin, v_align: Some(AnchorAlign::Center), behind: true, ..Default::default() };
+        let anchor = ImageAnchor { h_from: AnchorFrame::Page, x_emu: 12_700, v_from: AnchorFrame::Margin, v_align: Some(AnchorAlign::Center), behind: true, wrap: crate::model::Wrap::Parallel, ..Default::default() };
         let written = wrap(&format!("<w:p><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>", sentinel(0)), &[(tb.clone(), anchor)], 9500);
         assert!(written.contains("<w:r><mc:AlternateContent") && written.contains("</mc:AlternateContent></w:r>"), "{written}");
         let (_, boxes) = unwrap(&written);
