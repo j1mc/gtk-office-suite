@@ -47,11 +47,20 @@ mod transitions;
 
 pub use geometry::{parse_slide_size, SlideScale};
 pub use master::{parse_master_shapes, parse_master_shapes_scaled};
-pub(super) use geometry::{in_groups, is_tx_box_attr, parse_blip_embed, parse_coords, parse_prst_geom, parse_rotation, slide_is_hidden, GroupFrame};
-pub(super) use layout::{layout_path_of, layout_theme, parse_color_map, parse_layout_background, read_layout, read_layout_placeholders};
-pub(super) use master::{master_shapes, parse_c_sld_name};
-pub(super) use pictures::{part_path, part_picture, parse_fill_rect, parse_src_rect, resolve_and_extract_picture, PendingPicture, PictureRect};
-pub(super) use transitions::parse_transition;
+use self::geometry::{
+    in_groups, is_tx_box_attr, parse_blip_embed, parse_coords, parse_prst_geom, parse_rotation,
+    slide_is_hidden, GroupFrame,
+};
+use self::layout::{
+    layout_path_of, layout_theme, parse_color_map, parse_layout_background, read_layout,
+    read_layout_placeholders,
+};
+use self::master::{master_shapes, parse_c_sld_name};
+use self::pictures::{
+    part_path, part_picture, parse_fill_rect, parse_src_rect, resolve_and_extract_picture,
+    PendingPicture, PictureRect,
+};
+use self::transitions::parse_transition;
 
 
 /// Close the paragraph a shape has been accumulating, so the next one starts
