@@ -2311,6 +2311,51 @@ fn a_list_items_own_zero_indent_is_kept() {
     assert_eq!((rt.paragraphs[0].style.left_indent_pt, rt.paragraphs[0].style.list_hanging_pt), (st.left_indent_pt, st.list_hanging_pt));
 }
 
+/// A table's indent survives a save and reopen, and `w:tblInd` reads by
+/// the file's rules: under Word 2013's (compatibility mode 15) it is the
+/// table's edge, its text a left padding further right; under older ones
+/// it is the text's.
+#[test]
+fn a_tables_indent_reads_by_the_files_word_rules() {
+    let mut d = Document::from_plain_text("after");
+    let table = d.insert_table_at(0, 1, 1);
+    d.table_indent.insert(table, 30.0);
+    let rt = round_trip(&d);
+    assert_eq!(rt.table_indent.values().copied().collect::<Vec<_>>(), [30.0]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("t.docx");
+    docx::write(&d, &src).expect("write docx");
+    let with_mode = |mode: &str| -> Vec<f64> {
+        let out = dir.path().join(format!("mode{mode}.docx"));
+        let mut zin = zip::ZipArchive::new(std::fs::File::open(&src).unwrap()).unwrap();
+        let mut zout = zip::ZipWriter::new(std::fs::File::create(&out).unwrap());
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().unwrap().into_owned();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut buf).unwrap();
+            if name == "word/document.xml" {
+                let xml = String::from_utf8(buf).unwrap();
+                let at = xml.find("<w:tblInd ").expect("the writer's w:tblInd");
+                let end = at + xml[at..].find("/>").unwrap() + 2;
+                buf = format!("{}<w:tblInd w:w=\"400\" w:type=\"dxa\"/>{}", &xml[..at], &xml[end..]).into_bytes();
+            }
+            if name == "word/settings.xml" {
+                let xml = String::from_utf8(buf).unwrap();
+                assert!(xml.contains("w:val=\"15\""), "the writer's mode: {xml}");
+                buf = xml.replace("w:val=\"15\"", &format!("w:val=\"{mode}\"")).into_bytes();
+            }
+            zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zout, &buf).unwrap();
+        }
+        zout.finish().unwrap();
+        docx::read(out.to_str().unwrap()).expect("read").table_indent.values().copied().collect()
+    };
+    assert_eq!(with_mode("15"), [20.0 + 5.4], "the edge 20pt in, the text its padding further");
+    assert_eq!(with_mode("14"), [20.0], "the text 20pt in");
+}
+
 /// A blank paragraph is a line of its mark's font (`w:pPr/w:rPr`), as Word
 /// and Writer size it: the screening checklist opens with two blank 22pt
 /// lines above its title, which drawn at the body size stood it 32px

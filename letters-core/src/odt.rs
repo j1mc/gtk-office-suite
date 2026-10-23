@@ -703,11 +703,16 @@ fn content_xml(doc: &Document) -> String {
                     let mut table_style = String::new();
                     // A table starting a section names its master page.
                     let master = section_start.get(&pi).map(|k| master_attr(*k)).unwrap_or_default();
+                    // Its edge sits its padding left of its text (the
+                    // padding written below, Writer's none without it).
+                    let indent = doc.table_indent.get(&c.table).copied().unwrap_or(0.0);
+                    let margin = Some(indent - doc.table_padding.get(&c.table).map_or(0.0, |p| p.left_pt)).filter(|m| m.abs() > 0.005);
+                    let margin_attr = margin.map(|m| format!(" fo:margin-left=\"{m:.2}pt\"")).unwrap_or_default();
                     let columns = match doc.table_columns.get(&c.table).filter(|w| w.len() == cols as usize) {
                         Some(widths) => {
                             let total: f64 = widths.iter().sum();
                             auto.push_str(&format!(
-                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties style:width=\"{total:.2}pt\" table:align=\"{}\"/></style:style>",
+                                "<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties style:width=\"{total:.2}pt\"{margin_attr} table:align=\"{}\"/></style:style>",
                                 // A share of the text's width fills it.
                                 if doc.table_relative.contains(&c.table) { "margins" } else { "left" }
                             ));
@@ -725,7 +730,10 @@ fn content_xml(doc: &Document) -> String {
                             .collect::<String>()
                         }
                         None => {
-                            if !master.is_empty() {
+                            if margin.is_some() {
+                                auto.push_str(&format!("<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}><style:table-properties{margin_attr} table:align=\"margins\"/></style:style>"));
+                                table_style = format!(" table:style-name=\"Table{tables_written}\"");
+                            } else if !master.is_empty() {
                                 auto.push_str(&format!("<style:style style:name=\"Table{tables_written}\" style:family=\"table\"{master}/>"));
                                 table_style = format!(" table:style-name=\"Table{tables_written}\"");
                             }
@@ -1557,6 +1565,9 @@ struct AutoStyles {
     /// Table styles that size the table as a share of the text's width
     /// (`style:rel-width`, or `table:align="margins"`).
     table_relative: std::collections::HashSet<String>,
+    /// Table styles' `fo:margin-left`, in points: how far right of the
+    /// text's edge the table's edge sits.
+    table_margin: std::collections::HashMap<String, f64>,
     /// A graphic style's padding above and below its text, in points: a
     /// text box's inset.
     graphic_padding: std::collections::HashMap<String, (f64, f64)>,
@@ -1732,7 +1743,7 @@ fn list_style_indents(xml: &str) -> std::collections::HashMap<String, Vec<Option
 const DEFAULT_PARA: &str = "\u{0}default-paragraph";
 
 fn parse_auto_styles(xml: &str) -> AutoStyles {
-    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), contextual: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), graphic_sides: Default::default(), table_relative: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
+    let mut out = AutoStyles { text: Default::default(), para: Default::default(), para_parent: Default::default(), text_parent: Default::default(), contextual: Default::default(), text_font_name: Default::default(), graphic_padding: Default::default(), graphic_sides: Default::default(), table_relative: Default::default(), table_margin: Default::default(), para_text: Default::default(), column: Default::default(), row: Default::default(), cell_fill: Default::default(), cell_ruled: Default::default(), cell_open: Default::default(), cell_valign: Default::default(), graphic: Default::default(), master: Default::default(), cell_padding: Default::default(), row_whole: Default::default() };
     let mut reader = Reader::from_str(xml);
     let mut cur_name: Option<String> = None;
     let mut cur_family = String::new();
@@ -1774,6 +1785,9 @@ fn parse_auto_styles(xml: &str) -> AutoStyles {
                     }
                     "style:table-properties" if cur_family == "table" => {
                         if let Some(name) = cur_name.clone() {
+                            if let Some(m) = attr_val(&e, "fo:margin-left").and_then(|v| parse_length_pt(&v)).filter(|m| m.is_finite()) {
+                                out.table_margin.insert(name.clone(), m);
+                            }
                             if attr_val(&e, "style:rel-width").is_some() || attr_val(&e, "table:align").as_deref() == Some("margins") {
                                 out.table_relative.insert(name);
                             }
@@ -2897,7 +2911,7 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
 
     // styles.xml's named styles, the parents of content.xml's automatic ones.
     let named = parse_auto_styles(&styles);
-    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default(), first_header: None, first_footer: None, space_adds: true };
+    let mut doc = Document { paragraphs: Vec::new(), footnotes: Vec::new(), header: None, footer: None, header_pictures: Vec::new(), footer_pictures: Vec::new(), header_alignment: Default::default(), footer_alignment: Default::default(), header_lines: Vec::new(), footer_lines: Vec::new(), page: None, base_font: read_base_font(&styles), heading_styles: read_heading_styles(&styles), comments: Vec::new(), table_columns: Default::default(), table_rows: Default::default(), table_spans: Default::default(), table_fills: Default::default(), sections: Vec::new(), next_section_id: 0, table_padding: Default::default(), table_unruled: Default::default(), table_relative: Default::default(), table_open_edges: Default::default(), table_valign: Default::default(), table_whole_rows: Default::default(), table_indent: Default::default(), first_header: None, first_footer: None, space_adds: true };
     let mut reader = Reader::from_str(&content);
     let mut in_body = false;
     let mut para: Option<Paragraph> = None;
@@ -3003,6 +3017,8 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     // A shaded cell's fill, at the cell just counted.
     // Each table's cell padding: its first cell's.
     let mut cell_padding: std::collections::BTreeMap<u32, crate::model::CellPadding> = Default::default();
+    // Each table's style's `fo:margin-left`, by table id.
+    let mut table_margins: std::collections::BTreeMap<u32, f64> = Default::default();
     // The tables with a ruled cell: Writer rules a cell only by its style.
     let mut ruled_tables: std::collections::HashSet<u32> = Default::default();
     let note_rule = |ruled: &mut std::collections::HashSet<u32>, t: &(u32, i64, i64, usize, bool), e: &quick_xml::events::BytesStart| {
@@ -3237,6 +3253,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                     if table.is_none() {
                         if attr_val(&e, "table:style-name").is_some_and(|n| auto.table_relative.contains(&n) || named.table_relative.contains(&n)) {
                             doc.table_relative.insert(tables_read);
+                        }
+                        if let Some(m) = attr_val(&e, "table:style-name").and_then(|n| auto.table_margin.get(&n).or(named.table_margin.get(&n)).copied()) {
+                            table_margins.insert(tables_read, m);
                         }
                         table = Some((tables_read, -1, -1, table_depth, false));
                         tables_read += 1;
@@ -4350,6 +4369,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     doc.table_rows = row_heights;
     doc.table_spans = cell_spans;
     doc.table_fills = cell_fills;
+    // Writer's table edge sits at its margin, its first cell's text that
+    // cell's padding (none unless named) further right.
+    let tables: std::collections::BTreeSet<u32> = table_margins.keys().chain(cell_padding.keys()).copied().collect();
+    doc.table_indent = tables
+        .into_iter()
+        .map(|t| (t, table_margins.get(&t).copied().unwrap_or(0.0) + cell_padding.get(&t).map_or(0.0, |p| p.left_pt)))
+        .filter(|(_, indent)| indent.abs() > 0.005)
+        .collect();
     doc.table_padding = cell_padding;
     doc.table_unruled = doc.paragraphs.iter().filter_map(|p| p.style.table_cell.map(|c| c.table)).filter(|t| !ruled_tables.contains(t)).collect();
     doc.table_open_edges = open_edges;
@@ -4890,6 +4917,9 @@ mod tests {
         let rt = round_trip(&d);
         assert_eq!(rt.table_padding.values().copied().collect::<Vec<_>>(), [want]);
         assert_eq!(rt.table_fills.values().flatten().count(), 1);
+        assert!(rt.table_indent.is_empty(), "its text still at the margin: {:?}", rt.table_indent);
+        d.table_indent.insert(table, 30.0);
+        assert_eq!(round_trip(&d).table_indent.values().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>(), [30.0], "and an indent survives");
         let mut d = Document::from_plain_text("after");
         d.insert_table_at(0, 1, 1);
         assert!(round_trip(&d).table_padding.is_empty());

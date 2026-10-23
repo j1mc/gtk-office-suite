@@ -736,6 +736,13 @@ pub struct Document {
     /// `fo:padding`). A table not listed has Word's default.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub table_padding: std::collections::BTreeMap<u32, CellPadding>,
+    /// How far right of the text's left edge each table's first column
+    /// starts its text, by table id; its left padding sits further left.
+    /// Word's `w:tblInd` (plus the left padding under Word 2013's rules),
+    /// ODF's table `fo:margin-left` plus the left padding. A table not
+    /// listed lines its text up with the paragraphs around it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub table_indent: std::collections::BTreeMap<u32, f64>,
     /// Tables drawn without rules, by table id: a file's table that
     /// declares no visible border (Word's "Normal Table", a form's grey
     /// answer box). A table not listed (any made here) is ruled.
@@ -981,6 +988,7 @@ impl Document {
             table_spans: Default::default(),
             table_fills: Default::default(),
             table_padding: Default::default(),
+            table_indent: Default::default(),
             table_unruled: Default::default(),
             table_whole_rows: Default::default(),
             table_relative: Default::default(),
@@ -1259,6 +1267,7 @@ impl Document {
         self.table_spans.remove(&table);
         self.table_fills.remove(&table);
         self.table_padding.remove(&table);
+        self.table_indent.remove(&table);
         self.table_unruled.remove(&table);
         self.table_whole_rows.remove(&table);
         self.table_relative.remove(&table);
