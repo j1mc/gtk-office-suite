@@ -160,6 +160,16 @@ impl PangoShaper {
                     let label = self.label(&(n + 1).to_string(), &base, run_size * super::NOTE_REF_SCALE);
                     let (_, logical) = label.extents();
                     pango::Rectangle::new(0, 0, logical.width(), 0)
+                } else if run.style.image_anchor.is_some() {
+                    // A floating picture or text box takes no room in its
+                    // line, but holds the line open as an empty one is: a
+                    // paragraph holding only one is a line tall in Writer
+                    // and Word, not none (the opt-out form's answer boxes
+                    // each sit in a paragraph of their own).
+                    let run_size = run.style.font_size_hp.map_or(size, |hp| f64::from(hp) / 2.0);
+                    let label = self.label(" ", &base, run_size);
+                    let (_, logical) = label.extents();
+                    pango::Rectangle::new(0, -label.baseline(), 0, logical.height())
                 } else {
                     let (w, h) = if run.style.image.is_some() { super::inline_size_pt(run, req.width_pt) } else { (0.0, 0.0) };
                     pango::Rectangle::new(0, -to_units(h), to_units(w), to_units(h))
@@ -1471,6 +1481,26 @@ mod tests {
         // Ink inside the first line's box, none above the top margin.
         assert!(dark(72, 72, 160, 86), "no text drawn in the first line box");
         assert!(!dark(0, 0, w as usize, 70), "ink above the top margin");
+    }
+
+    /// A paragraph holding only a floating picture or text box is as tall
+    /// as an empty one, as in Writer and Word: it used to be half a point
+    /// tall, which drew the opt-out form's labels up against the answer
+    /// boxes their paragraphs float.
+    #[test]
+    fn a_paragraph_holding_only_a_floating_object_is_a_line_tall() {
+        use crate::model::{ImageAnchor, Run, RunStyle, TextBox};
+        let heights = |runs: Vec<Run>| {
+            let mut d = doc(3, "x");
+            d.paragraphs[1].runs = runs;
+            let t = Typeset::new(d, LayoutOptions::default());
+            t.tree().pages[0].lines().map(|l| match l { Item::Line { height_pt, .. } => *height_pt, _ => 0.0 }).collect::<Vec<f64>>()
+        };
+        let empty = heights(vec![Run::plain("")]);
+        let boxed = Run { text: String::new(), style: RunStyle { text_box: Some(Box::new(TextBox { extent_emu: (914_400, 914_400), ..Default::default() })), image_anchor: Some(ImageAnchor::default()), ..Default::default() } };
+        let picture = Run { text: String::new(), style: RunStyle { image: Some("/nonexistent.png".into()), image_extent_emu: Some((914_400, 914_400)), image_anchor: Some(ImageAnchor::default()), ..Default::default() } };
+        assert_eq!(heights(vec![boxed]), empty, "a text box's paragraph");
+        assert_eq!(heights(vec![picture]), empty, "a floating picture's");
     }
 
     /// A text box is drawn as Writer draws one: its fill, its rule and its
