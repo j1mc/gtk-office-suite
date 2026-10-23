@@ -3335,6 +3335,23 @@ fn map_paragraph(doc: &rdocx::Document, p: &rdocx::ParagraphRef<'_>, table_style
             },
         });
     }
+    // A blank paragraph is a line of its mark's font (`w:pPr/w:rPr`, else
+    // its style's), as Word and Writer size it: the screening checklist
+    // opens with two blank 22pt Title lines above its title, which drawn
+    // at the body size stood it 32px high.
+    if runs.is_empty() && heading.is_none() {
+        let mark = p.mark();
+        let styled = doc.resolve_run_properties(p.style_id(), None);
+        let size_hp = mark
+            .size()
+            .map(|pt| (pt * 2.0).round() as u16)
+            .or_else(|| styled.sz.map(|s| s.0.min(u32::from(u16::MAX)) as u16))
+            .filter(|hp| Some(*hp) != base.size_hp);
+        let family = mark.font_name().map(str::to_string).or_else(|| style_family(p.style_id())).filter(|f| Some(f) != base.family.as_ref());
+        if size_hp.is_some() || family.is_some() {
+            runs.push(Run { text: String::new(), style: RunStyle { font_size_hp: size_hp, font_family: family, ..Default::default() } });
+        }
+    }
     let mut para = Paragraph {
         style: ParaStyle {
             heading, alignment, list, code_block, block_quote,
@@ -3700,8 +3717,16 @@ fn style_id_to_heading(id: &str) -> Option<u8> {
 }
 
 fn normalize(p: &mut Paragraph) {
+    // A blank paragraph keeps the empty run that sizes its line.
+    let blank = match p.runs.as_slice() {
+        [r] if r.text.is_empty() && (r.style.font_size_hp.is_some() || r.style.font_family.is_some()) => Some(r.clone()),
+        _ => None,
+    };
     p.runs
         .retain(|r| !r.text.is_empty() || r.style.image.is_some() || r.style.footnote.is_some());
+    if p.runs.is_empty() {
+        p.runs.extend(blank);
+    }
     crate::model::merge_adjacent_runs(&mut p.runs, |a, b| {
         a.style.footnote.is_none() && b.style.footnote.is_none() && a.style == b.style
     });
