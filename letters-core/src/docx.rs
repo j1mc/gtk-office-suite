@@ -1353,6 +1353,19 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
     // A table sized as a share of the text's width (`w:tblW w:type="pct"`).
     let table_relative = tables.iter().enumerate().filter(|(_, t)| matches!(t.width_mode(), Some(rdocx::TableWidth::Percentage(_)))).map(|(ti, _)| ti as u32).collect();
     let table_open_edges = tables.iter().enumerate().filter(|(ti, _)| !table_unruled.contains(&(*ti as u32))).filter_map(|(ti, t)| Some((ti as u32, cell_open_edges(t)?))).collect();
+    // Where a table's text starts: Word 2013's rules (compatibility mode
+    // 15) put its edge at `w:tblInd`, its text its left padding further
+    // right; older ones its text at `w:tblInd`, its padding hanging left.
+    let modern = doc.compatibility_settings().iter().any(|s| s.name == "compatibilityMode" && s.value.trim().parse::<u32>().is_ok_and(|m| m >= 15));
+    let table_indent = tables
+        .iter()
+        .enumerate()
+        .filter_map(|(ti, t)| {
+            let edge = t.indent().map(|l| l.to_pt()).filter(|v| v.is_finite()).unwrap_or(0.0);
+            let indent = edge + if modern { cell_padding(t).unwrap_or_default().left_pt } else { 0.0 };
+            (indent.abs() > 0.005).then_some((ti as u32, indent))
+        })
+        .collect();
 
     let mut read = Document {
         paragraphs,
@@ -1372,6 +1385,7 @@ fn read_opened(path: &str, doc: rdocx::Document) -> Result<Document, String> {
         table_spans,
         table_fills,
         table_padding,
+        table_indent,
         table_unruled,
         table_whole_rows,
         table_relative,
@@ -1982,6 +1996,10 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             if let Some(pad) = doc.table_padding.get(&tc0.table) {
                 tbl.set_cell_margins(rdocx::Length::pt(pad.top_pt), rdocx::Length::pt(pad.right_pt), rdocx::Length::pt(pad.bottom_pt), rdocx::Length::pt(pad.left_pt));
             }
+            // The file says Word 2013's rules, under which `w:tblInd` is the
+            // table's edge: its left padding left of its text.
+            let pad_left = doc.table_padding.get(&tc0.table).copied().unwrap_or_default().left_pt;
+            tbl.set_indent(rdocx::Length::pt(doc.table_indent.get(&tc0.table).copied().unwrap_or(0.0) - pad_left));
             // A table is written with the rules it is drawn with: a 0.5pt
             // grid (rdocx writes none, and Word and Writer drew a Letters
             // table bare), or none for one the file drew without.
