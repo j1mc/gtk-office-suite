@@ -7,3 +7,11 @@ exclude = ["tools/crdt-spike"]
 
 [workspace.dependencies]
 gettext-rs = { version = "0.8", features = ["gettext-system"] }
+
+# ironcalc_base is the one crate whose release build differed between two
+# clean builds (#1671): the code was byte-identical, but the names ThinLTO
+# gives the locals it promotes between its codegen units (`.llvm.<hash>`)
+# took a different hash, so the symbol table and build-id did not match.
+# As one codegen unit it has no locals to promote.
+[profile.release.package.ironcalc_base]
+codegen-units = 1
