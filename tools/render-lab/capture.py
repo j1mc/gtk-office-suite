@@ -186,6 +186,34 @@ def locate(template_path, screen_path, size=None, hint=None):
     return best[1], best[0]
 
 
+# GTK 4.14's icon theme cache can hand a lookup an icon that a loader
+# thread is finalizing (#1648): a CSS change at startup re-looks icons up
+# while the first wave of icon loads is still finishing. GLib logs this
+# critical and the app dies before its first frame. It is a race in GTK,
+# not in what the app draws, and it hits a random fixture now and then.
+GTK_ICON_RACE = "object_ref: assertion '!object_already_finalized' failed"
+
+
+def retry_gtk_icon_race(run, log_path):
+    """`run()`, a capture or export returning its page count, run once more
+    if it produced nothing and its log shows GTK's icon cache race. The
+    first log is kept as <log>.race. Any other failure, or this one twice,
+    still counts."""
+    n = run()
+    if n:
+        return n
+    try:
+        with open(log_path, errors="replace") as f:
+            raced = GTK_ICON_RACE in f.read()
+    except OSError:
+        return n
+    if not raced:
+        return n
+    os.replace(log_path, log_path + ".race")
+    print(f"render-lab: {log_path}: GTK icon cache race (#1648); running it again", file=sys.stderr)
+    return run()
+
+
 def start(argv, env, log):
     return subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -388,9 +416,9 @@ def main():
         os.makedirs(dest, exist_ok=True)
         res = []
         if "A" in tiers:
-            res.append(f"A={tier_a(fx['app'], doc, dest, env)}")
+            res.append(f"A={retry_gtk_icon_race(lambda: tier_a(fx['app'], doc, dest, env), os.path.join(dest, 'A.log'))}")
         if "B" in tiers:
-            res.append(f"B={tier_b(fx['app'], doc, dest, env, browser)}")
+            res.append(f"B={retry_gtk_icon_race(lambda: tier_b(fx['app'], doc, dest, env, browser), os.path.join(dest, 'B.log'))}")
         print(f"cap {fx['app']}/{fx['feature']}: {' '.join(res)} page(s)")
 
     if browser:

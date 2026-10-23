@@ -106,7 +106,7 @@ def main():
         dest = os.path.join(args.out, fx["app"], fx["feature"])
         os.makedirs(dest, exist_ok=True)
         try:
-            n = export_one(fx["app"], os.path.join(args.fixtures, fx["file"]), dest, env)
+            n = capture.retry_gtk_icon_race(lambda: export_one(fx["app"], os.path.join(args.fixtures, fx["file"]), dest, env), os.path.join(dest, "export.log"))
             if n:
                 print(f"export {key}: {n} page(s)")
             else:
