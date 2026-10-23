@@ -2698,7 +2698,16 @@ fn box_look(e: &quick_xml::events::BytesStart) -> BoxLook {
         .iter()
         .find_map(|a| attr_val(e, a).as_deref().and_then(parse_para_border))
         .filter(|b| b.style != BorderStyle::None && b.width_pt > 0.0)
-        .map(|b| crate::model::BoxRule { width_emu: (b.width_pt * 12700.0).round() as u32, color: b.color });
+        .map(|b| crate::model::BoxRule { width_emu: (b.width_pt * 12700.0).round() as u32, color: b.color })
+        // A drawing shape's outline (`draw:stroke`), as Writer writes a
+        // Word text box's: 0.75pt black unless it says.
+        .or_else(|| {
+            attr_val(e, "draw:stroke").filter(|s| s != "none")?;
+            Some(crate::model::BoxRule {
+                width_emu: attr_val(e, "svg:stroke-width").and_then(|v| parse_length_pt(&v)).filter(|w| w.is_finite() && *w > 0.0).map_or(9525, |w| (w * 12700.0).round() as u32),
+                color: attr_val(e, "svg:stroke-color").map(|c| c.trim_start_matches('#').to_uppercase()).filter(|c| c.len() == 6 && c.bytes().all(|b| b.is_ascii_hexdigit())).unwrap_or_else(|| "000000".into()),
+            })
+        });
     let fill = (attr_val(e, "draw:fill").as_deref() == Some("solid"))
         .then(|| attr_val(e, "draw:fill-color"))
         .flatten()
@@ -3114,6 +3123,11 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
     // paragraphs have been read.
     let mut in_text_box = false;
     let mut box_paragraphs = 0usize;
+    // The text box being read is a drawing shape (`draw:custom-shape` or
+    // `draw:rect`, Writer's form of a Word text box) and not a frame, and
+    // whether its geometry is a rectangle.
+    let mut shape_box = false;
+    let mut shape_rect = false;
     // The outermost table being read (#1296): its id, the current row and
     // column (-1 before the first), its element depth, and whether the
     // current cell has had a paragraph. A table nested in a cell belongs
@@ -3195,7 +3209,12 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
             if let Some(text) = f.text_box.as_mut() {
                 match &event {
                     Ok(Event::End(e)) if e.name().as_ref() == "draw:text-box" => in_text_box = false,
+                    // The shape's own end closes its box, and is read below.
+                    Ok(Event::End(e)) if shape_box && matches!(e.name().as_ref(), "draw:custom-shape" | "draw:rect") => in_text_box = false,
                     _ if !in_text_box => {}
+                    Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "draw:enhanced-geometry" => {
+                        shape_rect = attr_val(e, "draw:type").is_some_and(|t| matches!(t.as_str(), "rect" | "ooxml-rect" | "rectangle"));
+                    }
                     Ok(Event::Start(e)) if matches!(e.name().as_ref(), "text:p" | "text:h") => {
                         if box_paragraphs > 0 {
                             text.push('\n');
@@ -3440,8 +3459,9 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         }
                     }
                 }
-                "draw:frame" => {
+                "draw:frame" | "draw:custom-shape" | "draw:rect" => {
                     frame_depth += 1;
+                    let shape = e.name().as_ref() != "draw:frame";
                     if frame.is_none() && para.is_some() && note.is_none() {
                         let size = |a: &str| attr_val(&e, a).as_deref().and_then(length_emu);
                         let floating = attr_val(&e, "text:anchor-type").is_some_and(|t| matches!(t.as_str(), "paragraph" | "char" | "page"));
@@ -3466,9 +3486,15 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                             alt: String::new(),
                             in_alt: false,
                             depth: frame_depth,
-                            text_box: None,
+                            // A shape's paragraphs are its text, as a
+                            // frame's text box's are.
+                            text_box: shape.then(String::new),
                             look: attr_val(&e, "draw:style-name").and_then(|n| auto.graphic_box.get(&n).cloned()).unwrap_or_default(),
                         });
+                        if shape {
+                            (in_text_box, shape_box, box_paragraphs) = (true, true, 0);
+                            shape_rect = e.name().as_ref() == "draw:rect";
+                        }
                     }
                 }
                 "svg:title" | "svg:desc" => {
@@ -3850,11 +3876,14 @@ fn read_parts(path: &str) -> Result<(Document, Vec<String>), String> {
                         f.in_alt = false;
                     }
                 }
-                "draw:frame" => {
+                "draw:frame" | "draw:custom-shape" | "draw:rect" => {
                     if frame.as_ref().is_some_and(|f| f.depth == frame_depth && f.text_box.is_some()) {
                         let f = frame.take().expect("the frame just checked");
+                        // A shape that is neither a rectangle nor holds text
+                        // (a line, an arrow) is not a box.
+                        let kept = !std::mem::take(&mut shape_box) || shape_rect || f.text_box.as_deref().is_some_and(|t| !t.trim().is_empty());
                         let (border, fill, padding_emu) = f.look;
-                        if let Some(p) = para.as_mut() {
+                        if let Some(p) = para.as_mut().filter(|_| kept) {
                             p.runs.push(Run {
                                 text: String::new(),
                                 style: RunStyle {
@@ -6368,6 +6397,32 @@ mod tests {
         let d = read_package(content, "<office:document-styles/>");
         let tb = d.paragraphs[0].runs.iter().find_map(|r| r.style.text_box.as_deref()).expect("the empty box");
         assert_eq!((tb.border.as_ref(), tb.fill.as_ref(), tb.text.as_str()), (None, None, ""));
+    }
+
+    /// Writer's form of a Word text box, a rectangle drawing shape with its
+    /// paragraphs inside and a stroke for its rule, is read as a text box; a
+    /// line shape with no text is not one.
+    #[test]
+    fn a_shape_holding_text_is_read_as_a_text_box() {
+        use crate::model::BoxRule;
+        let content = "<office:document-content><office:automatic-styles>\
+            <style:style style:name=\"gr1\" style:family=\"graphic\"><style:graphic-properties draw:stroke=\"solid\" svg:stroke-width=\"0.0138in\" \
+              svg:stroke-color=\"#1f3864\" draw:fill=\"solid\" draw:fill-color=\"#deeaf6\" fo:padding-top=\"0.05in\" fo:padding-bottom=\"0.05in\" \
+              fo:padding-left=\"0.1in\" fo:padding-right=\"0.1in\" style:horizontal-pos=\"right\" style:horizontal-rel=\"page-content\"/></style:style>\
+            </office:automatic-styles><office:body><office:text>\
+            <text:p>Sign here<draw:custom-shape text:anchor-type=\"char\" draw:style-name=\"gr1\" svg:width=\"2in\" svg:height=\"0.5in\" svg:y=\"0.1in\">\
+              <text:p>Name</text:p><text:p>signed</text:p><draw:enhanced-geometry draw:type=\"ooxml-rect\"><draw:equation draw:name=\"f0\" draw:formula=\"logwidth/2\"/></draw:enhanced-geometry></draw:custom-shape>\
+              <draw:custom-shape text:anchor-type=\"char\" svg:width=\"2in\" svg:height=\"0in\"><draw:enhanced-geometry draw:type=\"line\"/></draw:custom-shape></text:p>\
+            <text:p>after</text:p>\
+            </office:text></office:body></office:document-content>";
+        let d = read_package(content, "<office:document-styles/>");
+        let texts: Vec<String> = d.paragraphs.iter().map(|p| p.text()).collect();
+        assert_eq!(texts, ["Sign here", "after"]);
+        let boxes: Vec<&crate::model::TextBox> = d.paragraphs[0].runs.iter().filter_map(|r| r.style.text_box.as_deref()).collect();
+        assert_eq!(boxes.len(), 1, "the line is not a box");
+        assert_eq!((boxes[0].extent_emu, boxes[0].text.as_str()), ((1_828_800, 457_200), "Name\nsigned"));
+        assert_eq!(boxes[0].border, Some(BoxRule { width_emu: 12_619, color: "1F3864".into() }));
+        assert_eq!((boxes[0].fill.as_deref(), boxes[0].padding_emu), (Some("DEEAF6"), [45_720, 91_440, 45_720, 91_440]));
     }
 
     /// A text box keeps its place, size, look and text through a save.

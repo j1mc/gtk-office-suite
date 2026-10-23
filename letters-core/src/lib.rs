@@ -12,6 +12,7 @@ mod docx_comments;
 mod docx_toc;
 mod docx_revisions;
 mod docx_fields;
+mod docx_text_boxes;
 pub mod edit;
 pub mod fragment;
 pub mod layout;
