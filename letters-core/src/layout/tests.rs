@@ -536,6 +536,28 @@ fn a_header_picture_is_drawn_and_pushes_the_body_down() {
     assert_eq!(body_top, opts.header_distance_pt + 72.0 + LINE, "the body starts under the header, not at the 72pt margin");
 }
 
+/// A header of one empty paragraph is a line tall, as Word and Writer
+/// draw it: the business appointment rules' runs from 35.4pt down past
+/// their 45pt top margin, and the body starts under it. A document without
+/// a header, or whose header has no paragraph, keeps its margin.
+#[test]
+fn an_empty_header_paragraph_takes_a_lines_room() {
+    use crate::model::{HfLine, PageGeometry};
+    let body_top = |header: Option<&str>, lines: Vec<HfLine>| {
+        let mut d = doc_of(3, "x");
+        d.page = Some(PageGeometry { margin_top_pt: 45.0, ..PageGeometry::default() });
+        d.header = header.map(str::to_string);
+        d.header_lines = lines;
+        let t = lay(&d);
+        let top = t.pages[0].lines().find_map(|l| match l { Item::Line { source: Source::Paragraph(_), top_pt, .. } => Some(*top_pt), _ => None });
+        top.unwrap()
+    };
+    let opts = LayoutOptions::default();
+    assert_eq!(body_top(None, Vec::new()), 45.0, "no header");
+    assert_eq!(body_top(Some(""), Vec::new()), 45.0, "a header with no paragraph");
+    assert_eq!(body_top(Some(""), vec![HfLine::default()]), opts.header_distance_pt + LINE, "one empty paragraph");
+}
+
 /// Each line of a footer as its own: a page number at the right over a
 /// date at the left in a smaller face, each line as tall as its text, and
 /// drawn in its line's look.
