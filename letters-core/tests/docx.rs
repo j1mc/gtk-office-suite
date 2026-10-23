@@ -2355,3 +2355,22 @@ fn a_tables_indent_reads_by_the_files_word_rules() {
     assert_eq!(with_mode("15"), [20.0 + 5.4], "the edge 20pt in, the text its padding further");
     assert_eq!(with_mode("14"), [20.0], "the text 20pt in");
 }
+
+/// A blank paragraph is a line of its mark's font (`w:pPr/w:rPr`), as Word
+/// and Writer size it: the screening checklist opens with two blank 22pt
+/// lines above its title, which drawn at the body size stood it 32px
+/// high. A blank paragraph in the body font has nothing to keep.
+#[test]
+fn a_blank_paragraph_keeps_its_marks_size() {
+    let d = Document::from_plain_text("title\nbody");
+    let doctored = doctor_parts(&d, |parts| {
+        let body = parts.get_mut("word/document.xml").unwrap();
+        let at = body.find("<w:body>").expect("a body") + "<w:body>".len();
+        body.insert_str(at, "<w:p><w:pPr><w:rPr><w:sz w:val=\"44\"/></w:rPr></w:pPr></w:p><w:p/>");
+    });
+    let blank = &doctored.paragraphs[0];
+    assert_eq!(blank.text(), "");
+    assert_eq!(blank.runs.iter().map(|r| r.style.font_size_hp).collect::<Vec<_>>(), [Some(44)], "a 22pt blank line");
+    assert!(doctored.paragraphs[1].runs.is_empty(), "a blank line in the body font: {:?}", doctored.paragraphs[1].runs);
+    assert_eq!(doctored.paragraphs[2].text(), "title");
+}
