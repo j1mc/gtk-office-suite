@@ -703,11 +703,14 @@ fn docx_page_geometry_round_trips() {
         margin_right_pt: 45.0,
         columns: 1,
         column_gap_pt: 18.0,
+        header_pt: Some(18.0),
+        footer_pt: Some(27.5),
     });
     docx::write(&d, path.to_str().unwrap()).expect("write");
     let rt = docx::read(path.to_str().unwrap()).expect("read");
     let pg = rt.page.expect("page geometry lost");
     assert!(pg.approx_eq(&d.page.unwrap()), "geometry drifted: {pg:?}");
+    assert_eq!((pg.header_pt, pg.footer_pt), (Some(18.0), Some(27.5)), "the header and footer distances");
 }
 
 #[test]
@@ -2178,6 +2181,8 @@ fn multi_section_docx_round_trips_geometry_and_headers() {
         margin_right_pt: 36.0,
         columns: 2,
         column_gap_pt: 24.0,
+        header_pt: Some(20.0),
+        footer_pt: Some(22.0),
     };
     d.sections = vec![
         DocSection { id: 0, range: ParagraphRange::new(0, 1), geometry: portrait, header: None, footer: None },
@@ -2200,6 +2205,8 @@ fn multi_section_docx_round_trips_geometry_and_headers() {
     for (read, written) in rt.sections.iter().zip(&d.sections) {
         assert_eq!(read.range, written.range);
         assert!(read.geometry.approx_eq(&written.geometry), "{:?} vs {:?}", read.geometry, written.geometry);
+        let distances = |g: &PageGeometry| (g.header_pt.unwrap_or(36.0), g.footer_pt.unwrap_or(36.0));
+        assert_eq!(distances(&read.geometry), distances(&written.geometry));
         assert_eq!(read.header, written.header);
         assert_eq!(read.footer, written.footer);
     }

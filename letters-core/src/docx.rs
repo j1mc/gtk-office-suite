@@ -94,6 +94,8 @@ struct RawSection {
     size: [Option<f64>; 2],
     /// `w:pgMar` top, right, bottom, left.
     margins: [Option<f64>; 4],
+    /// `w:pgMar` `w:header` and `w:footer`.
+    header_footer: [Option<f64>; 2],
     /// `w:cols` `w:num` and `w:space`. (`w:type`, the break's kind, is not
     /// kept: every break here starts a new page, `loss` names the others.)
     columns: Option<u32>,
@@ -121,6 +123,8 @@ fn raw_section_child(sect: &mut RawSection, e: &quick_xml::events::BytesStart<'_
             ("w:pgMar", "w:right") => sect.margins[1] = number(value),
             ("w:pgMar", "w:bottom") => sect.margins[2] = number(value),
             ("w:pgMar", "w:left") => sect.margins[3] = number(value),
+            ("w:pgMar", "w:header") => sect.header_footer[0] = number(value),
+            ("w:pgMar", "w:footer") => sect.header_footer[1] = number(value),
             ("w:cols", "w:num") => sect.columns = value.trim().parse::<u32>().ok(),
             ("w:cols", "w:space") => sect.column_gap = number(value),
             ("w:headerReference" | "w:footerReference", "w:type") => reference_default = value.trim() == "default",
@@ -1485,6 +1489,8 @@ fn read_sections(
             margin_left_pt: twips(s.margins[3], previous.margin_left_pt),
             columns: s.columns.and_then(|c| u8::try_from(c).ok()).filter(|c| *c > 0).unwrap_or(1),
             column_gap_pt: twips(s.column_gap, 18.0),
+            header_pt: s.header_footer[0].map(|t| t / 20.0).or(previous.header_pt),
+            footer_pt: s.header_footer[1].map(|t| t / 20.0).or(previous.footer_pt),
         };
         previous = geometry;
         let (carried_header, carried_footer) = std::mem::take(&mut carried);
@@ -1689,7 +1695,7 @@ fn section_properties_xml(refs: &str, page: &PageGeometry) -> String {
     let num = if page.columns > 1 { format!(" w:num=\"{}\"", page.columns) } else { String::new() };
     format!(
         "<w:sectPr>{refs}<w:type w:val=\"nextPage\"/><w:pgSz w:w=\"{}\" w:h=\"{}\"{orient}/>\
-         <w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>\
+         <w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"{}\" w:footer=\"{}\" w:gutter=\"0\"/>\
          <w:cols{num} w:space=\"{}\"/></w:sectPr>",
         twips(page.width_pt),
         twips(page.height_pt),
@@ -1697,6 +1703,8 @@ fn section_properties_xml(refs: &str, page: &PageGeometry) -> String {
         twips(page.margin_right_pt),
         twips(page.margin_bottom_pt),
         twips(page.margin_left_pt),
+        twips(page.header_pt.unwrap_or(36.0)),
+        twips(page.footer_pt.unwrap_or(36.0)),
         twips(page.column_gap_pt),
     )
 }
@@ -1876,6 +1884,8 @@ fn read_page_geometry(doc: &rdocx::Document) -> Option<PageGeometry> {
             .and_then(|c| c.space)
             .map(|v| v.0 as f64 / 20.0)
             .unwrap_or(default.column_gap_pt),
+        header_pt: sect.header_distance.map(|v| v.0 as f64 / 20.0),
+        footer_pt: sect.footer_distance.map(|v| v.0 as f64 / 20.0),
     })
 }
 
@@ -2502,6 +2512,9 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             rdocx::Length::pt(pg.margin_bottom_pt),
             rdocx::Length::pt(pg.margin_left_pt),
         );
+        if pg.header_pt.is_some() || pg.footer_pt.is_some() {
+            out.set_header_footer_distance(rdocx::Length::pt(pg.header_pt.unwrap_or(36.0)), rdocx::Length::pt(pg.footer_pt.unwrap_or(36.0)));
+        }
         // A single column is the default section layout, and `w:cols`
         // with `w:num="1"` is noise; more than one has to be written or a
         // two-column document saves as one.

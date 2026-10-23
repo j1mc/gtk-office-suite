@@ -180,7 +180,8 @@ pub(crate) fn show_page_setup(parent: &impl IsA<gtk::Widget>, pc: &PageContainer
 /// Set the page size, margins and orientation of the section the caret
 /// is in from Page Setup (`sections::set_page_at`): one model edit, which
 /// Undo takes back. For a document of one section that is the document's
-/// page. The section's columns and column gap are its own and are kept.
+/// page. The section's columns, column gap and header and footer
+/// distances are its own and are kept.
 ///
 /// Page Setup used to write only the application's settings, which the
 /// page view uses for a document with no page of its own. On a document
@@ -191,7 +192,13 @@ pub(crate) fn apply_page_geometry(buf: &gtk::TextBuffer, page: letters_core::mod
     let para = caret_paragraph(&mut live.borrow_mut(), buf);
     let applied = live.borrow_mut().edit_with(buf, |doc| {
         let base = letters_core::sections::page_at(doc, para).unwrap_or_default();
-        let page = letters_core::model::PageGeometry { columns: base.columns, column_gap_pt: base.column_gap_pt, ..page };
+        let page = letters_core::model::PageGeometry {
+            columns: base.columns,
+            column_gap_pt: base.column_gap_pt,
+            header_pt: base.header_pt,
+            footer_pt: base.footer_pt,
+            ..page
+        };
         letters_core::sections::set_page_at(doc, para, page)
     });
     crate::live::sync_actions(buf);

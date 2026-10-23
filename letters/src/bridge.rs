@@ -2174,6 +2174,7 @@ single");
             margin_right_pt: 54.0,
             columns: 2,
             column_gap_pt: 18.0,
+            ..Default::default()
         }
     }
 
