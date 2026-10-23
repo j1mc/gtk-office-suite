@@ -609,6 +609,24 @@ fn a_floating_line_sits_against_the_page_and_takes_no_room() {
     assert_eq!(footer[1].2, page.height_pt - opts().footer_distance_pt - LINE, "the footer is its number alone");
 }
 
+/// A page's own header and footer distances (Word's `w:pgMar w:header`,
+/// `w:footer`) place its header and footer, and push the body by them,
+/// rather than the layout's default.
+#[test]
+fn a_pages_own_header_distance_places_its_header() {
+    use crate::model::PageGeometry;
+    let mut d = doc_of(1, "x");
+    d.header = Some("Head".into());
+    d.footer = Some("Foot".into());
+    d.page = Some(PageGeometry { margin_top_pt: 40.0, header_pt: Some(20.0), footer_pt: Some(25.0), ..PageGeometry::default() });
+    let t = lay(&d);
+    let page = &t.pages[0];
+    let top = |src: Source| page.items.iter().find_map(|i| match i { Item::Line { source, top_pt, .. } if *source == src => Some(*top_pt), _ => None });
+    assert_eq!(top(Source::Header), Some(20.0));
+    assert_eq!(top(Source::Footer), Some(page.height_pt - 25.0 - LINE));
+    assert_eq!(top(Source::Paragraph(0)), Some(40.0), "the header's 20pt and a line fit above the 40pt margin");
+}
+
 /// A header at the right ends at the right margin, a footer centred sits
 /// mid-page.
 #[test]

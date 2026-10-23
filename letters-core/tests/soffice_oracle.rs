@@ -289,6 +289,7 @@ fn page_geometry_survives_lo_conversion() {
         margin_right_pt: 45.0,
         columns: 1,
         column_gap_pt: 18.0,
+        ..Default::default()
     };
     d.page = Some(want);
     letters_core::odt::write(&d, path.to_str().unwrap()).expect("write odt");
@@ -2393,6 +2394,7 @@ fn multi_section_geometry_survives_writer_both_ways() {
         margin_right_pt: 36.0,
         columns: 2,
         column_gap_pt: 24.0,
+        ..Default::default()
     };
     let mut d = Document::from_plain_text("Portrait part.\nLandscape part, first column.\nMore landscape text.");
     d.header = Some("Report".into());
@@ -2717,6 +2719,32 @@ fn a_runs_raised_or_lowered_position_survives_writer() {
     assert_eq!(of("lowered"), Some((Some(-2), None)));
     assert_eq!(of("raised"), Some((Some(6), None)));
     assert_eq!(of("level"), Some((None, None)));
+}
+
+/// A page's own header and footer distances (`w:pgMar w:header` and
+/// `w:footer`) cross Writer both ways: in odt they are the page margins
+/// the header and footer areas grow from.
+#[test]
+fn a_pages_header_and_footer_distances_survive_writer_both_ways() {
+    let Some(bin) = require_or_skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = Document::from_plain_text("body text");
+    d.header = Some("Head".into());
+    d.footer = Some("Foot".into());
+    d.page = Some(PageGeometry { margin_top_pt: 72.0, margin_bottom_pt: 72.0, header_pt: Some(20.0), footer_pt: Some(25.0), ..PageGeometry::default() });
+    let close = |got: &Document, how: &str| {
+        let page = got.page.unwrap_or_else(|| panic!("{how}: no page"));
+        let near = |v: Option<f64>, want: f64| v.is_some_and(|v| (v - want).abs() < 0.5);
+        assert!(near(page.header_pt, 20.0) && near(page.footer_pt, 25.0), "{how}: {page:?}");
+        assert!((page.margin_top_pt - 72.0).abs() < 0.5 && (page.margin_bottom_pt - 72.0).abs() < 0.5, "{how}: the body's margins {page:?}");
+    };
+    let docx_path = dir.path().join("distance.docx");
+    docx::write(&d, &docx_path).expect("write docx");
+    let _ = soffice_convert(bin, &docx_path, "odt").ok();
+    let odt_path = dir.path().join("distance.odt");
+    assert!(odt_path.exists(), "soffice did not convert docx to odt");
+    close(&letters_core::odt::read(odt_path.to_str().unwrap()).expect("read converted odt"), "docx → Writer → odt");
+    close(&writer_rewrites_docx(bin, &d, "distance"), "docx → Writer → docx");
 }
 
 /// A table's indent crosses Writer both ways: Word's `w:tblInd` under

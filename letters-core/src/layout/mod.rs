@@ -681,10 +681,10 @@ fn section_geometry(doc: &Document, k: usize, page: PageGeometry, first: bool, o
         header_footer_height(s.pictures, s.text, s.alignment, s.lines, width, opts, shaper)
     });
     if header_h > 0.0 {
-        geometry.margin_top_pt = geometry.margin_top_pt.max(opts.header_distance_pt + header_h);
+        geometry.margin_top_pt = geometry.margin_top_pt.max(page.header_pt.unwrap_or(opts.header_distance_pt) + header_h);
     }
     if footer_h > 0.0 {
-        geometry.margin_bottom_pt = geometry.margin_bottom_pt.max(opts.footer_distance_pt + footer_h);
+        geometry.margin_bottom_pt = geometry.margin_bottom_pt.max(page.footer_pt.unwrap_or(opts.footer_distance_pt) + footer_h);
     }
     geometry
 }
@@ -1950,8 +1950,8 @@ impl<'o> Flow<'o> {
                     flow_height(&text, &header_footer_lines(&text, alignment, story, pictures, width, opts, shaper), story)
                 });
                 let top = match source {
-                    Source::Header => opts.header_distance_pt,
-                    _ => height - opts.footer_distance_pt - row_h - text_h,
+                    Source::Header => g.header_pt.unwrap_or(opts.header_distance_pt),
+                    _ => height - g.footer_pt.unwrap_or(opts.footer_distance_pt) - row_h - text_h,
                 };
                 place_header_footer_pictures(page, pictures, left, width, top, height);
                 let Some(template) = template.filter(|t| !t.is_empty()) else { continue };
