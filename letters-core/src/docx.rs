@@ -664,12 +664,13 @@ pub fn read(path: &str) -> Result<Document, String> {
 fn read_on_this_thread(path: &str) -> Result<Document, String> {
     // Smart chips are content controls rdocx does not read runs from:
     // they become sentinel runs first (docx_chips).
-    let (doc, (chips, revisions)) = open_with_chips(path).map_err(|e| format!("Cannot open .docx {}: {}", path, e))?;
+    let (doc, (chips, revisions, text_boxes)) = open_with_chips(path).map_err(|e| format!("Cannot open .docx {}: {}", path, e))?;
     let comments = crate::docx_comments::bodies(&doc);
     let mut read = read_opened(path, doc)?;
     // Tracked changes first: a bracket may hold a chip's sentinel.
     crate::docx_revisions::restore(&mut read, &revisions);
     crate::docx_chips::restore(&mut read, &chips);
+    crate::docx_text_boxes::restore(&mut read, &text_boxes);
     // Comments last: their markers may sit in a tracked change.
     if !comments.is_empty() {
         crate::docx_comments::restore(&mut read, comments);
@@ -799,8 +800,8 @@ fn header_footer_templates(path: &str) -> (Option<String>, Option<String>) {
 
 /// The package at `path`, with its chip controls as sentinel runs.
 /// What `open_with_chips` took out of the markup for rdocx: the smart
-/// chips and the tracked changes, restored after reading.
-type Unwrapped = (Vec<(crate::chips::Chip, String)>, Vec<crate::model::Revision>);
+/// chips, the tracked changes and the text boxes, restored after reading.
+type Unwrapped = (Vec<(crate::chips::Chip, String)>, Vec<crate::model::Revision>, Vec<(crate::model::TextBox, crate::model::ImageAnchor)>);
 
 fn open_with_chips(path: &str) -> Result<(rdocx::Document, Unwrapped), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -809,8 +810,8 @@ fn open_with_chips(path: &str) -> Result<(rdocx::Document, Unwrapped), String> {
         .ok()
         .and_then(|mut z| std::io::Read::read_to_string(&mut z.by_name("word/document.xml").ok()?, &mut xml).ok())
         .is_some();
-    if !found || !(xml.contains("<w:sdt") || xml.contains("<w:ins ") || xml.contains("<w:del ") || xml.contains("<w:comment") || xml.contains("TOC \\")) {
-        return Ok((rdocx::Document::open(path).map_err(|e| e.to_string())?, (Vec::new(), Vec::new())));
+    if !found || !(xml.contains("<w:sdt") || xml.contains("<w:ins ") || xml.contains("<w:del ") || xml.contains("<w:comment") || xml.contains("TOC \\") || xml.contains("<w:txbxContent")) {
+        return Ok((rdocx::Document::open(path).map_err(|e| e.to_string())?, (Vec::new(), Vec::new(), Vec::new())));
     }
     // A table of contents first: it lifts the paragraphs out of their
     // content control before chips look at controls.
@@ -819,11 +820,13 @@ fn open_with_chips(path: &str) -> Result<(rdocx::Document, Unwrapped), String> {
     let (patched, revisions) = crate::docx_revisions::unwrap(&patched);
     let commented = crate::docx_comments::unwrap(&patched);
     let patched = commented.clone().unwrap_or(patched);
-    if chips.is_empty() && revisions.is_empty() && commented.is_none() && toc.is_none() {
-        return Ok((rdocx::Document::open(path).map_err(|e| e.to_string())?, (Vec::new(), Vec::new())));
+    // Text boxes rdocx does not read (docx_text_boxes).
+    let (patched, text_boxes) = crate::docx_text_boxes::unwrap(&patched);
+    if chips.is_empty() && revisions.is_empty() && commented.is_none() && toc.is_none() && text_boxes.is_empty() {
+        return Ok((rdocx::Document::open(path).map_err(|e| e.to_string())?, (Vec::new(), Vec::new(), Vec::new())));
     }
     let bytes = with_part(&bytes, "word/document.xml", |_| patched.clone())?;
-    Ok((rdocx::Document::from_bytes(&bytes).map_err(|e| e.to_string())?, (chips, revisions)))
+    Ok((rdocx::Document::from_bytes(&bytes).map_err(|e| e.to_string())?, (chips, revisions, text_boxes)))
 }
 
 /// Tabs in run text as Word's `w:tab` elements. rdocx writes a tab as a
@@ -1973,6 +1976,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
     let mut out = rdocx::Document::new();
     // Smart chips, written as sentinels and made content controls below.
     let mut chips: Vec<(crate::chips::Chip, String)> = Vec::new();
+    let mut text_boxes: Vec<(crate::model::TextBox, crate::model::ImageAnchor)> = Vec::new();
     // Floating pictures, written inline and anchored afterwards: their
     // image relationship, alt text and placement.
     let mut floating: Vec<(String, String, crate::model::ImageAnchor)> = Vec::new();
@@ -2459,6 +2463,14 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
                 }
                 continue;
             }
+            // A text box: a sentinel run, the drawing once rdocx has
+            // written the part (docx_text_boxes::wrap).
+            if let Some(tb) = &run.style.text_box {
+                let mark = crate::docx_text_boxes::sentinel(text_boxes.len());
+                text_boxes.push((tb.as_ref().clone(), run.style.image_anchor.unwrap_or_default()));
+                let _ = out.last_paragraph_mut().expect("paragraph").add_run(&mark);
+                continue;
+            }
             if let Some(chip) = &run.style.chip {
                 let mark = crate::docx_chips::sentinel(chips.len());
                 chips.push((chip.clone(), run.text.clone()));
@@ -2589,7 +2601,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
         .map_err(|e| format!("Cannot save {}: {}", path.as_ref().display(), e))?;
     let tabbed = paras.iter().flat_map(|p| &p.runs).any(|r| r.text.contains('\t'));
     let has_post = post.iter().any(ParaPost::nontrivial);
-    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post && inline_sides.iter().all(|&s| s == (0, 0)) {
+    let bytes = if chips.is_empty() && revisions.is_empty() && doc.comments.is_empty() && !has_toc && !tabbed && !has_covered && floating.is_empty() && !has_post && inline_sides.iter().all(|&s| s == (0, 0)) && text_boxes.is_empty() {
         bytes
     } else {
         with_part(&bytes, "word/document.xml", |xml| {
@@ -2601,6 +2613,7 @@ pub fn write(doc: &Document, path: impl AsRef<std::path::Path>) -> Result<(), St
             let xml = if floating.is_empty() { xml } else { crate::docx_anchors::float(&xml, &floating, 9001) };
             // After floating pictures are anchors: the inline ones are left.
             let xml = crate::docx_anchors::sides(&xml, &inline_sides);
+            let xml = if text_boxes.is_empty() { xml } else { crate::docx_text_boxes::wrap(&xml, &text_boxes, 9400) };
             let xml = crate::docx_revisions::wrap(&crate::docx_chips::wrap(&xml, &chips), &revisions);
             let xml = crate::docx_comments::wrap(&xml, &doc.comments);
             if has_toc { crate::docx_toc::wrap(&xml) } else { xml }

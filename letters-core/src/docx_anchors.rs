@@ -150,7 +150,7 @@ pub fn relationship_target(rels_xml: &str, id: &str) -> Option<String> {
 }
 
 /// One `wp:anchor` element's placement.
-fn placement(anchor: &str) -> ImageAnchor {
+pub(crate) fn placement(anchor: &str) -> ImageAnchor {
     let (h_from, x_emu, h_align) = axis(anchor, "wp:positionH");
     let (v_from, y_emu, v_align) = axis(anchor, "wp:positionV");
     ImageAnchor {
@@ -186,7 +186,7 @@ fn axis(anchor: &str, element: &str) -> (AnchorFrame, i64, Option<AnchorAlign>) 
 }
 
 /// The value of `name` on the first `tag` element (`tag` includes its `<`).
-fn attr<'a>(xml: &'a str, tag: &str, name: &str) -> Option<&'a str> {
+pub(crate) fn attr<'a>(xml: &'a str, tag: &str, name: &str) -> Option<&'a str> {
     let at = xml.find(tag)?;
     let open = &xml[at..at + xml[at..].find('>')?];
     let key = format!(" {name}=\"");
@@ -444,7 +444,7 @@ fn run_properties(look: &crate::model::RunStyle) -> String {
 }
 
 /// A frame's `relativeFrom`, `text` naming the anchoring paragraph's.
-fn frame(f: AnchorFrame, text: &str) -> &str {
+pub(crate) fn frame(f: AnchorFrame, text: &str) -> &str {
     match f {
         AnchorFrame::Page => "page",
         AnchorFrame::Margin => "margin",
@@ -453,7 +453,7 @@ fn frame(f: AnchorFrame, text: &str) -> &str {
 }
 
 /// An axis's `wp:align` or `wp:posOffset`.
-fn position(offset: i64, align: Option<AnchorAlign>, names: [&str; 3]) -> String {
+pub(crate) fn position(offset: i64, align: Option<AnchorAlign>, names: [&str; 3]) -> String {
     match align {
         Some(AnchorAlign::Start) => format!("<wp:align>{}</wp:align>", names[0]),
         Some(AnchorAlign::Center) => format!("<wp:align>{}</wp:align>", names[1]),
@@ -462,7 +462,7 @@ fn position(offset: i64, align: Option<AnchorAlign>, names: [&str; 3]) -> String
     }
 }
 
-fn xml_attr(s: &str) -> String {
+pub(crate) fn xml_attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 

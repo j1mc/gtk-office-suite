@@ -2807,11 +2807,11 @@ fn a_page_border_survives_writer_both_ways() {
     check(&through_lo_to_docx(&d, "border").expect("Writer"), "odt → Writer → docx");
 }
 
-/// A text box survives Writer: our .odt, rewritten by Writer as .odt,
-/// reopens with the box at its paragraph, the same size, place, rule,
-/// fill, padding and text, and its text kept out of the body.
+/// A text box survives Writer every way: our .odt or .docx, rewritten by
+/// Writer as either, reopens with the box at its paragraph, the same size,
+/// place, rule, fill, padding and text, and its text kept out of the body.
 #[test]
-fn a_text_box_survives_writer_in_odt() {
+fn a_text_box_survives_writer_both_ways() {
     use letters_core::model::{AnchorAlign, AnchorFrame, BoxRule, ImageAnchor, TextBox};
     let Some(bin) = require_or_skip() else { return };
     let anchor = ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: 91_440, ..Default::default() };
@@ -2828,35 +2828,47 @@ fn a_text_box_survives_writer_in_odt() {
         runs: vec![Run::plain("Sign here"), Run { text: String::new(), style: RunStyle { text_box: Some(Box::new(tb.clone())), image_anchor: Some(anchor), ..Default::default() } }],
     });
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out");
-    std::fs::create_dir_all(&out).unwrap();
-    let staged = dir.path().join("box.odt");
-    letters_core::odt::write(&d, &staged).expect("write odt");
-    // Into a directory of its own: onto the input itself Writer writes
-    // nothing.
-    let st = Command::new(bin)
-        .arg("--headless")
-        .arg(format!("-env:UserInstallation=file://{}", dir.path().join("lo").display()))
-        .args(["--convert-to", "odt", "--outdir"])
-        .arg(&out)
-        .arg(&staged)
-        .output()
-        .expect("soffice");
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
-    let rt = letters_core::odt::read(out.join("box.odt").to_str().unwrap()).expect("read Writer's odt");
-    let texts: Vec<String> = rt.paragraphs.iter().map(|p| p.text()).collect();
-    assert_eq!(texts, ["Sign here", "after"], "the box's text stays in the box");
-    let got = rt.paragraphs[0].runs.iter().find(|r| r.style.text_box.is_some()).expect("the box after Writer");
-    let g = got.style.text_box.as_deref().unwrap();
-    // Writer keeps lengths in hundredths of a millimetre (360 EMU) and
-    // rounds them again in inches: within two of them.
-    let near = |a: u64, b: u64| a.abs_diff(b) <= 720;
-    assert!(near(g.extent_emu.0, tb.extent_emu.0) && near(g.extent_emu.1, tb.extent_emu.1), "size {:?}", g.extent_emu);
-    assert!(g.padding_emu.iter().zip(tb.padding_emu).all(|(a, b)| near(*a as u64, b as u64)), "padding {:?}", g.padding_emu);
-    let rule = g.border.as_ref().expect("its rule");
-    assert!(near(rule.width_emu as u64, 12_700) && rule.color == "1F3864", "rule {rule:?}");
-    assert_eq!((g.fill.as_deref(), g.text.as_str()), (Some("DEEAF6"), "Name & date\nsigned"));
-    let a = got.style.image_anchor.expect("its place");
-    assert_eq!((a.h_from, a.h_align, a.v_from), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text), "{a:?}");
-    assert!(near(a.y_emu.unsigned_abs(), 91_440), "{a:?}");
+    for (from, to) in [("odt", "odt"), ("docx", "docx"), ("docx", "odt"), ("odt", "docx")] {
+        let how = format!("{from} -> Writer -> {to}");
+        let work = dir.path().join(format!("{from}-{to}"));
+        let out = work.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let staged = work.join(format!("box.{from}"));
+        match from {
+            "docx" => docx::write(&d, &staged).expect("write docx"),
+            _ => letters_core::odt::write(&d, &staged).expect("write odt"),
+        }
+        let filter = if to == "docx" { "docx:MS Word 2007 XML" } else { "odt" };
+        // Into a directory of its own: onto the input itself Writer writes
+        // nothing.
+        let st = Command::new(bin)
+            .arg("--headless")
+            .arg(format!("-env:UserInstallation=file://{}", work.join("lo").display()))
+            .args(["--convert-to", filter, "--outdir"])
+            .arg(&out)
+            .arg(&staged)
+            .output()
+            .expect("soffice");
+        assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+        let converted = out.join(format!("box.{to}"));
+        let rt = match to {
+            "docx" => docx::read(converted.to_str().unwrap()).expect("read Writer's docx"),
+            _ => letters_core::odt::read(converted.to_str().unwrap()).expect("read Writer's odt"),
+        };
+        let texts: Vec<String> = rt.paragraphs.iter().map(|p| p.text()).collect();
+        assert_eq!(texts, ["Sign here", "after"], "{how}: the box's text stays in the box");
+        let got = rt.paragraphs[0].runs.iter().find(|r| r.style.text_box.is_some()).unwrap_or_else(|| panic!("{how}: the box is lost"));
+        let g = got.style.text_box.as_deref().unwrap();
+        // Writer keeps lengths in hundredths of a millimetre (360 EMU) and
+        // rounds them again in inches: within two of them.
+        let near = |a: u64, b: u64| a.abs_diff(b) <= 720;
+        assert!(near(g.extent_emu.0, tb.extent_emu.0) && near(g.extent_emu.1, tb.extent_emu.1), "{how}: size {:?}", g.extent_emu);
+        assert!(g.padding_emu.iter().zip(tb.padding_emu).all(|(a, b)| near(*a as u64, b as u64)), "{how}: padding {:?}", g.padding_emu);
+        let rule = g.border.as_ref().unwrap_or_else(|| panic!("{how}: its rule"));
+        assert!(near(rule.width_emu as u64, 12_700) && rule.color == "1F3864", "{how}: rule {rule:?}");
+        assert_eq!((g.fill.as_deref(), g.text.as_str()), (Some("DEEAF6"), "Name & date\nsigned"), "{how}");
+        let a = got.style.image_anchor.unwrap_or_else(|| panic!("{how}: its place"));
+        assert_eq!((a.h_from, a.h_align, a.v_from), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text), "{how}: {a:?}");
+        assert!(near(a.y_emu.unsigned_abs(), 91_440), "{how}: {a:?}");
+    }
 }
