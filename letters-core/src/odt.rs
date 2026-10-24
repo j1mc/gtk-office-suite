@@ -388,9 +388,14 @@ fn floating_style(name: &str, a: &crate::model::ImageAnchor) -> String {
         Some(AnchorAlign::End) => names[3],
     };
     format!(
-        "<style:style style:name=\"{name}\" style:family=\"graphic\"><style:graphic-properties style:wrap=\"run-through\" \
+        "<style:style style:name=\"{name}\" style:family=\"graphic\"><style:graphic-properties style:wrap=\"{}\" \
          style:run-through=\"{}\" style:horizontal-pos=\"{}\" style:horizontal-rel=\"{}\" style:vertical-pos=\"{}\" \
          style:vertical-rel=\"{}\"/></style:style>",
+        match a.wrap {
+            crate::model::Wrap::None => "run-through",
+            crate::model::Wrap::Parallel => "parallel",
+            crate::model::Wrap::TopBottom => "none",
+        },
         if a.behind { "background" } else { "foreground" },
         pos(a.h_align, ["from-left", "left", "center", "right"]),
         rel(a.h_from),
@@ -420,6 +425,13 @@ fn graphic_placement(e: &quick_xml::events::BytesStart<'_>) -> crate::model::Ima
         v_from: frame("style:vertical-rel"),
         v_align: align("style:vertical-pos"),
         behind: attr_val(e, "style:run-through").as_deref() == Some("background"),
+        // Text beside it on one side or both is read as beside it on its
+        // wider side, which is where Writer puts a short paragraph.
+        wrap: match attr_val(e, "style:wrap").as_deref() {
+            Some("parallel" | "dynamic" | "biggest" | "left" | "right") => crate::model::Wrap::Parallel,
+            Some("none") => crate::model::Wrap::TopBottom,
+            _ => crate::model::Wrap::None,
+        },
         ..Default::default()
     }
 }
@@ -6382,7 +6394,7 @@ mod tests {
         assert_eq!(tb.fill.as_deref(), Some("FFFF00"));
         assert_eq!(tb.padding_emu, [45_720, 91_440, 45_720, 91_440]);
         let a = boxes[0].style.image_anchor.unwrap();
-        assert_eq!((a.h_from, a.h_align, a.v_from, a.y_emu), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text, 91_440));
+        assert_eq!((a.h_from, a.h_align, a.v_from, a.y_emu, a.wrap), (AnchorFrame::Margin, Some(AnchorAlign::End), AnchorFrame::Text, 91_440, crate::model::Wrap::Parallel));
     }
 
     /// A frame whose style fills it only with `fo:background-color` is
@@ -6428,8 +6440,8 @@ mod tests {
     /// A text box keeps its place, size, look and text through a save.
     #[test]
     fn text_boxes_round_trip() {
-        use crate::model::{AnchorAlign, AnchorFrame, BoxRule, ImageAnchor, TextBox};
-        let anchor = ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: 91_440, ..Default::default() };
+        use crate::model::{AnchorAlign, AnchorFrame, BoxRule, ImageAnchor, TextBox, Wrap};
+        let anchor = ImageAnchor { h_from: AnchorFrame::Margin, h_align: Some(AnchorAlign::End), v_from: AnchorFrame::Text, y_emu: 91_440, wrap: Wrap::TopBottom, ..Default::default() };
         let tb = TextBox {
             extent_emu: (1_828_800, 457_200),
             border: Some(BoxRule { width_emu: 12_700, color: "1F3864".into() }),

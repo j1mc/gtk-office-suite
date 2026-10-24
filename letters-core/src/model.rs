@@ -181,6 +181,22 @@ pub struct ImageAnchor {
     pub v_align: Option<AnchorAlign>,
     /// Drawn behind the text rather than in front of it.
     pub behind: bool,
+    /// How the text flows around it.
+    #[serde(default)]
+    pub wrap: Wrap,
+}
+
+/// How text flows around a floating picture or text box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Wrap {
+    /// Over or under it, as if it were not there (Writer's run-through,
+    /// Word's "in front of" or "behind text").
+    #[default]
+    None,
+    /// Beside it, on its wider side (Writer's parallel, Word's square).
+    Parallel,
+    /// Above and below it, nothing beside it.
+    TopBottom,
 }
 
 /// The box a floating image is placed in.

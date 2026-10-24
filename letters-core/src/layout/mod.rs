@@ -635,7 +635,7 @@ pub fn layout(doc: &Document, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> 
             i = end;
             continue;
         }
-        let shaped = shape_paragraph(para, col_w, opts, shaper);
+        let shaped = shape_beside_floats(&mut flow, para, col_w, opts, shaper);
         // Keep a heading, and any paragraph set to keep with the next (a
         // Title, a Word style's keepNext), with the first lines of what
         // follows it — in its own section: the next section starts a page
@@ -1005,6 +1005,10 @@ fn place_paragraph(flow: &mut Flow, idx: usize, para: &Paragraph, shaped: &Shape
         let (before, after) = (st.space_before_pt.max(0.0), std::mem::take(&mut flow.pending_after));
         flow.y += if flow.opts.space_adds { before + after } else { before.max(after) };
     }
+    // Below a floating object it may not sit beside (`shape_beside_floats`).
+    if let Some(below) = flow.wrap_below.take() {
+        flow.y = flow.y.max(below);
+    }
     // Everything that must stay together with the first line: the whole
     // paragraph if short, the orphan lines otherwise, plus a heading's
     // follower. A paragraph that keeps its lines together moves whole
@@ -1150,8 +1154,11 @@ fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: us
     let baseline = top + line_ascent(para, lb, height);
     // A paragraph's floating images are placed from its first line's top:
     // those behind the text before the line, the rest after it.
+    // Where its floating objects hang from: the top it was given, when a
+    // floating object moved its text below (`shape_beside_floats`).
+    let anchor_top = flow.anchor_top.unwrap_or(top);
     if k == 0 {
-        place_floating(flow, idx, para, top, true);
+        place_floating(flow, idx, para, anchor_top, true);
     }
     flow.push(Item::Line {
         source: Source::Paragraph(idx),
@@ -1187,7 +1194,8 @@ fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: us
         flow.push(Item::Image { para: idx, src, x_pt: box_x + x + left, y_pt: baseline - h, width_pt: w, height_pt: h });
     }
     if k == 0 {
-        place_floating(flow, idx, para, top, false);
+        place_floating(flow, idx, para, anchor_top, false);
+        flow.anchor_top = None;
     }
 }
 
@@ -1196,11 +1204,28 @@ fn emit_line(flow: &mut Flow, idx: usize, para: &Paragraph, text: &[char], k: us
 /// its frame (the page, the page inside its margins, or the paragraph's
 /// column and first line's `top`).
 fn place_floating(flow: &mut Flow, idx: usize, para: &Paragraph, top: f64, behind: bool) {
+    for (run, x, y, w, h) in floating_boxes(flow, para, top) {
+        if run.style.image_anchor.is_some_and(|a| a.behind != behind) {
+            continue;
+        }
+        match (&run.style.image, &run.style.text_box) {
+            (Some(src), _) => flow.push(Item::Image { para: idx, src: src.clone(), x_pt: x, y_pt: y, width_pt: w, height_pt: h }),
+            (None, Some(tb)) => flow.push(Item::TextBox { para: idx, x_pt: x, y_pt: y, width_pt: w, height_pt: h, text_box: tb.clone() }),
+            (None, None) => {}
+        }
+    }
+}
+
+/// Paragraph `para`'s floating pictures and text boxes, each with its box
+/// on the current page (x, y, width, height) when its first line's top is
+/// `top`.
+fn floating_boxes<'p>(flow: &Flow, para: &'p Paragraph, top: f64) -> Vec<(&'p Run, f64, f64, f64, f64)> {
     use crate::model::{AnchorAlign, AnchorFrame};
     let g = flow.geometry;
+    let mut out = Vec::new();
     for run in &para.runs {
         let Some(anchor) = run.style.image_anchor else { continue };
-        if anchor.behind != behind || (run.style.image.is_none() && run.style.text_box.is_none()) {
+        if run.style.image.is_none() && run.style.text_box.is_none() {
             continue;
         }
         let (w, h) = match &run.style.text_box {
@@ -1226,12 +1251,68 @@ fn place_floating(flow: &mut Flow, idx: usize, para: &Paragraph, top: f64, behin
         let x = place(left, width, w, anchor.x_emu, anchor.h_align);
         // Kept on the page: Word moves a picture that would hang off it.
         let y = place(upper, height, h, anchor.y_emu, anchor.v_align).clamp(0.0, (g.height_pt - h).max(0.0));
-        match (&run.style.image, &run.style.text_box) {
-            (Some(src), _) => flow.push(Item::Image { para: idx, src: src.clone(), x_pt: x, y_pt: y, width_pt: w, height_pt: h }),
-            (None, Some(tb)) => flow.push(Item::TextBox { para: idx, x_pt: x, y_pt: y, width_pt: w, height_pt: h, text_box: tb.clone() }),
-            (None, None) => {}
+        out.push((run, x, y, w, h));
+    }
+    out
+}
+
+/// Shape paragraph `para` for the column, beside the floating objects on
+/// the page that text flows around (its own among them, placed where its
+/// first line will be). One its first line would sit beside is set in the
+/// room on the object's wider side, as Writer and Word set a short
+/// paragraph beside a picture; the whole paragraph is set that wide (a long
+/// one that runs on past the object is not widened again below it). One
+/// with too little room there, or beside an object it may not sit beside,
+/// starts below the object.
+fn shape_beside_floats(flow: &mut Flow, para: &Paragraph, col_w: f64, opts: &LayoutOptions, shaper: &mut dyn Shaper) -> Shaped {
+    use crate::model::Wrap;
+    let shaped = shape_paragraph(para, col_w, opts, shaper);
+    // A paragraph that starts a page of its own is past this page's.
+    if para.style.page_break_before && !flow.page_is_empty() {
+        return shaped;
+    }
+    let top = flow.next_top(&para.style);
+    let own: Vec<WrapBox> = floating_boxes(flow, para, top)
+        .into_iter()
+        .filter_map(|(run, x, y, w, h)| run.style.image_anchor.filter(|a| a.wrap != Wrap::None && !a.behind).map(|a| WrapBox { x0: x, y0: y, x1: x + w, y1: y + h, wrap: a.wrap }))
+        .collect();
+    flow.wraps.extend(own);
+    if flow.wraps.is_empty() {
+        return shaped;
+    }
+    let first_h = shaped.lines.first().map_or(0.0, |l| line_height(para, l.natural_height()));
+    let cx = flow.column_x();
+    let (mut l, mut r) = (cx, cx + col_w);
+    let mut below: Option<f64> = None;
+    let beside: Vec<WrapBox> = flow.wraps.iter().copied().filter(|b| b.y0 < top + first_h && b.y1 > top && b.x1 > cx && b.x0 < cx + col_w).collect();
+    for b in &beside {
+        match b.wrap {
+            Wrap::TopBottom => below = Some(below.map_or(b.y1, |y: f64| y.max(b.y1))),
+            Wrap::Parallel => {
+                if b.x0 - l >= r - b.x1 {
+                    r = r.min(b.x0 - WRAP_GAP_PT);
+                } else {
+                    l = l.max(b.x1 + WRAP_GAP_PT);
+                }
+            }
+            Wrap::None => {}
         }
     }
+    if below.is_none() && r - l < WRAP_MIN_PT {
+        below = beside.iter().filter(|b| b.wrap != Wrap::None).map(|b| b.y1).reduce(f64::max);
+    }
+    if let Some(y) = below {
+        flow.wrap_below = Some(y);
+        flow.anchor_top = Some(top);
+        return shaped;
+    }
+    if l == cx && r == cx + col_w {
+        return shaped;
+    }
+    let mut narrow = shape_paragraph(para, r - l, opts, shaper);
+    narrow.box_x += l - cx;
+    narrow.marker_x += l - cx;
+    narrow
 }
 
 /// A shaped paragraph of a table cell: its index, lines and height.
@@ -1650,7 +1731,32 @@ struct Flow<'o> {
     /// header and footer it shows.
     section: usize,
     page_sections: Vec<usize>,
+    /// The floating objects on this page that text flows around.
+    wraps: Vec<WrapBox>,
+    /// Where the next paragraph starts at the earliest: below an object
+    /// it may not sit beside.
+    wrap_below: Option<f64>,
+    /// Where that paragraph's own floating objects hang from when it is
+    /// moved below one: the top it had.
+    anchor_top: Option<f64>,
 }
+
+/// A floating object text flows around: its box on the page and how.
+#[derive(Clone, Copy, Debug)]
+struct WrapBox {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    wrap: crate::model::Wrap,
+}
+
+/// The room kept between a floating object and the text beside it:
+/// Word's own 0.125in.
+const WRAP_GAP_PT: f64 = 9.0;
+/// The narrowest a paragraph is set beside a floating object; one with
+/// less room than this goes below it, as Writer and Word move it.
+const WRAP_MIN_PT: f64 = 72.0;
 
 impl<'o> Flow<'o> {
     fn new(geometry: PageGeometry, opts: &'o LayoutOptions) -> Self {
@@ -1668,6 +1774,9 @@ impl<'o> Flow<'o> {
             carry: Vec::new(),
             section: 0,
             page_sections: Vec::new(),
+            wraps: Vec::new(),
+            wrap_below: None,
+            anchor_top: None,
         };
         f.new_page();
         f
@@ -1898,6 +2007,22 @@ impl<'o> Flow<'o> {
         self.y = self.top();
         self.column_items = 0;
         self.pending_after = 0.0;
+        self.wraps.clear();
+        self.wrap_below = None;
+        self.anchor_top = None;
+    }
+
+    /// Where a paragraph of style `st` placed next has its first line's
+    /// top, if it stays in this column: past the space between it and the
+    /// one before (as `place_paragraph` adds it).
+    fn next_top(&self, st: &crate::model::ParaStyle) -> f64 {
+        let document_top = self.pages.len() == 1 && self.column == 0 && self.column_is_empty();
+        if !self.column_is_empty() || document_top {
+            let (before, after) = (st.space_before_pt.max(0.0), self.pending_after);
+            self.y + if self.opts.space_adds { before + after } else { before.max(after) }
+        } else {
+            self.y
+        }
     }
 
     fn next_column(&mut self) {
