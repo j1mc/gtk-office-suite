@@ -54,13 +54,6 @@ class LettersPrintPreviewSmoke(BaseGUITestCase):
         rawinput.typeText("print preview page")
         self.wait_for_node(name="3 words", roleName="label")
 
-        preview = None
-
-        def close_preview():
-            if preview is not None:
-                preview.close()
-
-        self.addCleanup(close_preview)
         rawinput.keyCombo("<Control><Shift>p")
         preview = self.wait_until(
             lambda: next(
@@ -79,6 +72,7 @@ class LettersPrintPreviewSmoke(BaseGUITestCase):
             lambda node: node is not None,
             description="the single-page preview indicator",
         )
+        rawinput.keyCombo("Escape")
         self.assertIsNone(self.process.poll(), "letters exited while opening Print Preview")
 
 
