@@ -44,11 +44,17 @@ pub struct RunStyle {
     /// picture that leaves out `distL`/`distR`. None is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_sides_emu: Option<(u64, u64)>,
-    /// A floating image's place on the page; None = inline in the text.
-    /// A floating image takes no room in its line: it is drawn where its
-    /// anchor puts it, over the text (Word's "in front of text").
+    /// A floating image's or text box's place on the page; None = inline
+    /// in the text. A floating object takes no room in its line: it is
+    /// drawn where its anchor puts it, over the text (Word's "in front of
+    /// text").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_anchor: Option<ImageAnchor>,
+    /// A text box (ODF's `draw:frame` holding a `draw:text-box`, Word's
+    /// `wps:txbx`): a framed block of text floating where `image_anchor`
+    /// puts it. The run's own text is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_box: Option<Box<TextBox>>,
     /// Font family name (e.g. "Liberation Serif"); None = document default.
     #[serde(default)]
     pub font_family: Option<String>,
@@ -130,6 +136,33 @@ pub struct Revision {
     /// `w:ins`).
     #[serde(default)]
     pub under: Option<Box<Revision>>,
+}
+
+/// A text box's size, frame and text. Lengths are in EMU (914400 per inch,
+/// OOXML's unit), as an image's extent is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextBox {
+    /// Width and height of its outer box.
+    pub extent_emu: (u64, u64),
+    /// The rule drawn around it; None is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<BoxRule>,
+    /// Its background colour (six hex digits); None is transparent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// Room between its frame and its text: top, right, bottom, left.
+    #[serde(default)]
+    pub padding_emu: [u32; 4],
+    /// Its text, a line per paragraph.
+    #[serde(default)]
+    pub text: String,
+}
+
+/// A solid rule `width_emu` wide in `color` (six hex digits).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxRule {
+    pub width_emu: u32,
+    pub color: String,
 }
 
 /// Where a floating image sits: on each axis an offset from, or an

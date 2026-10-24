@@ -159,6 +159,14 @@ Building this map found five fields that didn't cross, all fixed with it:
 | `RunStyle.chip` | the chip's label with its object anchor | `letters-core/tests/soffice_oracle.rs::smart_chips_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::smart_chips_survive_lo_passes` |
 | `RunStyle.revision` | `rev:` tag holding the revision as JSON | `letters-core/tests/soffice_oracle.rs::tracked_changes_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::tracked_changes_survive_lo_passes` |
 | `RunStyle.comments` | `comment:ID` tags | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` |
+| `RunStyle.text_box` | a clear one-pixel paintable holding the box (buffer data `letters-text-box`); the page view draws it from the model | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `TextBox.extent_emu` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `TextBox.border` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `TextBox.fill` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `TextBox.padding_emu` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `TextBox.text` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `BoxRule.width_emu` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
+| `BoxRule.color` | as `RunStyle.text_box` | n/a: a .docx body's text boxes are not read or written yet (#1719) | `letters-core/tests/soffice_oracle.rs::a_text_box_survives_writer_in_odt` |
 | `Comment.id` | comments sidecar | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` |
 | `Comment.author` | comments sidecar | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` |
 | `Comment.date` | comments sidecar | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` | `letters-core/tests/soffice_oracle.rs::comments_survive_lo_passes` |

@@ -1162,6 +1162,44 @@ impl Typeset {
                         pangocairo::functions::show_layout_line(cr, &l);
                     }
                 }
+                Item::TextBox { x_pt, y_pt, width_pt, height_pt, text_box, .. } => {
+                    let emu = |v: u32| f64::from(v) / super::EMU_PER_PT;
+                    let _ = cr.save();
+                    if let Some((r, g, b)) = text_box.fill.as_deref().and_then(parse_hex) {
+                        cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
+                        cr.rectangle(*x_pt, *y_pt, *width_pt, *height_pt);
+                        let _ = cr.fill();
+                    }
+                    // The rule's outer edge is the box's.
+                    if let Some(rule) = &text_box.border {
+                        let (r, g, b) = parse_hex(&rule.color).unwrap_or((0, 0, 0));
+                        let lw = emu(rule.width_emu).max(0.25);
+                        cr.set_source_rgb(f64::from(r) / 65535.0, f64::from(g) / 65535.0, f64::from(b) / 65535.0);
+                        cr.set_line_width(lw);
+                        cr.rectangle(x_pt + lw / 2.0, y_pt + lw / 2.0, width_pt - lw, height_pt - lw);
+                        let _ = cr.stroke();
+                    }
+                    // Its text inside its padding, a paragraph per line, in
+                    // the body's look; what does not fit is clipped, as
+                    // Writer clips a box that does not grow.
+                    let [top, right, bottom, left] = text_box.padding_emu.map(emu);
+                    let inner_w = (width_pt - left - right).max(1.0);
+                    cr.rectangle(*x_pt, *y_pt, *width_pt, *height_pt);
+                    cr.clip();
+                    cr.set_source_rgb(0.0, 0.0, 0.0);
+                    let mut y = y_pt + top;
+                    for line in text_box.text.split('\n') {
+                        let p = Paragraph { style: Default::default(), runs: vec![crate::model::Run::plain(line)] };
+                        let layout = self.shaper.layout(&super::paragraph_request(&p, inner_w, &self.opts));
+                        cr.move_to(x_pt + left, y);
+                        pangocairo::functions::show_layout(cr, &layout);
+                        y += f64::from(layout.extents().1.height()) / f64::from(pango::SCALE);
+                        if y > y_pt + height_pt - bottom {
+                            break;
+                        }
+                    }
+                    let _ = cr.restore();
+                }
                 Item::PageBorder { x_pt, y_pt, width_pt, height_pt, line_pt, color } => {
                     let _ = cr.save();
                     let channel = |shift: u32| f64::from((color >> shift) & 0xFF) / 255.0;
@@ -1433,6 +1471,51 @@ mod tests {
         // Ink inside the first line's box, none above the top margin.
         assert!(dark(72, 72, 160, 86), "no text drawn in the first line box");
         assert!(!dark(0, 0, w as usize, 70), "ink above the top margin");
+    }
+
+    /// A text box is drawn as Writer draws one: its fill, its rule and its
+    /// text inside its padding, where the tree puts it.
+    #[test]
+    fn the_painter_draws_a_text_box_filled_ruled_and_written() {
+        use crate::model::{AnchorFrame, BoxRule, ImageAnchor, Run, RunStyle, TextBox};
+        let mut d = doc(1, "x");
+        d.paragraphs[0].runs.push(Run {
+            text: String::new(),
+            style: RunStyle {
+                text_box: Some(Box::new(TextBox {
+                    extent_emu: (200 * 12_700, 60 * 12_700),
+                    border: Some(BoxRule { width_emu: 2 * 12_700, color: "000000".into() }),
+                    fill: Some("FFFF00".into()),
+                    padding_emu: [6 * 12_700; 4],
+                    text: "Inside the box\nand a second line".into(),
+                })),
+                image_anchor: Some(ImageAnchor { h_from: AnchorFrame::Page, x_emu: 200 * 12_700, v_from: AnchorFrame::Page, y_emu: 300 * 12_700, ..Default::default() }),
+                ..Default::default()
+            },
+        });
+        let typeset = Typeset::new(d, LayoutOptions::default());
+        let page = &typeset.tree().pages[0];
+        let (w, h) = (page.width_pt.ceil() as i32, page.height_pt.ceil() as i32);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, w, h).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            cr.paint().unwrap();
+            typeset.draw_page(&cr, 0);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().unwrap();
+        // Rgb24 is B, G, R, X in memory.
+        let px = |x: usize, y: usize| (data[y * stride + x * 4 + 2], data[y * stride + x * 4 + 1], data[y * stride + x * 4]);
+        let dark = |x0: usize, y0: usize, x1: usize, y1: usize| (y0..y1).filter(|&y| (x0..x1).any(|x| px(x, y).0 < 128)).count();
+        assert_eq!(px(201, 330), (0, 0, 0), "its rule on the left edge");
+        assert_eq!(px(398, 330), (0, 0, 0), "and the right");
+        assert_eq!(px(390, 355), (255, 255, 0), "filled inside");
+        assert_eq!(px(195, 330), (255, 255, 255), "nothing outside it");
+        assert!(dark(208, 306, 392, 320) > 4, "its first line inside the padding");
+        assert!(dark(208, 320, 392, 340) > 4, "and its second below it");
+        assert_eq!(dark(0, 0, w as usize, 70), 0, "no ink above the top margin");
     }
 
     /// Clicking a laid-out character finds it, and its caret is drawn where
