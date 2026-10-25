@@ -52,8 +52,8 @@ semantics:
 - If a stored step no longer applies, that step alone is dropped, whole,
   and the other steps stay: no half undo is applied and the rest of the
   history is not lost with it. (The first version of `History::step` cleared
-  the whole history on one failure; RFC-0005 PR 1 changed it to the rule
-  stated here and in "How it maps onto Loro" below.)
+  the whole history on one failure; that contradicted this ADR's own "How it
+  maps onto Loro" section below, which collaboration needs, and was changed.)
 
 `ops::apply_all` applies a group of ops, rolls back on failure, and returns
 the group's inverse.

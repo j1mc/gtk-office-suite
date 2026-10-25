@@ -146,7 +146,8 @@ impl<O: Op> History<O> {
         self.step(doc, false)
     }
 
-    /// Redo the last undone step on `doc`.
+    /// Redo the last undone step on `doc`. A step that no longer fits is
+    /// dropped, as for [`History::undo`].
     pub fn redo(&mut self, doc: &mut O::Doc) -> Option<Vec<O>> {
         self.step(doc, true)
     }

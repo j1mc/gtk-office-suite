@@ -2422,6 +2422,30 @@ mod tests {
         assert!(c.selection().slide_id.is_some_and(|id| id == first || id == third));
     }
 
+    /// ADR 0011: a step that no longer fits is dropped alone. The selection
+    /// stacks mirror the history, so the dropped step's entry goes with it
+    /// and the next undo restores the selection of the step it takes back.
+    #[test]
+    fn a_step_that_no_longer_fits_is_dropped_with_its_selection_entry_and_the_rest_stay() {
+        let c = DecksController::new(vec![slide("S1"), slide("S2")], vec![]);
+        let (first, second) = (sid(&c, 0), sid(&c, 1));
+        c.add_object(first, rect(1.0, 1.0));
+        let o = oid(&c, 0, 0);
+        assert!(c.select_objects(first, &[o], Some(o), SelectionMode::Object));
+        let on_object = c.selection();
+        c.move_object(first, o, 1.0, 0.0);
+        assert!(c.select_slide(second));
+        assert_ne!(c.selection(), on_object);
+        c.add_object(second, rect(2.0, 2.0));
+        // A peer deletes the second slide: the undo of the last step
+        // addresses an object that is gone.
+        c.slides.borrow_mut().retain(|s| s.ids.slide != second);
+        assert!(!c.undo(), "that step no longer fits");
+        assert!(c.can_undo() && !c.can_redo(), "the steps before it stay, and the dropped one cannot be redone");
+        assert!(c.undo(), "the move is next");
+        assert_eq!(c.selection(), on_object, "with the selection that step saw, not the dropped step's");
+    }
+
     #[test]
     fn save_ack_does_not_clean_newer_revision() {
         let c = DecksController::new(vec![slide("S1")], vec![]);
