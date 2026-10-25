@@ -409,8 +409,8 @@ async fn share_join_publish_and_the_head_moving_does_not_drop_an_update() {
     let Event::Published { parents, id: merged, .. } = alice.reply(req).await else { panic!("not published") };
     assert_eq!(parents, vec![v1, a1]);
     let one = alice
-        .wait("a single head", |m| match &m.event {
-            Event::Heads { heads, conflict: false, .. } if heads.len() == 1 => Some(heads[0].id.clone()),
+        .wait("the merged head alone", |m| match &m.event {
+            Event::Heads { heads, conflict: false, .. } if heads.len() == 1 && heads[0].id == merged => Some(heads[0].id.clone()),
             _ => None,
         })
         .await;

@@ -350,7 +350,7 @@ impl Receiver {
             Payload::File { .. } => match files.get(&u.id) {
                 Some(Ok(b)) => Ok(b.clone()),
                 Some(Err(why)) => Err(PayloadError::FileUnavailable(why.clone())),
-                None => Err(PayloadError::FileUnavailable("not fetched".into())),
+                None => Err(PayloadError::IsFile),
             },
             inline => decode_inline(inline),
         };
@@ -1068,8 +1068,10 @@ mod tests {
 
     #[test]
     fn a_receiver_that_follows_the_head_drops_valid_updates() {
-        // The wrong rule, as a negative control: reload on every new head makes
-        // the updates of everybody who has not seen it "based on another version".
+        // The wrong rule, as a negative control: reload on every new head. A stream the
+        // receiver first sees after that begins at its first update based on the new
+        // head, so the edits of everybody who wrote before they saw it are not even
+        // reported: they vanish without a skip or a gap.
         let mut r = Receiver::new(Some("$v0".into()));
         r.reload(&version("$v1", None));
         let mut t = Append(Vec::new());
@@ -1078,8 +1080,8 @@ mod tests {
             based("b0", ("@b:x", "D2"), 0, "$v0", "b"),
         ];
         let rep = r.ingest(&log, &mut t);
-        assert!(rep.applied.is_empty());
-        assert_eq!(rep.skipped.len(), 2, "both valid edits were dropped: {rep:?}");
+        assert!(rep.applied.is_empty(), "both valid edits were lost: {rep:?}");
+        assert!(rep.skipped.is_empty() && rep.gaps.is_empty(), "and nothing says so: {rep:?}");
         assert_eq!(state(&t), "");
     }
 
@@ -1156,12 +1158,13 @@ mod tests {
         let rep = session.ingest_resolved(&[u0, u1, u2], &files, &mut t);
         assert_eq!(rep.applied, ["a0"]);
         assert_eq!(state(&t), "big");
-        let why: Vec<_> = rep
-            .dropped
-            .iter()
-            .map(|(id, d)| (id.as_str(), matches!(d, Dropped::BadPayload(PayloadError::FileUnavailable(_)))))
-            .collect();
-        assert_eq!(why, [("a1", true), ("a2", true)]);
+        assert_eq!(rep.dropped.len(), 2);
+        assert_eq!(
+            rep.dropped[0],
+            ("a1".to_string(), Dropped::BadPayload(PayloadError::FileUnavailable("sha256 mismatch".into())))
+        );
+        // A file nobody resolved is "a file, fetch and verify it first".
+        assert_eq!(rep.dropped[1], ("a2".to_string(), Dropped::BadPayload(PayloadError::IsFile)));
         assert!(rep.gaps.is_empty(), "a dropped update still counts toward seq");
     }
 }

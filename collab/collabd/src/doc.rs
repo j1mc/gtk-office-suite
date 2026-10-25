@@ -12,9 +12,10 @@
 //! wait in a `dcp_core::outbox::Outbox` and go out in order once it is back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use dcp_core::graph::Options;
 use dcp_core::outbox::{Outbox, Step};
 use dcp_core::updates::{
@@ -430,7 +431,7 @@ impl Doc {
             );
             return;
         };
-        let cached = self.file_cache.lock().expect("cache").get(id).cloned();
+        let cached = self.file_cache.lock().get(id).cloned();
         let bytes = match cached {
             Some(b) => b,
             None => match self.store.fetch_file(&self.doc, &v).await {
@@ -477,7 +478,7 @@ impl Doc {
             match step {
                 Step::Idle => return None,
                 Step::Sent => {
-                    if let Some(id) = saved.into_inner().expect("saved") {
+                    if let Some(id) = saved.into_inner() {
                         self.opened = Some(id);
                     }
                     self.set_online();
@@ -521,11 +522,11 @@ impl Doc {
         let v = view::build(versions.clone(), Options::default(), move |v| {
             let (cache, store, doc) = (cache.clone(), store.clone(), doc.clone());
             async move {
-                if let Some(b) = cache.lock().expect("cache").get(&v.id).cloned() {
+                if let Some(b) = cache.lock().get(&v.id).cloned() {
                     return Ok(b);
                 }
                 let b = store.fetch_file(&doc, &v).await?;
-                cache.lock().expect("cache").insert(v.id.clone(), b.clone());
+                cache.lock().insert(v.id.clone(), b.clone());
                 Ok(b)
             }
         })
@@ -736,7 +737,7 @@ async fn send_one(
             let payload = if bytes.len() as u64 <= MAX_INLINE_BYTES {
                 inline_payload(bytes).map_err(|e| StoreError::Invalid(e.to_string()))?
             } else {
-                let known = file.lock().expect("file").clone();
+                let known = file.lock().clone();
                 let file_ref = match known {
                     Some(f) => f,
                     None => {
@@ -749,7 +750,7 @@ async fn send_one(
                                 },
                             )
                             .await?;
-                        *file.lock().expect("file") = Some(f.clone());
+                        *file.lock() = Some(f.clone());
                         f
                     }
                 };
@@ -798,7 +799,7 @@ async fn send_one(
                 message.clone(),
             )
             .await?;
-            *saved.lock().expect("saved") = Some(v.id.clone());
+            *saved.lock() = Some(v.id.clone());
             out.send(
                 *req,
                 Event::Published {

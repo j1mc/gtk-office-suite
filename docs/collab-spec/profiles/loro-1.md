@@ -199,18 +199,18 @@ A principal with a role below `editor` MUST NOT publish updates, and a receiver 
 update published by a principal that was not an editor in the epoch or roster it was written in
 (spec 5, spec 11). A viewer's program therefore opens the document read-only.
 
-*Does the Tables controller need a read-only mode for that?* It has none (`grep read_only` over
-`tables-core/src/controller` finds no mode, only the sheet-protection checks), and it needs one,
-but a small one. Every content edit of `WorkbookController` (`edit_cell`, `paste_fragment`, `fill`,
+*Does the Tables controller need a read-only mode for that?* Yes, and on `main` it had none
+(`grep read_only` over `tables-core/src/controller` found only the sheet-protection checks).
+Every content edit of `WorkbookController` (`edit_cell`, `paste_fragment`, `fill`,
 `mutate_sheet`, `set_note`, resize, sort) is turned into `Op`s and ends in `apply_ops`, which asks
-`authorize_ops` first, counts a refusal in `protection_rejection_count` (the counter the shell
-already turns into a "protected" toast) and changes nothing when it refuses; undo and redo go
-through `step`. A viewer mode is one `read_only` flag consulted at the top of `authorize_ops`
-(and `authorize_cells`, `begin_resize`) and in `step`, with a text for the toast that says "you can
-only read this workbook" instead of "protected". Remote updates MUST bypass it, because they do
-not come through `apply_ops` at all (RFC-0005 2.4: `apply_remote`). Not part of this profile and
-not implemented with it; it is the shell pull request's, and the flag's source is the `joined`
-event's `role`.
+`authorize_ops` first, and every undo and redo goes through `step`, so one flag covers all of
+them. RFC-0005's core pull request adds it: `WorkbookController::set_read_only(true)` refuses
+those, counts no protection rejection (the "protected" toast would say the wrong thing), and makes
+`can_undo` and `can_redo` false, while trusted replay (`ops::apply`, how a peer's update is applied)
+is not a user edit and still works. The shell sets it from the `joined` event's `role`
+(`viewer`, and `commenter` until a comment model exists). The sidecar does not rely on it: it
+refuses `publish_update` and `publish_version` from a role below `editor` itself, and the binding
+refuses them again.
 
 ## 11. Conformance
 
