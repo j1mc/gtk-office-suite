@@ -942,11 +942,17 @@ fn the_process_client_speaks_to_the_real_binary_and_a_bad_line_does_not_end_it()
     assert_eq!(n.bindings, vec![Binding::Streams], "Matrix is not in this build");
     assert!(n.server.starts_with("collabd "), "{}", n.server);
 
-    let mut ask = |client: &mut ProcessClient<_, _>, c: Command| -> Message {
+    // The answer to a command carries its request number; a `state` event before it
+    // (connecting, ...) does not and is not the answer.
+    let ask = |client: &mut ProcessClient<_, _>, c: Command| -> Message {
         let req = client.send(&c).unwrap();
-        let m = client.recv().unwrap().expect("an answer");
-        assert_eq!(m.req, Some(req));
-        m
+        loop {
+            let m = client.recv().unwrap().expect("an answer");
+            if m.req == Some(req) {
+                return m;
+            }
+            assert_eq!(m.req, None, "an answer to another request: {m:?}");
+        }
     };
     let m = ask(&mut client, Command::Connect {
         binding: Binding::Matrix,

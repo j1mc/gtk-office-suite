@@ -118,9 +118,11 @@ genesis. Properties a receiver may rely on, all of which are Loro's:
   applied in `seq` order (spec 7 rule 2).
 * An update whose dependencies have not arrived is kept pending and applies when they do.
 
-A writer exports from the version vector of what it last had **accepted by the binding** (the
-event that answers a publish), not of what it last tried to send, so a failed publish is
-re-sent as part of the next delta. A delta of one cell is about 100 bytes (RFC-0005 3.7).
+A writer SHOULD export from the version vector of what it last had **accepted by the binding**
+(the event that answers a publish), not of what it last tried to send, so that a publish the
+binding refused is re-sent as part of the next delta; one the sidecar has queued is not refused
+(it keeps every update it accepted from the shell, in order, and sends it when the server is
+back) and needs no re-send. A delta of one cell is about 100 bytes (RFC-0005 3.7).
 
 ## 6. Order and gaps
 
