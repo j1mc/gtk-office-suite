@@ -4853,6 +4853,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "suite-collab"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "suite-common"
 version = "0.1.0"
 dependencies = [
