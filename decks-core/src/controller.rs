@@ -1590,10 +1590,10 @@ impl DecksController {
             self.dirty.set(true);
             self.merge_chain.set(false);
         } else {
-            // Nothing to undo, or history no longer fits and dropped
-            // itself: the stacks mirror it either way.
-            self.undo_sels.borrow_mut().clear();
-            self.redo_sels.borrow_mut().clear();
+            // Nothing to undo, or the step no longer fits and the history
+            // dropped that step alone: the selection entry goes with it, so
+            // the stacks stay in step with the history.
+            self.undo_sels.borrow_mut().pop();
         }
         done
     }
@@ -1628,8 +1628,8 @@ impl DecksController {
             self.dirty.set(true);
             self.merge_chain.set(false);
         } else {
-            self.undo_sels.borrow_mut().clear();
-            self.redo_sels.borrow_mut().clear();
+            // As for undo: the dropped step's entry goes, the others stay.
+            self.redo_sels.borrow_mut().pop();
         }
         done
     }

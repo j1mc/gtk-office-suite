@@ -49,8 +49,11 @@ semantics:
   `Delete` inverses. A space, Enter or anything else unmarked starts a new
   step.
 - A new step clears redo.
-- If a stored step no longer applies, the whole history is dropped rather
-  than applying half an undo.
+- If a stored step no longer applies, that step alone is dropped, whole,
+  and the other steps stay: no half undo is applied and the rest of the
+  history is not lost with it. (The first version of `History::step` cleared
+  the whole history on one failure; RFC-0005 PR 1 changed it to the rule
+  stated here and in "How it maps onto Loro" below.)
 
 `ops::apply_all` applies a group of ops, rolls back on failure, and returns
 the group's inverse.

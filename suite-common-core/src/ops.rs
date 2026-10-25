@@ -17,8 +17,10 @@
 //   step that is not marked — a space, Enter, a paste — breaks the run, so
 //   undo takes back a word at a time;
 // - a new step clears redo;
-// - if a stored step no longer applies (the document was replaced under
-//   it), the history is dropped rather than half an undo applied.
+// - if a stored step no longer applies (an edit that was not this history's
+//   own changed what the step addresses: a peer's, in a collaboration),
+//   that step alone is dropped, whole, and the others stay: never half an
+//   undo applied, never the rest of the history lost with it.
 //
 // `UndoManager` (undo.rs) is the older command-object shape. New code uses
 // this one; the apps migrate their own crates onto it.
@@ -137,7 +139,9 @@ impl<O: Op> History<O> {
     }
 
     /// Undo the last step on `doc`. Returns the ops applied (for a view to
-    /// follow), or `None` when there is nothing to undo.
+    /// follow), or `None` when there is nothing to undo, or when the step
+    /// no longer fits `doc` and was dropped (`doc` is unchanged then, and
+    /// the next undo takes the step before it).
     pub fn undo(&mut self, doc: &mut O::Doc) -> Option<Vec<O>> {
         self.step(doc, false)
     }
@@ -156,12 +160,10 @@ impl<O: Op> History<O> {
                 if redo { &mut self.undo } else { &mut self.redo }.push(inverse);
                 Some(ops)
             }
-            Err(_) => {
-                // History no longer fits the document: drop it rather than
-                // apply half an undo.
-                self.clear();
-                None
-            }
+            // `apply_all` rolled the step back, so `doc` is as it was: no
+            // half step. The step was popped and is not pushed anywhere:
+            // this step is dropped and every other one is kept.
+            Err(_) => None,
         }
     }
 
