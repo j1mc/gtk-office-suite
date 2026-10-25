@@ -346,6 +346,8 @@ mod tests {
                 reason: "bad signature".into(),
             },
             Event::Gap { doc: "d".into(), author: author(), expected: 4, found: 6 },
+            Event::Done { doc: Some("d".into()) },
+            Event::Done { doc: None },
             Event::error(ErrorCode::Forbidden, "viewer"),
         ]
     }

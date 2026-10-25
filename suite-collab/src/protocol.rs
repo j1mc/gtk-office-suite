@@ -392,6 +392,12 @@ pub enum Event {
         expected: u64,
         found: u64,
     },
+    /// The answer to a command that has nothing to report but that it was done:
+    /// `leave`, `grant`, `revoke`, `resync`.
+    Done {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        doc: Option<String>,
+    },
     Error {
         code: ErrorCode,
         message: String,
@@ -420,6 +426,7 @@ pub const EVENT_NAMES: &[&str] = &[
     "published",
     "dropped",
     "gap",
+    "done",
     "error",
 ];
 
