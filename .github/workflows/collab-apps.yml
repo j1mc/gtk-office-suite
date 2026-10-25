@@ -107,6 +107,7 @@ jobs:
         with:
           workspaces: collab
           shared-key: collab-apps-sidecar
+          cache-on-failure: true
       - name: Versions
         run: |
           rustc --version
@@ -160,6 +161,7 @@ jobs:
             collab
             collab/headless
           shared-key: collab-apps-headless
+          cache-on-failure: true
       - name: Versions
         run: |
           rustc --version

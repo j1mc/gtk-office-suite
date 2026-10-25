@@ -362,7 +362,9 @@ MUST NOT assume a role from anything but the binding's permission data. **No bin
    byte-identical stored values. This follows RFC-0001.
 
 An algorithm profile for a given id (for example `loro/1`) is a separate document that fixes
-encoding, document model mapping and the determinism test. None exists yet.
+encoding, document model mapping and the determinism test. One exists:
+[`loro/1` with `tables/1`](collab-spec/profiles/loro-1.md). It also rules what `base_version` means
+for a CRDT: the version the session's replica started from, never the head (profile section 3).
 
 ## 8. Bindings
 
@@ -1596,6 +1598,12 @@ Results of the journeys of this section, each from the run its section cites:
 
 ## Changelog
 
+- Draft 1, update 4 (2026-10-25): the first algorithm profile, [`loro/1` with `tables/1`](collab-spec/profiles/loro-1.md)
+  (RFC-0005 open question 1). **`dcp` stays `1`: no object or schema changes.** For a CRDT algorithm,
+  `base_version` of an update names the version the session's replica started from (the genesis
+  version, or a later version that `covers` the updates before it); it does not follow the head, and a
+  receiver accepts an update whose `base_version` is its session base whatever the head is.
+  `dcp_core::updates::CrdtSession` is the reference implementation.
 - Draft 1, update 3 (2026-10-25): three CI verification spikes, each measured once and each green in
   its own workflow: [TLS](rfc/0004-spike-tls-results.md) (8.4 over TLS 1.3, HTTP/1.1 and HTTP/2),
   [Q15](rfc/0004-spike-q15-results.md) (the power level at an event, 8.1) and

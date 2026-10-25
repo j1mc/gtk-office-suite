@@ -276,12 +276,9 @@ impl Shell {
 
     fn handle(&mut self, m: &Message) {
         match &m.event {
-            Event::Genesis { doc, bytes, .. } => {
+            Event::Genesis { doc, id, bytes, .. } => {
                 self.genesis = bytes.clone();
-                let id = match &m.event {
-                    Event::Genesis { id, .. } => id.clone(),
-                    _ => unreachable!(),
-                };
+                let id = id.clone();
                 if self.replica.is_none() {
                     let (r, s) = Replica::from_snapshot(self.peer, bytes)
                         .unwrap_or_else(|e| panic!("{}: the genesis does not load: {e}", self.name));

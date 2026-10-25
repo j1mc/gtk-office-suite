@@ -141,12 +141,13 @@ impl Connector for DefaultConnector {
                 "this collabd build has no Matrix binding yet",
             )),
             Binding::Streams => {
+                // Everything that can be refused is refused before a key is made: a
+                // rejected `connect` leaves nothing on disk.
+                let transport = transport_for(config)?;
+                let http =
+                    Http::with_transport(&crate::invite::normalise_server(&config.server), transport);
                 let me = identity::load_or_create(&self.data_dir)
                     .map_err(|e| ConnectError::new(ErrorCode::Storage, e.to_string()))?;
-                let http = Http::with_transport(
-                    &crate::invite::normalise_server(&config.server),
-                    transport_for(config)?,
-                );
                 let store = StreamsStore::new(http, me, StreamsConfig::new(device));
                 // Reach the server now, so an unreachable one is an error of `connect`.
                 store.calibrate().await?;
