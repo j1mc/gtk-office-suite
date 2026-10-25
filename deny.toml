@@ -61,4 +61,9 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 SUID/SGID bits kept by extract(); never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 extract() symlink targets outside the destination; never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
     { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 extract() permissions through symlinks; never called here or by calamine/rust_xlsxwriter; patched only in zip 9 (#1537); review by 2027-01-01" },
+    # collab/Cargo.lock, the collabd sidecar's own lock (RFC-0005 option B; the product's
+    # lock is unaffected: `tests/test_collab_defaults.py`). `collab-apps.yml` runs this
+    # gate on it. These are matched only when that lock is read; the product's `advisories`
+    # job does not see the crates and does not need them.
+    { id = "RUSTSEC-2026-0319", reason = "anymap2 unmaintained, no patched release; via matrix-sdk 0.19.1 (collab/Cargo.lock only; the Matrix binding is wired in a later pull request) — resolve with the Matrix binding (#1043); review by 2027-01-01" },
 ]

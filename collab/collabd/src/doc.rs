@@ -465,13 +465,18 @@ impl Doc {
             let now = now_ms();
             let saved: Mutex<Option<String>> = Mutex::new(None);
             let step = {
-                let (store, doc, out, mime) = (&self.store, &self.doc, &self.out, &self.mime);
+                let wire = Wire {
+                    store: &self.store,
+                    doc: &self.doc,
+                    mime: &self.mime,
+                    out: &self.out,
+                };
                 let session = self.session.as_ref();
                 let opened = self.opened.as_deref();
                 let saved = &saved;
                 self.outbox
                     .step(now, |item: Arc<Outgoing>| async move {
-                        send_one(store, doc, session, mime, out, opened, &item, saved).await
+                        send_one(wire, session, opened, &item, saved).await
                     })
                     .await
             };
@@ -714,16 +719,28 @@ fn after(until_ms: u64, now: u64) -> Instant {
     Instant::now() + Duration::from_millis(until_ms.saturating_sub(now))
 }
 
+/// What a send needs from the document's task, borrowed.
+#[derive(Clone, Copy)]
+struct Wire<'a> {
+    store: &'a Arc<dyn DocumentStore>,
+    doc: &'a String,
+    mime: &'a str,
+    out: &'a Output,
+}
+
 async fn send_one(
-    store: &Arc<dyn DocumentStore>,
-    doc: &String,
+    wire: Wire<'_>,
     session: Option<&CrdtSession>,
-    mime: &str,
-    out: &Output,
     opened: Option<&str>,
     item: &Outgoing,
     saved: &Mutex<Option<String>>,
 ) -> Result<(), StoreError> {
+    let Wire {
+        store,
+        doc,
+        mime,
+        out,
+    } = wire;
     match item {
         Outgoing::Update {
             req,

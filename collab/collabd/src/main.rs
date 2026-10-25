@@ -14,17 +14,10 @@ use collabd::log;
 use suite_collab::LineReader;
 
 fn data_dir(args: &[String]) -> Result<PathBuf, String> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--data-dir" => {
-                return it
-                    .next()
-                    .map(PathBuf::from)
-                    .ok_or_else(|| "--data-dir needs a directory".to_owned())
-            }
-            other => return Err(format!("unknown argument {other:?}; usage: collabd [--data-dir DIR]")),
-        }
+    match args {
+        [] => {}
+        [flag, dir] if flag == "--data-dir" => return Ok(PathBuf::from(dir)),
+        _ => return Err(format!("unexpected arguments {args:?}; usage: collabd [--data-dir DIR]")),
     }
     if let Some(d) = std::env::var_os("COLLABD_DATA_DIR").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(d));

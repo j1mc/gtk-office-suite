@@ -111,29 +111,25 @@ impl<R: Read, W: Write> ProcessClient<R, W> {
             min_protocol: Some(MIN_PROTOCOL_VERSION),
             client: client.to_owned(),
         })?;
-        loop {
-            let Some(m) = self.recv()? else {
-                return Err(ClientError::Closed);
-            };
-            match m.event {
-                Event::Hello { protocol, server, bindings, max_line } => {
-                    if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&protocol) {
-                        return Err(ClientError::Handshake(format!(
-                            "the sidecar chose protocol {protocol}, this client speaks {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}"
-                        )));
-                    }
-                    self.max_send = max_line.min(MAX_LINE_BYTES);
-                    return Ok(Negotiated { protocol, server, bindings, max_line });
-                }
-                Event::Error { code: ErrorCode::UnsupportedProtocol, message } => {
-                    return Err(ClientError::Handshake(message));
-                }
-                other => {
+        let Some(m) = self.recv()? else {
+            return Err(ClientError::Closed);
+        };
+        match m.event {
+            Event::Hello { protocol, server, bindings, max_line } => {
+                if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&protocol) {
                     return Err(ClientError::Handshake(format!(
-                        "expected hello, the sidecar sent {other:?}"
+                        "the sidecar chose protocol {protocol}, this client speaks {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION}"
                     )));
                 }
+                self.max_send = max_line.min(MAX_LINE_BYTES);
+                Ok(Negotiated { protocol, server, bindings, max_line })
             }
+            Event::Error { code: ErrorCode::UnsupportedProtocol, message } => {
+                Err(ClientError::Handshake(message))
+            }
+            other => Err(ClientError::Handshake(format!(
+                "expected hello, the sidecar sent {other:?}"
+            ))),
         }
     }
 

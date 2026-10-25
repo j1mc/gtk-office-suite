@@ -105,6 +105,7 @@ jobs:
             tests/test_actions_pinned.py \
             tests/test_advisory_waivers.py \
             tests/test_autosave_defaults.py \
+            tests/test_collab_defaults.py \
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
             tests/test_pixel_scoreboard.py \
@@ -187,6 +188,7 @@ jobs:
             tests/test_actions_pinned.py \
             tests/test_advisory_waivers.py \
             tests/test_autosave_defaults.py \
+            tests/test_collab_defaults.py \
             tests/test_ci_test_list.py \
             tests/test_render_lab_rules.py \
             tests/test_pixel_scoreboard.py \

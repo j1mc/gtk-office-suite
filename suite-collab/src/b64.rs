@@ -56,7 +56,7 @@ fn value(c: u8) -> Option<u32> {
 
 pub fn decode(text: &str) -> Result<Vec<u8>, B64Error> {
     let t = text.as_bytes();
-    if t.len() % 4 != 0 {
+    if !t.len().is_multiple_of(4) {
         return Err(B64Error::Length);
     }
     let mut out = Vec::with_capacity(t.len() / 4 * 3);
