@@ -31,6 +31,9 @@ tempfile = "3"
 pango = { version = "0.22", optional = true, features = ["v1_50"] }
 pangocairo = { version = "0.22", optional = true }
 cairo-rs = { version = "0.22", optional = true, features = ["png", "pdf"] }
+# Optional, feature `collab` (RFC-0001 Phase 5): the document as a Loro rich
+# text. Not built without the feature; Cargo.lock records the edge either way.
+loro = { version = "1.16", optional = true }
 
 [lib]
 name = "letters_core"
@@ -44,3 +47,6 @@ proptest = "1"
 [features]
 # The Pango shaper and Cairo renderer for layout::RenderTree (ADR 0010).
 render = ["dep:pango", "dep:pangocairo", "dep:cairo-rs"]
+# The document as a Loro rich text (src/collab.rs), off by default. The
+# paragraph and run styles travel as JSON, so floats must come back exactly.
+collab = ["dep:loro", "serde_json/float_roundtrip"]
