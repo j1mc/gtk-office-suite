@@ -70,6 +70,29 @@ share the same paragraph direction decision.
 - `docx` (next): `Document ⇄ DOCX` via rdocx, replacing letters'
   `docx_bridge`. Golden fixtures under `tests/fixtures/`.
 
+## Collaboration (`collab` feature, off by default)
+
+`collab.rs` (RFC-0001 Phase 5, RFC-0005 P5) holds the document as one Loro
+`Text` with Peritext marks: the edit sequence is the text, character
+formatting is marks with the expand rules of `edit::MarkKey::expand`, an
+inline object is its `OBJECT` char with an `obj` mark, a paragraph's style
+is a `p` mark on the break that starts it. Its `Replica` has the API of
+`tables_core::controller::collab::Replica`: `export_snapshot` /
+`from_snapshot` to join, `version_bytes` / `export_since` for deltas, and an
+`import_updates` that applies an update to a scratch copy first and leaves
+the live document untouched when it fails.
+
+Not replicated, and refused with `CollabError::Unsupported` (in a document,
+in an op, and in a peer's update): tables, footnotes, headers and footers,
+sections, comments, and character formatting that no mark carries. The
+offsets are the model's sequence offsets; mapping them to a
+`GtkTextBuffer` is the shell's, and is not done or tested here.
+
+Undo stays local (ADR 0011). `ImportReport::rebase` moves the stored undo
+and redo steps over what a peer did to the text (`History::rebase`):
+offsets shift, a range skips text the peer inserted inside it, a step with
+nothing left is dropped, that step alone.
+
 ## GTK bridge (lives in `letters`, not here)
 
 `render_to_buffer(doc, buffer)` writes text + tags; `capture_from_buffer`

@@ -556,6 +556,10 @@ fn sections_comments_and_unmarked_formatting_are_refused_with_an_error() {
 fn foreign(build: impl FnOnce(&LoroDoc)) -> Vec<u8> {
     let doc = LoroDoc::new();
     doc.set_peer_id(77).unwrap();
+    // Loro refuses a mark whose key has no expand rule; this editor defines
+    // the ones of the encoding, and a default for the key it invents.
+    doc.config_text_style(style_config());
+    doc.config_default_text_style(Some(StyleConfig { expand: ExpandType::After }));
     build(&doc);
     doc.commit();
     doc.export(loro::ExportMode::all_updates()).unwrap()
@@ -743,12 +747,13 @@ fn a_step_whose_text_a_peer_deleted_is_dropped_and_the_others_stay() {
     a.receive(&to_a);
     assert_eq!(a.text(), "start one");
 
-    assert!(a.undo().is_none(), "the ' two' step has nothing left to take back");
-    assert_eq!(a.text(), "start one", "and nothing was half done");
-    let undone = a.undo().expect("the step before it is still there");
+    // The ' two' step has nothing left to take back: it went when the
+    // peer's delete arrived, and the step before it is still there.
+    let undone = a.undo().expect("the ' one' step is still there");
     assert_eq!(a.text(), "start");
     b.receive(&undone);
     assert_eq!(b.text(), "start");
+    assert!(a.undo().is_none() && !a.history.can_undo(), "and that was all of them");
 }
 
 #[test]
@@ -760,7 +765,8 @@ fn a_restyle_of_a_paragraph_whose_break_a_peer_deleted_is_dropped() {
     let to_a = b.edit(Op::Delete { at: 3, len: 1 });
     a.receive(&to_a);
     assert_eq!(a.text(), "onetwo");
-    assert!(a.undo().is_none(), "the paragraph it restyled is gone");
+    assert!(!a.history.can_undo(), "the paragraph it restyled is gone, and its step with it");
+    assert!(a.undo().is_none());
     assert_eq!(a.doc.paragraphs.len(), 1);
 }
 
@@ -775,11 +781,12 @@ fn a_dropped_step_does_not_misplace_the_steps_below_it() {
     let to_a = b.edit(Op::Delete { at: 2, len: 1 });
     a.receive(&to_a);
     assert_eq!(a.text(), "p1p2X");
-    assert!(a.undo().is_none(), "the restyle is dropped");
+    // The restyle's step is gone; what is left is the typing step.
     let undone = a.undo().expect("the typing step");
-    assert_eq!(a.text(), "p1p2", "and it took back the X, not the char next to it");
+    assert_eq!(a.text(), "p1p2", "it took back the X, not the char next to it");
     b.receive(&undone);
     assert_eq!(b.text(), "p1p2");
+    assert!(!a.history.can_undo(), "and the restyle is not there to undo");
 }
 
 // ------------------------------------------------------------------ the transform itself

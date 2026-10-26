@@ -184,7 +184,7 @@ jobs:
         run: |
           cargo nextest run -p letters-core -p suite-common-core \
             --features letters-core/collab --locked \
-            --profile collab -E 'test(collab) | test(rebase)' --success-output final
+            --profile collab --no-fail-fast -E 'test(collab) | test(rebase)' --success-output final
       # Off by default: the graph letters-core builds without the feature holds no loro, and
       # the lock needs no change to say so (`--locked`). The lock does record the optional
       # edge, as it does for tables-core and decks-core; tests/test_collab_defaults.py (the
