@@ -71,7 +71,7 @@
     {
       "job": "test",
       "workflow": ".github/workflows/ci.yml",
-      "collects": "nextest JUnit for the whole Rust workspace",
+      "collects": "nextest JUnit for the whole Rust workspace, and a second JUnit (profile collab) for the tests of the collab feature in tables-core and decks-core, which the workspace run does not compile",
       "namespaces": [
         "letters-core::",
         "tables-core::",
