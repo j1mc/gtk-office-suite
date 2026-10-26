@@ -216,11 +216,13 @@ and it is where most of the test suite lives.
 | `suite-common-core` | no | Shared primitives: undo, number formats, styles, search, atomic saves, autosave |
 | `suite-common` | yes | Shared widgets: command palette, file dialogs, toasts |
 | `suite-export` | no | PDF export |
+| `suite-collab` | no | The wire protocol between an app and the `collabd` sidecar (serde only, no network stack); off by default, see `collab/` and RFC-0005 |
 
 Other directories: `tests/` (GUI journeys and Python harness tests),
 `interop/` (the reviewable interoperability corpus), `fuzz/` (cargo-fuzz
-targets), `flatpak/` and `flathub/` (packaging), `docs/`, `po/`
-(translations).
+targets), `flatpak/` and `flathub/` (packaging), `collab/` (the `collabd`
+collaboration sidecar, its own cargo workspace and lockfile so no network
+crate reaches the apps), `docs/`, `po/` (translations).
 
 For module layout, data flow, the LibreOffice patterns this borrows from,
 and the dependency inventory, see
