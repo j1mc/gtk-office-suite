@@ -10,6 +10,9 @@ name: collab-apps
 #              dcp-conformance, dcp-matrix, dcp-streams copied from tools/collab-spike, and
 #              collabd): `cargo check --locked`, clippy, unit tests, the schemas, and
 #              `cargo deny check advisories` on its lock (deny.toml)
+#   letters-core  the document as a Loro rich text (letters-core, feature `collab`, RFC-0005 P5):
+#              clippy and its tests under nextest, and the promise that the feature stays off
+#              in the default graph. No GTK, no server.
 #   headless   the two-instance test without GTK (collab/headless, its own workspace and
 #              lock because it needs tables-core): two real collabd processes and two
 #              tables-core Replicas converge through the Durable Streams Node reference
@@ -28,6 +31,9 @@ on:
       - 'docs/collab-spec/**'
       - 'tables-core/src/controller/collab*.rs'
       - 'tables-core/Cargo.toml'
+      - 'letters-core/**'
+      - 'suite-common-core/src/ops.rs'
+      - 'suite-common-core/src/ops/**'
       - 'tools/collab-spike/scripts/streams-*'
       - 'tests/test_collab_defaults.py'
       - 'deny.toml'
@@ -41,6 +47,9 @@ on:
       - 'docs/collab-spec/**'
       - 'tables-core/src/controller/collab*.rs'
       - 'tables-core/Cargo.toml'
+      - 'letters-core/**'
+      - 'suite-common-core/src/ops.rs'
+      - 'suite-common-core/src/ops/**'
       - 'tools/collab-spike/scripts/streams-*'
       - 'tests/test_collab_defaults.py'
       - 'deny.toml'
@@ -138,6 +147,64 @@ jobs:
           manifest-path: collab/Cargo.toml
           command: check advisories
           arguments: --all-features --config deny.toml
+
+  letters-core:
+    name: letters-core with the collab feature (clippy, nextest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@eaa248e7e83aa1d4f575fb2e231e8a5da93dabc3 # nextest
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: collab-apps-letters-core
+          cache-on-failure: true
+      - name: Versions
+        run: |
+          rustc --version
+          cargo --version
+      # The feature is off in every product build, so the workspace's own clippy and nextest
+      # runs (ci.yml) never compile it. --locked: the committed root Cargo.lock must already
+      # be the one this resolves to.
+      - name: cargo clippy -p letters-core --features collab
+        run: cargo clippy -p letters-core --features collab --all-targets --locked -- -D warnings
+      # Letters' tests of the feature (letters-core/src/collab) and the shared history's
+      # `rebase` (suite-common-core, ADR 0011). A test that finds nothing to run fails, so a
+      # filter that stops matching cannot pass. `--success-output final` prints what passing
+      # tests print: the size of one keystroke's update.
+      - name: the collab tests under nextest
+        run: |
+          cargo nextest run -p letters-core -p suite-common-core \
+            --features letters-core/collab --locked \
+            --profile collab --no-fail-fast -E 'test(collab) | test(rebase)' --success-output final
+      # Off by default: the graph letters-core builds without the feature holds no loro, and
+      # the lock needs no change to say so (`--locked`). The lock does record the optional
+      # edge, as it does for tables-core and decks-core; tests/test_collab_defaults.py (the
+      # `product` job) checks the apps' graph.
+      - name: the default graph of letters-core has no loro
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo tree --locked -p letters-core -e normal --prefix none > "$RUNNER_TEMP/default-graph.txt"
+          grep -q '^serde_json ' "$RUNNER_TEMP/default-graph.txt"
+          if grep -q '^loro ' "$RUNNER_TEMP/default-graph.txt"; then
+            echo "::error::loro is in the default graph of letters-core"
+            exit 1
+          fi
+          cargo tree --locked -p letters-core --features collab -e normal --prefix none | grep -q '^loro '
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: letters-core-collab-junit
+          path: target/nextest/collab/junit.xml
+          if-no-files-found: warn
 
   headless:
     name: two collabd processes and two Replicas through a real server
