@@ -13,6 +13,11 @@ use super::ops::{show_changed_sheet, Op};
 
 use super::state::*;
 
+/// What [`WorkbookController::observe_applied`] takes: the workbook after the
+/// change, and the ops that made it.
+#[cfg(feature = "collab")]
+pub type AppliedObserver = Box<dyn FnMut(&WorkbookState, &[Op])>;
+
 pub struct WorkbookController {
     pub state: Rc<RefCell<WorkbookState>>,
     /// The suite's one undo history (ADR 0011), of op groups' inverses.
@@ -39,6 +44,9 @@ pub struct WorkbookController {
     /// Canonical document identity (#103) — window.rs reads/writes this
     /// shared cell rather than tracking its own copy.
     pub file_path: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// Told which ops each user edit, undo and redo applied, for a shared session.
+    #[cfg(feature = "collab")]
+    applied: Option<AppliedObserver>,
 }
 
 impl WorkbookController {
@@ -53,6 +61,8 @@ impl WorkbookController {
             protection_rejections: 0,
             read_only: false,
             file_path: Rc::new(RefCell::new(None)),
+            #[cfg(feature = "collab")]
+            applied: None,
         })
     }
 
@@ -99,7 +109,67 @@ impl WorkbookController {
             from.pop();
         }
         self.notify();
+        #[cfg(feature = "collab")]
+        if let Some(ops) = &applied {
+            self.announce_applied(ops);
+        }
         did
+    }
+
+    /// Tell the observer (if any) which ops have just changed the workbook.
+    /// Called with no borrow of `state` held.
+    #[cfg(feature = "collab")]
+    pub(super) fn announce_applied(&mut self, ops: &[Op]) {
+        if let Some(observer) = self.applied.as_mut() {
+            observer(&self.state.borrow(), ops);
+        }
+    }
+
+    /// Be told, after every user edit, undo and redo, which ops changed the
+    /// workbook: a shared session records them into its [`super::Replica`]
+    /// and publishes the delta (RFC-0005 2.3 point 2). `None` stops it. The
+    /// observer runs with the workbook borrowed shared, and must not call
+    /// back into this controller. A change that comes from the session
+    /// itself ([`Self::replace_from_remote`]) is not announced.
+    #[cfg(feature = "collab")]
+    pub fn observe_applied(&mut self, observer: Option<AppliedObserver>) {
+        self.applied = observer;
+    }
+
+    /// Put in place of the workbook the one a remote update produced
+    /// ([`super::Replica::rebuild`]). Not an edit of this user: it is not
+    /// announced and enters no history step.
+    ///
+    /// The undo history is cleared and the return value says whether there
+    /// was any to clear (RFC-0005 2.4, the first slice): stored inverses
+    /// address sheets by id and cells by index, and the rebuilt workbook has
+    /// ids of its own, so none of them can be kept without rebasing them.
+    /// The view is kept as far as it still fits: the active sheet and each
+    /// sheet's selection, clamped to the sheet's new size. The workbook is
+    /// then different from what is on disk, so it is dirty.
+    #[cfg(feature = "collab")]
+    pub fn replace_from_remote(&mut self, mut incoming: WorkbookState) -> bool {
+        let had_history = self.history.can_undo() || self.history.can_redo();
+        {
+            let mut state = self.state.borrow_mut();
+            for (old, new) in state.sheets.iter().zip(&incoming.sheets) {
+                let old = old.borrow();
+                let mut new = new.borrow_mut();
+                new.selected_row = old.selected_row.min(new.rows.saturating_sub(1));
+                new.selected_col = old.selected_col.min(new.cols.saturating_sub(1));
+                new.sel_end_row = old.sel_end_row.min(new.rows.saturating_sub(1));
+                new.sel_end_col = old.sel_end_col.min(new.cols.saturating_sub(1));
+            }
+            let active = state.active_sheet.min(incoming.sheets.len().saturating_sub(1));
+            std::mem::swap(&mut *state, &mut incoming);
+            // Each sheet's projection is refreshed from the engine by the switch.
+            let _ = state.switch_sheet(active);
+        }
+        self.history.clear();
+        self.names = (Vec::new(), Vec::new());
+        self.dirty = true;
+        self.notify();
+        had_history
     }
 
     /// Changes only when protection rejects a user operation. Callers compare

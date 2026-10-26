@@ -35,7 +35,9 @@ mod tests;
 
 #[cfg(feature = "collab")]
 pub use collab::{CollabError, ImportReport, Replica, SheetChange};
+#[cfg(feature = "collab")]
+pub use core::AppliedObserver;
 pub use core::WorkbookController;
 pub use format::BorderPreset;
-pub use ops::{apply, apply_all, blank_lines, Axis, CellContent, Line, Op, SheetImage, WorkbookImage};
+pub use ops::{apply, apply_all, blank_lines, diff_ops, Axis, CellContent, Line, Op, SheetImage, WorkbookImage};
 pub use state::WorkbookState;

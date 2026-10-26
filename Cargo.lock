@@ -5014,6 +5014,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "pangocairo",
+ "suite-collab",
  "suite-common",
  "tables-core",
  "tempfile",

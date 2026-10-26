@@ -460,3 +460,113 @@ fn a_delta_is_the_size_of_the_edit_not_of_the_workbook() {
         }
     }
 }
+
+// ---------------------------------------------------------------- the controller's side of a session
+
+use super::core::WorkbookController;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn set_cell(sheet: u32, row: usize, col: usize, input: &str) -> Op {
+    Op::SetCell { sheet, row, col, input: input.into() }
+}
+
+fn first_sheet(ctl: &WorkbookController) -> u32 {
+    ctl.state.borrow().sheets[0].borrow().sheet_id
+}
+
+/// Make `ctl` tell a list which ops each change applied.
+fn watch_applied(ctl: &mut WorkbookController) -> Rc<RefCell<Vec<Vec<Op>>>> {
+    let seen: Rc<RefCell<Vec<Vec<Op>>>> = Rc::default();
+    let sink = seen.clone();
+    ctl.observe_applied(Some(Box::new(move |_, ops| sink.borrow_mut().push(ops.to_vec()))));
+    seen
+}
+
+#[test]
+fn the_observer_hears_every_edit_undo_and_redo_with_the_ops_that_changed_the_workbook() {
+    let mut ctl = WorkbookController::new(20, 6).unwrap();
+    let sheet = first_sheet(&ctl);
+    let seen = watch_applied(&mut ctl);
+
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 1, 1, "7")]));
+    assert!(matches!(&seen.borrow()[0][..], [Op::SetCell { row: 1, col: 1, input, .. }] if input == "7"));
+
+    assert!(ctl.undo());
+    assert!(matches!(&seen.borrow()[1][..], [Op::SetCell { row: 1, col: 1, input, .. }] if input.is_empty()));
+    assert_eq!(ctl.state.borrow().cell_input(1, 1), "");
+
+    assert!(ctl.redo());
+    assert!(matches!(&seen.borrow()[2][..], [Op::SetCell { row: 1, col: 1, input, .. }] if input == "7"));
+    assert_eq!(seen.borrow().len(), 3);
+
+    // An edit that is refused is not announced: nothing changed.
+    ctl.set_read_only(true);
+    assert!(!ctl.apply_ops("Edit", vec![set_cell(sheet, 2, 2, "9")]));
+    assert!(!ctl.undo());
+    assert_eq!(seen.borrow().len(), 3, "a refused edit changed nothing and was not announced");
+    ctl.set_read_only(false);
+
+    // With no observer nothing is announced and nothing else changes.
+    ctl.observe_applied(None);
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 3, 3, "5")]));
+    assert_eq!(seen.borrow().len(), 3);
+}
+
+#[test]
+fn what_the_observer_hears_is_enough_to_keep_a_replica_equal_to_the_workbook() {
+    let mut ctl = WorkbookController::new(20, 6).unwrap();
+    let sheet = first_sheet(&ctl);
+    let replica = Rc::new(RefCell::new(Replica::new(1, &ctl.state.borrow())));
+    let sink = replica.clone();
+    ctl.observe_applied(Some(Box::new(move |state, ops| sink.borrow_mut().record(state, ops))));
+
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 0, 0, "hello"), set_cell(sheet, 4, 2, "=1+2")]));
+    let lines = blank_lines(&ctl.state.borrow(), 0, Axis::Rows, 2);
+    let insert = Op::Insert { sheet, axis: Axis::Rows, at: 1, lines, relinks: Vec::new(), merges: None };
+    assert!(ctl.apply_ops("Insert", vec![insert]));
+    assert!(ctl.undo());
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 5, 1, "x")]));
+
+    let (_, rebuilt) = Replica::from_updates(9, &replica.borrow().export_all()).unwrap();
+    assert_eq!(image(&rebuilt), image(&ctl.state.borrow()));
+}
+
+#[test]
+fn a_remote_workbook_replaces_the_state_keeps_the_view_and_clears_the_history() {
+    let mut ctl = WorkbookController::new(20, 6).unwrap();
+    let sheet = first_sheet(&ctl);
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 1, 1, "mine")]));
+    ctl.state.borrow().sheets[0].borrow_mut().select_cell(3, 2);
+    let seen = watch_applied(&mut ctl);
+
+    // What a peer's update does: the replica of this very workbook, edited by the peer.
+    let mut local = Replica::new(1, &ctl.state.borrow());
+    let (mut peer, mut peer_state) = local.fork(2).unwrap();
+    let peer_sheet = peer_state.sheets[0].borrow().sheet_id;
+    let ops = vec![set_cell(peer_sheet, 1, 2, "theirs")];
+    apply_all(&mut peer_state, &ops).unwrap();
+    peer.record(&peer_state, &ops);
+    local.merge_from(&peer).unwrap();
+    let incoming = local.rebuild().unwrap();
+
+    assert!(ctl.can_undo());
+    assert!(ctl.replace_from_remote(incoming), "there was history to clear, and it says so");
+    assert_eq!(ctl.state.borrow().cell_input(1, 1), "mine");
+    assert_eq!(ctl.state.borrow().cell_input(1, 2), "theirs");
+    let (row, col) = {
+        let state = ctl.state.borrow();
+        let sheet = state.sheet();
+        (sheet.selected_row, sheet.selected_col)
+    };
+    assert_eq!((row, col), (3, 2), "the selection stays where the user left it");
+    assert!(!ctl.can_undo() && !ctl.can_redo(), "the history addressed the old workbook");
+    assert!(ctl.is_dirty());
+    assert!(seen.borrow().is_empty(), "a remote change is not this user's edit: not announced");
+    assert!(!ctl.replace_from_remote(local.rebuild().unwrap()), "no history left to clear the second time");
+    // And the replaced workbook is an ordinary one: it edits, undoes and announces.
+    let sheet = first_sheet(&ctl);
+    assert!(ctl.apply_ops("Edit", vec![set_cell(sheet, 7, 0, "after")]));
+    assert!(ctl.undo());
+    assert_eq!(seen.borrow().len(), 2);
+}

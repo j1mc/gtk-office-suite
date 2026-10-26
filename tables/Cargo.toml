@@ -11,6 +11,15 @@ suite-common = { path = "../suite-common" }
 tables-core = { path = "../tables-core" }
 cairo-rs = { version = "0.22", features = ["png", "pdf"] }
 pangocairo = "0.22"
+# RFC-0005 option B: the shell speaks the sidecar's protocol over a pipe and
+# links no network stack. Optional, and only the `collab` feature turns it on.
+suite-collab = { path = "../suite-collab", optional = true }
+
+[features]
+# Collaboration (RFC-0005): the Collaborate menu, the status button and the
+# two-heads banner. Off by default; the default build does not contain it.
+default = []
+collab = ["tables-core/collab", "dep:suite-collab"]
 
 [[bin]]
 name = "tables"

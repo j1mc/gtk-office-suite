@@ -696,6 +696,8 @@ impl super::core::WorkbookController {
         };
         let Ok(inverses) = applied else { return false };
         self.record(description.into(), inverses);
+        #[cfg(feature = "collab")]
+        self.announce_applied(&ops);
         true
     }
 
