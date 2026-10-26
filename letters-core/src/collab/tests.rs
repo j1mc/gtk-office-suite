@@ -444,6 +444,25 @@ fn a_replica_that_joins_by_snapshot_edits_and_converges() {
     assert_eq!(a.doc.paragraphs, joiner.doc.paragraphs);
 }
 
+/// Two replicas in one process take each other's changes through
+/// `merge_from`, which is an `import_updates` of the delta: the dry run
+/// applies, and the report says what moved.
+#[test]
+fn replicas_in_one_process_merge_through_the_dry_run() {
+    let base = sample();
+    let (mut a, mut b) = peers(&base);
+    a.type_text(5, "!");
+    b.edit(Op::Mark { start: 0, end: 5, key: MarkKey::Italic, value: italic() });
+    let into_a = a.replica.merge_from(&b.replica).unwrap();
+    assert!(into_a.changed() && into_a.formatting && into_a.edits.is_empty(), "{into_a:?}");
+    let into_b = b.replica.merge_from(&a.replica).unwrap();
+    assert_eq!(into_b.edits, [TextEdit::Insert { at: 5, len: 1 }]);
+    let (da, db) = (a.replica.rebuild(&base).unwrap(), b.replica.rebuild(&base).unwrap());
+    assert_eq!(da, db);
+    assert!(da.paragraphs[0].runs[0].style.italic && sequence_text(&da).starts_with("Title!"));
+    assert!(!a.replica.merge_from(&b.replica).unwrap().changed(), "nothing left to take");
+}
+
 #[test]
 fn a_snapshot_that_is_not_a_letters_document_is_refused() {
     let other = LoroDoc::new();
