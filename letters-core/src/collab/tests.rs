@@ -255,7 +255,7 @@ fn two_replicas_typing_in_one_paragraph_converge_in_every_delivery_order() {
     }
     eprintln!("one keystroke is {} bytes of update", updates[0].len());
 
-    let mut reference: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut reference: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
     let mut pending_seen = false;
     for order in permutations(updates.len()) {
         let mut r = seed.fork(99).unwrap();
@@ -266,11 +266,13 @@ fn two_replicas_typing_in_one_paragraph_converge_in_every_delivery_order() {
         let text = sequence_text(&r.rebuild(&base).unwrap());
         assert!(text == "helloAAABBB world" || text == "helloBBBAAA world", "order {order:?}: {text}");
         let version = r.version_bytes();
+        let snapshot = r.export_snapshot().unwrap();
         match &reference {
-            None => reference = Some((document, version)),
-            Some((want_document, want_version)) => {
+            None => reference = Some((document, version, snapshot)),
+            Some((want_document, want_version, want_snapshot)) => {
                 assert_eq!(&document, want_document, "order {order:?}: not byte for byte the same document");
                 assert_eq!(&version, want_version, "order {order:?}: not the same version");
+                assert_eq!(&snapshot, want_snapshot, "order {order:?}: not byte for byte the same snapshot");
             }
         }
     }
@@ -672,7 +674,10 @@ fn a_refused_update_leaves_the_live_document_untouched() {
     });
     let report = a.replica.import_updates(&fine).unwrap();
     assert!(report.changed());
-    assert!(a.replica.paragraphs().unwrap()[0].runs.iter().any(|r| r.text.contains('Z') && r.style.bold));
+    // Where a text that was inserted into an empty document lands among the
+    // others is Loro's (by peer id): look at every paragraph.
+    let paragraphs = a.replica.paragraphs().unwrap();
+    assert!(paragraphs.iter().flat_map(|p| &p.runs).any(|r| r.text.contains('Z') && r.style.bold), "{paragraphs:?}");
 }
 
 // ------------------------------------------------------------------ offsets
