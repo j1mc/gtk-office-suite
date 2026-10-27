@@ -1,0 +1,132 @@
+name: flake-fix (temporary census of the fixed binding, delete before any PR)
+
+# Census of the dcp-matrix journey
+# `an_editor_granted_right_after_creation_reads_the_first_version_at_once`
+# (one unexplained failure, run 40245021774 job 121324670587, Synapse 1.163.2).
+# Runs on push to the spike/flake-matrix branch only.
+on:
+  push:
+    branches: [spike/flake-matrix-fix]
+    paths:
+      - '.github/workflows/flake-fix.yml'
+      - 'tools/collab-spike/dcp-matrix/**'
+
+concurrency:
+  group: flake-fix-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+  # The Synapse of the failing run: Synapse/1.163.2, image id sha256:e0d446e9d9f2e0db07dc093219aee61ae32315a1672f81cdcaa44e21e58325a2
+  SYNAPSE_IMAGE: docker.io/matrixdotorg/synapse:v1.163.2
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tools/collab-spike
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: tools/collab-spike
+          shared-key: collab-spike-matrix
+          save-if: false
+      - name: Build the journeys test binary
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cargo test -p dcp-matrix --locked --test journeys --no-run --message-format=json > build.json
+          exe="$(jq -r 'select(.reason=="compiler-artifact" and .profile.test==true and .target.name=="journeys") | .executable' build.json | tail -1)"
+          echo "journeys: $exe"
+          cp "$exe" "$GITHUB_WORKSPACE/bin/journeys"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: flake-bin
+          path: bin/
+          retention-days: 3
+
+  census:
+    needs: build
+    name: census ${{ matrix.profile }} #${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [relaxed, default]
+        shard: [1, 2, 3, 4]
+    env:
+      PROFILE: ${{ matrix.profile }}
+      COLD: '15'
+      WARM: '40'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: flake-bin
+          path: bin
+      - name: Census
+        run: |
+          set +e -uo pipefail
+          chmod +x bin/journeys
+          S="$PWD/tools/collab-spike/scripts"
+          BIN="$PWD/bin/journeys"
+          T=an_editor_granted_right_after_creation_reads_the_first_version_at_once
+          mkdir -p out
+          : > out/results.tsv
+          tally() { # tally <phase> <log>
+            grep -ao 'test [a-z_0-9]* \.\.\. \(ok\|FAILED\)' "$2" | sed -E "s/^test ([a-z_0-9]+) \.\.\. (ok|FAILED)/$1\t\1\t\2/" >> out/results.tsv
+          }
+          # Cold: a fresh Synapse for every invocation of the whole journeys binary,
+          # exactly what the matrix job does (10 tests in parallel).
+          for i in $(seq 1 "$COLD"); do
+            eval "$("$S/synapse-up.sh" "$PROFILE" 2> out/cold-$i.up.log)"
+            echo "cold $i: $DCP_SYNAPSE_VERSION image $DCP_SYNAPSE_IMAGE_ID"
+            "$BIN" --nocapture > out/cold-$i.log 2>&1
+            docker logs "$DCP_SYNAPSE_CONTAINER" > out/cold-$i.synapse.log 2>&1
+            "$S/synapse-down.sh" "$PROFILE"
+            tally cold out/cold-$i.log
+          done
+          # Warm: one Synapse; the whole binary WARM times, then only the target journey WARM times.
+          eval "$("$S/synapse-up.sh" "$PROFILE" 2> out/warm.up.log)"
+          echo "warm: $DCP_SYNAPSE_VERSION image $DCP_SYNAPSE_IMAGE_ID"
+          for i in $(seq 1 "$WARM"); do
+            "$BIN" --nocapture > out/warmfull-$i.log 2>&1
+            tally warm-full out/warmfull-$i.log
+          done
+          for i in $(seq 1 "$WARM"); do
+            "$BIN" --exact "$T" --nocapture > out/warmone-$i.log 2>&1
+            tally warm-one out/warmone-$i.log
+          done
+          docker logs "$DCP_SYNAPSE_CONTAINER" > out/warm.synapse.log 2>&1
+          "$S/synapse-down.sh" "$PROFILE"
+          # Summary
+          {
+            echo "### census $PROFILE shard ${{ matrix.shard }}"
+            echo '| phase | test | runs | failed |'
+            echo '|---|---|---|---|'
+            awk -F'\t' '{n[$1"\t"$2]++; if ($3=="FAILED") f[$1"\t"$2]++} END {for (k in n) {split(k,a,"\t"); printf "| %s | %s | %d | %d |\n", a[1], a[2], n[k], f[k]+0}}' out/results.tsv | sort
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # Keep only the logs of invocations in which the target journey failed.
+          for f in out/cold-*.log out/warmfull-*.log out/warmone-*.log; do
+            if ! grep -aq "$T \.\.\. FAILED" "$f"; then rm -f "$f"; [ "${f#out/cold-}" != "$f" ] && rm -f "${f%.log}.synapse.log"; fi
+          done
+          gzip -f out/*.synapse.log 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: census-${{ matrix.profile }}-${{ matrix.shard }}
+          path: out/
+          retention-days: 7
